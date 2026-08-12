@@ -966,7 +966,7 @@ def _under(root: Path, said: str) -> Path:
     return where if where.is_absolute() else root / where
 
 
-@flow
+@flow(name="gen-idea")
 def gen_idea(agents: Drafting, task: str, config: Idea | None = None) -> None:
     """Opens a loose idea into a repo-grounded draft.
 
@@ -984,7 +984,7 @@ def gen_idea(agents: Drafting, task: str, config: Idea | None = None) -> None:
     _idea(agents.drafter.new(), task, config or Idea(), Path.cwd())
 
 
-@flow
+@flow(name="gen-plan")
 def gen_plan(agents: Planning, task: str, config: Plan | None = None) -> None:
     """Turns a draft into a plan the writing and the reading side have converged on.
 
@@ -1005,7 +1005,7 @@ def gen_plan(agents: Planning, task: str, config: Plan | None = None) -> None:
     _plan(agents, agents.planner.new(), task, setting, root, draft)
 
 
-@flow
+@flow(name="rlcr")
 def rlcr(agents: Building, task: str, config: Rlcr | None = None) -> None:  # noqa: ARG001
     """Builds the plan under review until nothing is left to say.
 

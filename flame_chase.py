@@ -7,8 +7,10 @@ hmz exec -f official/flame_chase \
 import time
 
 from hmz.agents import AgentBase
+from hmz.flows import flow
 
 
+@flow
 def run(agents: tuple[AgentBase, AgentBase], task: str) -> None:
     while True:
         for agent in agents:

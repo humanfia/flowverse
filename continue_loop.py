@@ -6,8 +6,10 @@ hmz exec -f official/continue_loop -a kimi/kimi-code/k3:high "$(cat TASK.md)"
 import time
 
 from hmz.agents import AgentBase
+from hmz.flows import flow
 
 
+@flow
 def run(agents: tuple[AgentBase], task: str) -> None:
     (agent,) = agents
     session = agent.new()

@@ -10,7 +10,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from hmz import models
 from hmz.agents import AgentBase, AgentConfig, Event, SessionBase, Usage
+from hmz.backends import Model
 
 import fixed_juice_ralph
 
@@ -76,6 +78,24 @@ class _Enough(Exception):  # noqa: N818  -- the way out of a loop that has no ot
 #: How many rounds a test runs before the wait ends it.
 _ROUNDS = 4
 
+#: What Claude Code says it runs, as the account these tests drive it as. Written down here
+#: rather than read from a list humanize keeps, because humanize keeps none: what a CLI runs
+#: is asked of that CLI and kept per account, so a test that governs an agent along its
+#: model's ladder has to say what that account was told.
+_SAID = (
+    Model(
+        "claude-opus-5", ("ultracode", "max", "xhigh", "high", "medium", "low"), True
+    ),
+    Model("claude-sonnet-5", ("max", "xhigh", "high", "medium", "low"), False),
+)
+
+
+@pytest.fixture(autouse=True)
+def _catalogue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gives the account a catalogue, which is where the ladder is read from."""
+    monkeypatch.setenv("HUMANIZE_HOME", str(tmp_path / "humanize-home"))
+    models._write(models.where("claude"), list(_SAID))
+
 
 @pytest.fixture
 def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
@@ -98,7 +118,7 @@ def _run(agent: _Scripted, **setting: float) -> None:
 
 
 def test_the_ladder_is_the_one_the_agents_own_model_takes() -> None:
-    """Read out of `hmz.backends`, which is where every other reader of it looks."""
+    """Read out of what that CLI said it runs, which is where every other reader looks."""
     rungs = fixed_juice_ralph.ladder(_Scripted([]))
 
     assert rungs[0] == "ultracode"  # hardest first, as every effort list here is
@@ -106,8 +126,8 @@ def test_the_ladder_is_the_one_the_agents_own_model_takes() -> None:
     assert rungs.index("high") < rungs.index("low")
 
 
-def test_a_model_nobody_wrote_down_is_offered_its_backends_own_ladder() -> None:
-    """An account has models this list does not, and they take the same efforts."""
+def test_a_model_the_account_never_named_is_offered_the_ladder_it_did() -> None:
+    """A model that arrived since the account was asked takes its backend's own efforts."""
     agent = _Scripted([], model="claude-something-new")
 
     assert fixed_juice_ralph.ladder(agent)[0] == "ultracode"

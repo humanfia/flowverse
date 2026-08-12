@@ -25,8 +25,9 @@ is the sort of thing that changes between projects, and this is one answer to it
 
 import time
 
-from hmz import backends
+from hmz import models
 from hmz.agents import SWARM, AgentBase
+from hmz.flows import flow
 from pydantic import BaseModel, Field
 
 
@@ -65,11 +66,14 @@ class Config(BaseModel):
 def ladder(agent: AgentBase) -> tuple[str, ...]:
     """The efforts this agent's model takes, hardest first.
 
-    Read out of `hmz.backends`, which is where every other reader of it looks. A model
-    that is not written down there -- one an account has and this list does not -- is offered
-    its backend's own ladder, since every model of a backend takes the same efforts unless
-    that backend says otherwise; a backend nobody knows leaves the agent at what it was
-    configured with, which is a loop with nothing to turn.
+    Read out of what that CLI last said it runs as this agent's account, which is where every
+    other reader of it looks: nothing is written down about a model here or anywhere else in
+    humanize, since a list of them is wrong the day a CLI ships one. A model the account has
+    never been asked about -- one nobody has run a `hmz providers` against, one that arrived
+    since -- is offered the first ladder that account did name, every model of a backend
+    taking the same efforts unless that backend says otherwise; an account that has said
+    nothing at all leaves the agent at what it was configured with, which is a loop with
+    nothing to turn.
 
     Args:
       agent: The agent whose model it is.
@@ -77,14 +81,14 @@ def ladder(agent: AgentBase) -> tuple[str, ...]:
     Returns:
       One effort per rung, hardest first, or just the configured one where none is known.
     """
-    profile = backends.named(agent.backend)
-    if profile is None or not profile.models:
+    offered = models.offered(agent.backend, agent.config.provider)
+    if not offered:
         return (agent.config.effort,)
     named = agent.config.model
-    for model in profile.models:
+    for model in offered:
         if model.name == named:
             return model.efforts
-    return profile.models[0].efforts
+    return offered[0].efforts
 
 
 def _at(agent: AgentBase, rungs: tuple[str, ...]) -> int:
@@ -106,6 +110,7 @@ def _at(agent: AgentBase, rungs: tuple[str, ...]) -> int:
     return len(rungs) // 2
 
 
+@flow
 def run(agents: tuple[AgentBase], task: str, config: Config | None = None) -> None:
     """Runs the loop, holding the agent to the answer size it was set up with.
 

@@ -18,6 +18,7 @@ import time
 from typing import NamedTuple
 
 from hmz.agents import AgentBase
+from hmz.flows import flow
 from pydantic import BaseModel, Field
 
 
@@ -62,6 +63,7 @@ Task (TASK.md):
 """
 
 
+@flow
 def run(agents: Agents, task: str) -> None:
     # The actor remembers, and a session held across the rounds is how.
     working = agents.actor.new()

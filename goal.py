@@ -6,8 +6,10 @@ hmz exec -f official/goal -a claude/claude-opus-4-8:max "$(cat TASK.md)"
 import time
 
 from hmz.agents import AgentBase
+from hmz.flows import flow
 
 
+@flow
 def run(agents: tuple[AgentBase], task: str) -> None:
     (agent,) = agents
     while True:
