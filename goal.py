@@ -4,13 +4,20 @@ hmz exec -f official/goal -a claude/claude-opus-4-8:max "$(cat TASK.md)"
 """
 
 import time
+from typing import Annotated, NamedTuple
 
-from hmz.agents import AgentBase
+from hmz.agents import AgentBase, Goal
 from hmz.flows import flow
 
 
+class Agents(NamedTuple):
+    """The one this drives, which is run under a goal rather than by turns."""
+
+    worker: Annotated[AgentBase, Goal]
+
+
 @flow
-def run(agents: tuple[AgentBase], task: str) -> None:
+def run(agents: Agents, task: str) -> None:
     (agent,) = agents
     while True:
         # A turn here is a goal: the agent keeps itself going until it has met the task, and
