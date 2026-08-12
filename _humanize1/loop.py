@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from humanize.agents import Verdict
+from hmz.agents import Verdict
 
 from . import blocks, prompts
 from .prompts import render
@@ -32,8 +32,8 @@ from .prompts import render
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from humanize.agents import AgentBase, Occasion, SessionBase
-    from humanize.backends import Profile
+    from hmz.agents import AgentBase, Occasion, SessionBase
+    from hmz.backends import Profile
     from pydantic import BaseModel
 
 __all__ = [
@@ -1294,7 +1294,7 @@ def _open_tasks(agent: AgentBase, occasion: Occasion) -> list[str]:
       One line per task still open, as the plugin lists them, and nothing at all where the
       backend keeps none of this where it can be read.
     """
-    from humanize import backends
+    from hmz import backends
 
     profile = backends.named(agent.backend)
     if profile is None or not occasion.session:

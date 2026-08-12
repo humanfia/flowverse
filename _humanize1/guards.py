@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from humanize.agents import Verdict
+from hmz.agents import Verdict
 
 from . import blocks
 from .prompts import render
@@ -27,7 +27,7 @@ from .prompts import render
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from humanize.agents import Occasion
+    from hmz.agents import Occasion
 
     from .loop import Loop
 

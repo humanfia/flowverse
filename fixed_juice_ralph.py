@@ -25,8 +25,8 @@ is the sort of thing that changes between projects, and this is one answer to it
 
 import time
 
-from humanize import backends
-from humanize.agents import SWARM, AgentBase
+from hmz import backends
+from hmz.agents import SWARM, AgentBase
 from pydantic import BaseModel, Field
 
 
@@ -65,7 +65,7 @@ class Config(BaseModel):
 def ladder(agent: AgentBase) -> tuple[str, ...]:
     """The efforts this agent's model takes, hardest first.
 
-    Read out of `humanize.backends`, which is where every other reader of it looks. A model
+    Read out of `hmz.backends`, which is where every other reader of it looks. A model
     that is not written down there -- one an account has and this list does not -- is offered
     its backend's own ladder, since every model of a backend takes the same efforts unless
     that backend says otherwise; a backend nobody knows leaves the agent at what it was

@@ -12,7 +12,7 @@ import subprocess
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from humanize.agents import (
+from hmz.agents import (
     EVERYWHERE,
     AgentBase,
     AgentConfig,

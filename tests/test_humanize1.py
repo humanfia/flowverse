@@ -11,9 +11,9 @@ import os
 from typing import TYPE_CHECKING
 
 import pytest
-from humanize.agents import HumanAgent, Moment, Occasion, Question
-from humanize.flows import held
-from humanize.runner import configures, drives, wanted
+from hmz.agents import HumanAgent, Moment, Occasion, Question
+from hmz.flows import held
+from hmz.runner import configures, drives, wanted
 
 import humanize1
 from _humanize1 import guards, loop, prompts
@@ -178,7 +178,7 @@ def test_a_failed_turn_is_taken_again_and_only_that_turn(
     import subprocess as sub
     from typing import cast
 
-    from humanize.agents import SessionBase
+    from hmz.agents import SessionBase
 
     def instant(_seconds: float) -> None:
         """The wait between rounds, taken out of the test."""

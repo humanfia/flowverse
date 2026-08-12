@@ -5,7 +5,7 @@ hmz exec -f official/continue_loop -a kimi/kimi-code/k3:high "$(cat TASK.md)"
 
 import time
 
-from humanize.agents import AgentBase
+from hmz.agents import AgentBase
 
 
 def run(agents: tuple[AgentBase], task: str) -> None:

@@ -12,7 +12,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from humanize.agents import AgentBase, AgentConfig, Event, SessionBase
+from hmz.agents import AgentBase, AgentConfig, Event, SessionBase
 
 import rlar
 

@@ -17,7 +17,7 @@ says the work is done and a review that says the words "it is done" are not the 
 import time
 from typing import NamedTuple
 
-from humanize.agents import AgentBase
+from hmz.agents import AgentBase
 from pydantic import BaseModel, Field
 
 

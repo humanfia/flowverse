@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from humanize.agents import AgentBase, AgentConfig, Event, SessionBase, Usage
+from hmz.agents import AgentBase, AgentConfig, Event, SessionBase, Usage
 
 import fixed_juice_ralph
 
@@ -98,7 +98,7 @@ def _run(agent: _Scripted, **setting: float) -> None:
 
 
 def test_the_ladder_is_the_one_the_agents_own_model_takes() -> None:
-    """Read out of `humanize.backends`, which is where every other reader of it looks."""
+    """Read out of `hmz.backends`, which is where every other reader of it looks."""
     rungs = fixed_juice_ralph.ladder(_Scripted([]))
 
     assert rungs[0] == "ultracode"  # hardest first, as every effort list here is
@@ -206,7 +206,7 @@ def test_an_answer_size_of_nothing_is_refused_where_it_is_set_up() -> None:
 
 def test_the_flow_says_how_many_agents_it_drives_and_what_it_takes() -> None:
     """Which is what a command line reads before it starts one, and what `/config` asks."""
-    from humanize.runner import configures, drives
+    from hmz.runner import configures, drives
 
     where = fixed_juice_ralph.__file__
 
@@ -235,7 +235,7 @@ def test_the_governor_moves_a_real_agents_effort(
     A target far above what any turn of this comes out with, so the loop asks for the next
     rung up each round -- which is the direction that has to reach a real CLI.
     """
-    from humanize.agents import ClaudeCodeAgent, ClaudeCodeAgentConfig
+    from hmz.agents import ClaudeCodeAgent, ClaudeCodeAgentConfig
 
     monkeypatch.chdir(
         tmp_path

@@ -64,9 +64,9 @@ from typing import Annotated, Literal, NamedTuple
 
 # Under a name of its own: what a person is put is one of these, and the shape of the
 # quiz below has a `Question` of its own that is a field of the model the reviewer fills.
-from humanize.agents import AgentBase, HumanAgent, Moment, SessionBase
-from humanize.agents import Question as Asking
-from humanize.flows import flow
+from hmz.agents import AgentBase, HumanAgent, Moment, SessionBase
+from hmz.agents import Question as Asking
+from hmz.flows import flow
 from pydantic import BaseModel, Field, model_validator
 
 from _humanize1 import guards, loop, planning, prompts

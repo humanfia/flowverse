@@ -51,7 +51,7 @@ it. `hmz exec -f official/<flow> --help` says the same thing at a command line.
 
 ## Contributing
 
-A flow is one file that imports nothing of humanize but `humanize.agents`, and holds a
+A flow is one file that imports nothing of humanize but `hmz.agents`, and holds a
 `run(agents, task)` -- or several entry points marked with `@flow`, which is what makes one
 file three flows. Tests live under `tests/`, and run against humanize itself:
 

@@ -6,7 +6,7 @@ hmz exec -f official/flame_chase \
 
 import time
 
-from humanize.agents import AgentBase
+from hmz.agents import AgentBase
 
 
 def run(agents: tuple[AgentBase, AgentBase], task: str) -> None:
