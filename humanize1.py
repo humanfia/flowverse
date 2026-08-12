@@ -548,8 +548,12 @@ def _plan(
         raise ValueError(
             f"{where}: output file already exists - please choose another path"
         )
-    if not where.parent.is_dir():
-        raise ValueError(f"{where.parent}: output directory does not exist")
+    # Made rather than demanded, as the phase before this one makes the directory it writes
+    # its draft into: a plan is what this phase is for, and a repository with no `docs/` in
+    # it yet is not a reason to refuse to write one.
+    where.parent.mkdir(parents=True, exist_ok=True)
+    if not os.access(where.parent, os.W_OK):
+        raise ValueError(f"{where.parent}: no write permission to output directory")
 
     read = answered(
         agents.analyst,
