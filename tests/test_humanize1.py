@@ -167,6 +167,43 @@ def test_a_setting_outside_what_the_plugin_takes_is_refused(
 # ------------------------------------------------------------------------------------
 
 
+def test_a_failed_turn_is_taken_again_and_only_that_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A round is hours and a review is one question about it, so they retry separately.
+
+    Letting a failed review send the round back would pay for the expensive half twice to
+    recover from the cheap half.
+    """
+    import subprocess as sub
+    from typing import cast
+
+    from humanize.agents import SessionBase
+
+    def instant(_seconds: float) -> None:
+        """The wait between rounds, taken out of the test."""
+
+    monkeypatch.setattr("time.sleep", instant)
+    taken: list[str] = []
+
+    class _Flaky:
+        def __call__(self, prompt: str, *, suppress: bool = False) -> str:
+            taken.append(prompt)
+            if len(taken) <= 2:
+                if not suppress:
+                    # The flow has to ask for the turn suppressed, or a loop that runs for
+                    # days ends on the first turn that failed.
+                    raise sub.CalledProcessError(1, ["claude"])
+                return ""  # what a suppressed turn that failed answers with
+            # Exited clean having said nothing, which is not an answer either: forwarding it
+            # would spend a round asking the other side to reply to silence.
+            return "" if len(taken) == 3 else "answered"
+
+    said, _ = loop.spoken(cast("SessionBase", _Flaky()), "do it")
+    assert said == "answered"
+    assert taken == ["do it"] * 4  # the same turn, four times, and no other
+
+
 @pytest.mark.parametrize(
     ("said", "found"),
     [
