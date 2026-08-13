@@ -10,7 +10,7 @@ from hmz.agents import AgentBase
 from hmz.flows import flow
 
 
-@flow
+@flow(goals=False)
 def run(agents: tuple[AgentBase, AgentBase], task: str) -> None:
     while True:
         for agent in agents:
