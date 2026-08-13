@@ -5,13 +5,20 @@ hmz exec -f official/flame_chase \
 """
 
 import time
+from typing import Annotated
 
-from hmz.agents import AgentBase
+from hmz.agents import AgentBase, GoalsDefault
 from hmz.flows import flow
 
 
-@flow(goals=False)
-def run(agents: tuple[AgentBase, AgentBase], task: str) -> None:
+@flow
+def run(
+    agents: tuple[
+        Annotated[AgentBase, GoalsDefault(False)],
+        Annotated[AgentBase, GoalsDefault(False)],
+    ],
+    task: str,
+) -> None:
     while True:
         for agent in agents:
             agent(task, suppress=True)  # each agent reads the repository, not a history
