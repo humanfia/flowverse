@@ -7,15 +7,15 @@ hmz exec -f official/flame_chase \
 import time
 from typing import Annotated
 
-from hmz.agents import AgentBase, GoalsDefault
+from hmz.agents import AgentBase, AgentDefaults
 from hmz.flows import flow
 
 
 @flow
 def run(
     agents: tuple[
-        Annotated[AgentBase, GoalsDefault(False)],
-        Annotated[AgentBase, GoalsDefault(False)],
+        Annotated[AgentBase, AgentDefaults(goals=False)],
+        Annotated[AgentBase, AgentDefaults(goals=False)],
     ],
     task: str,
 ) -> None:
