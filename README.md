@@ -2,10 +2,11 @@
 
 > The flows humanize offers but does not ship.
 
-A flowverse is a git repository of [humanize](https://github.com/humanfia/humanize) flows: one
-`.py` file per flow, and whatever they import beside them under names that start with an
-underscore. This is the official one. It is offered from the start, under the name `official`,
-and is fetched the first time somebody runs one of its flows.
+A flowverse is a git repository with a `flows/` directory of
+[humanize](https://github.com/humanfia/humanize) flows in it: one `.py` file per flow, and
+whatever they import beside them under names that start with an underscore. Nothing outside
+that directory is read. This is the official one. It is offered from the start, under the name
+`official`, and is fetched the first time somebody runs one of its flows.
 
 ## Table of Contents
 
@@ -51,7 +52,16 @@ it. `hmz exec -f official/<flow> --help` says the same thing at a command line.
 
 ## Contributing
 
-A flow is one file that imports nothing of humanize but `hmz.agents`, and holds a
+```
+flowverse/
+├── flows/            what humanize reads, and the only thing it reads
+│   ├── rlar.py       →  official/rlar
+│   ├── humanize1.py  →  official/humanize1:gen-idea, :gen-plan, :rlcr
+│   └── _humanize1/   not a flow; what humanize1.py imports
+└── tests/            this repository's own, run against humanize itself
+```
+
+A flow is one file in `flows/` that imports nothing of humanize but `hmz.agents`, and holds a
 `run(agents, task)` -- or several entry points marked with `@flow`, which is what makes one
 file three flows. Tests live under `tests/`, and run against humanize itself:
 

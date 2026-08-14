@@ -1,7 +1,8 @@
 [project]
-# Not a package: a flowverse is a directory of flows, each of which humanize runs by
-# path. This file is here for what checks them -- the linter, the type checker and the
-# tests -- and for the one dependency they all have, which is humanize itself.
+# Not a package: a flowverse is a repository with a `flows/` directory in it, each flow
+# of which humanize runs by path. This file is here for what checks them -- the linter,
+# the type checker and the tests -- and for the one dependency they all have, which is
+# humanize itself. Nothing here is read by humanize: only `flows/` is.
 name = "flowverse"
 version = "0.1.0"
 description = "The flows humanize offers but does not ship"
@@ -26,9 +27,17 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = ["--strict-markers", "--strict-config", "-ra"]
+# humanize runs a flow with its own directory on `sys.path`, so a flow may import what
+# came with it -- `_humanize1`, here. A test imports the flow itself, so it needs that
+# same directory, and `flows/` is where the flows are.
+pythonpath = ["flows"]
 
 [tool.ruff]
 line-length = 88
+# Where a module imported by name lives: `flows/`, which is what humanize puts on
+# `sys.path` while it runs one, and so what a flow importing `_humanize1` -- or a test
+# importing the flow -- is reaching for. Without it they sort as somebody else's.
+src = [".", "flows"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -66,7 +75,11 @@ ignore = [
 # them -- how the flow loops, what each agent is for, and the line that starts it.
 # What a flow prints is what it says: the interface captures everything printed under
 # it into the transcript, so a warning a flow has to give is a `print`.
-"*.py" = ["D103", "T201"]
+# `flows/` is a directory of flows rather than a package: humanize runs what is in it
+# by path, so there is nothing for an `__init__.py` to do.
+"flows/**" = ["D103", "INP001", "T201"]
+# pytest's hooks: what each is called and when it runs is pytest's to document.
+"conftest.py" = ["D103"]
 "tests/**" = [
     "S101",    # an assert is what a test is
     "SLF001",  # a test reaches for what it tests, private or not
@@ -94,6 +107,12 @@ reportUnnecessaryTypeIgnoreComment = "error"
 
 [[tool.pyright.executionEnvironments]]
 root = "tests"
-extraPaths = ["."]
+# A test imports the flow it tests, which is where a flow's own imports are resolved
+# from too: `flows/` is on the path for the same reason humanize puts it there.
+extraPaths = [".", "flows"]
 reportPrivateUsage = "none"
 reportUnusedFunction = "none"
+
+[[tool.pyright.executionEnvironments]]
+root = "flows"
+extraPaths = ["flows"]
