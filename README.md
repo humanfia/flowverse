@@ -3,9 +3,10 @@
 > The flows humanize offers but does not ship.
 
 A flowverse is a git repository with a `flows/` directory of
-[humanize](https://github.com/humanfia/humanize) flows in it: one directory per flow, holding
-the `__init__.py` that is the flow, whatever it imports beside it, and the `skills/` it brings.
-Nothing outside that directory is read. This is the official one. It is offered from the start,
+[humanize](https://github.com/humanfia/humanize) flows in it. A flow is a module, in either of
+its two shapes: a directory holding the `__init__.py` that is the flow, whatever it imports
+beside it and the `skills/` it brings, or a single `.py` file for one that needs neither.
+Nothing outside `flows/` is read. This is the official one. It is offered from the start,
 under the name `official`, and is fetched the first time somebody runs one of its flows.
 
 ## Table of Contents
@@ -66,9 +67,10 @@ flowverse/
 
 A flow is one directory in `flows/` whose `__init__.py` imports nothing of humanize but
 `hmz.agents` and holds a `run(agents, task)` -- or several entry points marked with `@flow`,
-which is what makes one flow three flows. Everything it needs lives inside that directory, so
-a flow can be copied, forked and edited whole: `f` on it in humanize's `/flow` menu writes a
-copy into `.humanize/flows/` for you to change.
+which is what makes one flow three flows. A flow that brings nothing with it may be a single
+`.py` file instead. Everything a flow needs lives inside its own directory, so it can be
+copied, forked and edited whole: `f` on it in humanize's `/flow` menu writes a copy into
+`.humanize/flows/` for you to change.
 
 The skills in a flow's `skills/` are mounted onto every session its agents open, in the layout
 every one of these CLIs already reads a skill in -- a directory apiece, each holding a
