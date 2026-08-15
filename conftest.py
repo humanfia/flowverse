@@ -3,10 +3,10 @@
 `pytest_addoption` is honoured only in a root conftest, so `--run-agents` lives here rather
 than beside the tests it gates; the `agent` marker it keys on is registered below.
 
-The import path the tests need is `flows/`, and that is set where the rest of the run is, in
-`pyproject.toml`: humanize runs a flow by path with its own directory on `sys.path` while it
-does, so a flow may import what came with it -- `_humanize1`, here -- and a test that imports
-the flow needs that directory for the same reason.
+The import paths the tests need are `flows/` and each flow's own directory, and they are set
+where the rest of the run is, in `pyproject.toml`: humanize runs a flow by path with both on
+`sys.path` while it does, so a flow may import what came inside it -- `_humanize1`, in
+`flows/humanize1/` -- and a test that imports the flow needs them for the same reason.
 """
 
 from __future__ import annotations

@@ -12,6 +12,11 @@ actor about it. The second is the actor's next prompt, word for word, so what th
 noticed is what the actor hears; the first is what ends the loop. Both are read off the object
 the reviewer is held to rather than off a marker at the end of a paragraph, so a review that
 says the work is done and a review that says the words "it is done" are not the same thing.
+
+The flow brings one skill, `skills/review-notes`, which is mounted onto every session either
+agent opens: how to read a round of work against the repository it landed in, and how to write
+the review the actor is then handed. It is the flow's rather than the machine's, so a fork of
+this flow that wants its reviews written differently edits that file and runs.
 """
 
 import time

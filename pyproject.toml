@@ -27,17 +27,18 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = ["--strict-markers", "--strict-config", "-ra"]
-# humanize runs a flow with its own directory on `sys.path`, so a flow may import what
-# came with it -- `_humanize1`, here. A test imports the flow itself, so it needs that
-# same directory, and `flows/` is where the flows are.
-pythonpath = ["flows"]
+# humanize runs a flow with its own directory on `sys.path` and with the directory the
+# flows are in on it too, so a flow may import what came inside it -- `_humanize1`, in
+# `flows/humanize1/` -- and a test that imports the flow needs both for the same reason.
+pythonpath = ["flows", "flows/humanize1"]
 
 [tool.ruff]
 line-length = 88
-# Where a module imported by name lives: `flows/`, which is what humanize puts on
-# `sys.path` while it runs one, and so what a flow importing `_humanize1` -- or a test
-# importing the flow -- is reaching for. Without it they sort as somebody else's.
-src = [".", "flows"]
+# Where a module imported by name lives: the flow's own directory and the directory the
+# flows are in, which are what humanize puts on `sys.path` while it runs one -- and so
+# what a flow importing `_humanize1`, or a test importing the flow, is reaching for.
+# Without them they sort as somebody else's.
+src = [".", "flows", "flows/humanize1"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -71,12 +72,12 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# A flow is a module with its entry points in it, and the module docstring is about
-# them -- how the flow loops, what each agent is for, and the line that starts it.
-# What a flow prints is what it says: the interface captures everything printed under
-# it into the transcript, so a warning a flow has to give is a `print`.
-# `flows/` is a directory of flows rather than a package: humanize runs what is in it
-# by path, so there is nothing for an `__init__.py` to do.
+# A flow is a directory whose `__init__.py` holds its entry points, and that module's
+# docstring is about them -- how the flow loops, what each agent is for, and the line
+# that starts it. What a flow prints is what it says: the interface captures everything
+# printed under it into the transcript, so a warning a flow has to give is a `print`.
+# `flows/` is a directory of flows rather than a package: humanize runs each of them by
+# path, so there is nothing above them for an `__init__.py` to do.
 "flows/**" = ["D103", "INP001", "T201"]
 # pytest's hooks: what each is called and when it runs is pytest's to document.
 "conftest.py" = ["D103"]
@@ -108,11 +109,11 @@ reportUnnecessaryTypeIgnoreComment = "error"
 [[tool.pyright.executionEnvironments]]
 root = "tests"
 # A test imports the flow it tests, which is where a flow's own imports are resolved
-# from too: `flows/` is on the path for the same reason humanize puts it there.
-extraPaths = [".", "flows"]
+# from too: both are on the path for the same reason humanize puts them there.
+extraPaths = [".", "flows", "flows/humanize1"]
 reportPrivateUsage = "none"
 reportUnusedFunction = "none"
 
 [[tool.pyright.executionEnvironments]]
 root = "flows"
-extraPaths = ["flows"]
+extraPaths = ["flows", "flows/humanize1"]

@@ -3,10 +3,10 @@
 > The flows humanize offers but does not ship.
 
 A flowverse is a git repository with a `flows/` directory of
-[humanize](https://github.com/humanfia/humanize) flows in it: one `.py` file per flow, and
-whatever they import beside them under names that start with an underscore. Nothing outside
-that directory is read. This is the official one. It is offered from the start, under the name
-`official`, and is fetched the first time somebody runs one of its flows.
+[humanize](https://github.com/humanfia/humanize) flows in it: one directory per flow, holding
+the `__init__.py` that is the flow, whatever it imports beside it, and the `skills/` it brings.
+Nothing outside that directory is read. This is the official one. It is offered from the start,
+under the name `official`, and is fetched the first time somebody runs one of its flows.
 
 ## Table of Contents
 
@@ -54,16 +54,33 @@ it. `hmz exec -f official/<flow> --help` says the same thing at a command line.
 
 ```
 flowverse/
-├── flows/            what humanize reads, and the only thing it reads
-│   ├── rlar.py       →  official/rlar
-│   ├── humanize1.py  →  official/humanize1:gen-idea, :gen-plan, :rlcr
-│   └── _humanize1/   not a flow; what humanize1.py imports
-└── tests/            this repository's own, run against humanize itself
+├── flows/                   what humanize reads, and the only thing it reads
+│   ├── rlar/                →  official/rlar
+│   │   ├── __init__.py         the flow itself
+│   │   └── skills/             what it brings: one directory per skill, each a SKILL.md
+│   └── humanize1/           →  official/humanize1:gen-idea, :gen-plan, :rlcr
+│       ├── __init__.py
+│       └── _humanize1/         not a flow; what the flow beside it imports
+└── tests/                   this repository's own, run against humanize itself
 ```
 
-A flow is one file in `flows/` that imports nothing of humanize but `hmz.agents`, and holds a
-`run(agents, task)` -- or several entry points marked with `@flow`, which is what makes one
-file three flows. Tests live under `tests/`, and run against humanize itself:
+A flow is one directory in `flows/` whose `__init__.py` imports nothing of humanize but
+`hmz.agents` and holds a `run(agents, task)` -- or several entry points marked with `@flow`,
+which is what makes one flow three flows. Everything it needs lives inside that directory, so
+a flow can be copied, forked and edited whole: `f` on it in humanize's `/flow` menu writes a
+copy into `.humanize/flows/` for you to change.
+
+The skills in a flow's `skills/` are mounted onto every session its agents open, in the layout
+every one of these CLIs already reads a skill in -- a directory apiece, each holding a
+`SKILL.md`. A flow may also name skills that live in another repository, by writing them where
+it is declared:
+
+```python
+@flow(skills=("https://github.com/humanfia/flowverse#review-notes",))
+def run(agents: Agents, task: str) -> None: ...
+```
+
+Tests live under `tests/`, and run against humanize itself:
 
 ```sh
 uv run pytest

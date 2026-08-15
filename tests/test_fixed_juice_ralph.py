@@ -239,12 +239,12 @@ def test_the_flow_says_how_many_agents_it_drives_and_what_it_takes() -> None:
 
 
 def test_it_is_one_of_the_flows_this_flowverse_offers() -> None:
-    """Which is the whole of what makes it runnable: a `.py` in `flows/`, beside the others."""
+    """What makes it runnable: a directory in `flows/`, with the flow in its `__init__.py`."""
     from pathlib import Path
 
-    assert (
-        Path(fixed_juice_ralph.__file__).parent == Path(__file__).parents[1] / "flows"
-    )
+    at = Path(fixed_juice_ralph.__file__)
+    assert at.name == "__init__.py"
+    assert at.parent.parent == Path(__file__).parents[1] / "flows"
 
 
 @pytest.mark.agent
