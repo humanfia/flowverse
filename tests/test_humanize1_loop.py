@@ -8,8 +8,9 @@ and the finalize round ends the loop -- which is the path the plugin calls `comp
 
 from __future__ import annotations
 
+import shutil
 import subprocess
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from hmz.agents import (
@@ -20,6 +21,7 @@ from hmz.agents import (
     Moment,
     Occasion,
     SessionBase,
+    Stopped,
     Verdict,
 )
 
@@ -687,3 +689,607 @@ def test_a_round_number_that_is_not_a_number_is_left_as_it_was(workspace: Path) 
     assert not running.over
     assert running.state.current_round == 1  # as the loop had it, rather than zero
     assert running.state.max_iterations == 9  # and the field beside it still read
+
+
+# ------------------------------------------------------------------------------------
+# Picking a loop up where the last run of it stopped
+# ------------------------------------------------------------------------------------
+
+
+def _walks_off(building: Callable[[str], str], after: int) -> Callable[[str], str]:
+    """A builder that walks off mid-loop, which is what a run there is anything to pick up is.
+
+    Args:
+      building: What a turn of it does while it is still working.
+      after: How many turns it takes before it goes.
+
+    Returns:
+      What one turn of it does. The turn after the last is `Stopped`, which is a turn that
+      does not happen rather than one that failed: the loop sends a failed turn round again,
+      and this is the machine going down.
+    """
+    turns = {"at": 0}
+
+    def turn(prompt: str) -> str:
+        turns["at"] += 1
+        if turns["at"] > after:
+            raise Stopped
+        return building(prompt)
+
+    return turn
+
+
+def _stalling(said: list[str]) -> Callable[[str], str]:
+    """A reviewer that never accepts the work, so there is always another round to be on.
+
+    Args:
+      said: Filled in with what it was asked about, in order.
+
+    Returns:
+      What one turn of it does.
+    """
+
+    def turn(prompt: str) -> str:
+        if prompt.startswith("You are a specialized agent that validates"):
+            said.append("compliance")
+            return _COMPLIES.format(why="it is this repository's")
+        if prompt.startswith("You are a specialized agent that analyzes"):
+            said.append("quiz")
+            return "I would rather not"  # not a quiz, so the run goes on without one
+        said.append("summary-review")
+        return "There is more to do.\n\nMainline Progress Verdict: ADVANCED\n"
+
+    return turn
+
+
+def _building(builder: AgentBase, reviewer: AgentBase) -> humanize1.Building:
+    """The three the loop is driven by, for a run that is about the two that work."""
+    return humanize1.Building(
+        builder=builder, reviewer=reviewer, human=humanize1.HumanAgent()
+    )
+
+
+@pytest.mark.timeout(120)
+def test_a_stopped_loop_is_carried_on_in_the_directory_it_left(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which is the whole of what picking one up means: the same loop, at the round it reached.
+
+    A loop stopped rather than finished is the ordinary case -- a machine went down, somebody
+    pressed esc -- and what it leaves is a directory with the plan copied into it, the rounds
+    it has been through and a state file saying where it got to. A second run that stamped a
+    new directory would replan a week of work beside the week it already did.
+    """
+    monkeypatch.chdir(workspace)
+    wrote: list[str] = []
+    # One builder across both runs, so that each round writes something of its own: two runs
+    # that wrote the same file would be a second round with nothing in it to commit.
+    building = _builder(workspace, wrote)
+    config = humanize1.Rlcr(
+        plan_file="docs/plan.md", track_plan_file=True, privacy=True
+    )
+    first: list[str] = []
+    kept: dict[str, Any] = {}
+
+    with pytest.raises(Stopped):
+        humanize1.rlcr(
+            _building(
+                Scripted(CONFIG, name="builder", doing=_walks_off(building, 1)),
+                Scripted(CONFIG, name="reviewer", doing=_stalling(first)),
+            ),
+            "add undo",
+            config,
+            kept,
+        )
+
+    (found,) = sorted((workspace / ".humanize" / "rlcr").iterdir())
+    told = (found / "round-1-prompt.md").read_text()
+    anchor = loop.State.read(found / "state.md")
+    assert anchor is not None
+    # What it kept: where the loop is, and how far it got. Everything else about the loop is
+    # in that directory already, in the format the plugin's own tooling reads.
+    assert kept == {"loop": f".humanize/rlcr/{found.name}", "rounds": 1}
+
+    again: list[str] = []
+    builder = Scripted(CONFIG, name="builder", doing=_walks_off(building, 1))
+    with pytest.raises(Stopped):
+        humanize1.rlcr(
+            _building(
+                builder, Scripted(CONFIG, name="reviewer", doing=_stalling(again))
+            ),
+            "add undo",
+            config,
+            kept,
+        )
+
+    # The same directory, with no second one beside it.
+    assert sorted((workspace / ".humanize" / "rlcr").iterdir()) == [found]
+    # And the builder -- a session that has just been opened -- picked up on what the loop
+    # last wrote down for the round it was on, word for word.
+    assert builder.heard[0] == told
+    # The setup that had already happened did not happen twice: no compliance check, no quiz.
+    assert first == ["compliance", "quiz", "summary-review"]
+    assert again == ["summary-review"]
+    # The anchor is where it was rather than where the repository has since got to: the loop
+    # has judged every round of itself against that commit, and moving it moves all of them.
+    state = loop.State.read(found / "state.md")
+    assert state is not None
+    assert (state.base_commit, state.start_branch) == (anchor.base_commit, "main")
+    assert state.base_commit != loop.git("rev-parse", "HEAD", at=workspace)[1]
+    # And the round went on from where it was, rather than back to zero.
+    assert (state.current_round, kept["rounds"]) == (2, 2)
+    assert wrote == ["round-0", "round-1"]
+
+
+#: What the state of a loop a stopped run left behind says: four rounds into building the
+#: plan this repository has committed, and set up the way the runs below are set up -- since
+#: a loop is only carried on into a run that was set up its way, and what the tests using
+#: this are about is the other reasons.
+_LEFT_OFF: dict[str, Any] = {
+    "current_round": 4,
+    "plan_file": "docs/plan.md",
+    "plan_tracked": True,
+    "start_branch": "main",
+    "privacy_mode": True,
+}
+
+
+def _left_off(
+    workspace: Path, named: str = "2020-01-01_00-00-00", **fields: Any
+) -> Path:
+    """A loop directory as a run that was stopped mid-round leaves one behind.
+
+    Args:
+      workspace: The repository the loop is anchored to.
+      named: What the directory is called, since a workspace may hold more than one.
+      fields: What its state says over `_LEFT_OFF`.
+
+    Returns:
+      The directory.
+    """
+    where = workspace / ".humanize" / "rlcr" / named
+    where.mkdir(parents=True)
+    state = loop.State(**{**_LEFT_OFF, **fields})
+    at = state.current_round
+    (where / loop.BUILDING).write_text(state.written())
+    if state.review_started:
+        (where / loop.REVIEW_STARTED).write_text(f"build_finish_round={at}\n")
+    shutil.copyfile(workspace / "docs" / "plan.md", where / "plan.md")
+    (where / f"round-{at}-prompt.md").write_text(f"carry on with round {at}")
+    return where
+
+
+def _ended(work: Path, where: Path) -> None:
+    """A loop that ran to the end, which renames its state file on the way out."""
+    del work
+    (where / "state.md").rename(where / "complete-state.md")
+
+
+def _rewritten(work: Path, where: Path) -> None:
+    """A loop whose state file holds a field this version of the flow has never had."""
+    del work
+    at = where / "state.md"
+    at.write_text(at.read_text().replace("---\n", "---\nrung: 3\n", 1))
+
+
+def _gone(work: Path, where: Path) -> None:
+    """A loop somebody tidied away, leaving a state that names a directory that is not there."""
+    del work
+    shutil.rmtree(where)
+
+
+def _replanned(work: Path, where: Path) -> None:
+    """A plan changed since, which is what the plugin tells you to do about a wrong one.
+
+    Stop the flow, edit the plan, start it again -- which has always meant a loop of its own:
+    the loop that was running has judged every round of itself against the old plan, and its
+    own integrity gate would refuse every round of it against the new one.
+    """
+    del where
+    (work / "docs" / "plan.md").write_text(f"{PLAN}- AC-2: `redo()` puts it back.\n")
+    _git("commit", "-am", "the plan, revised", at=work)
+
+
+def _elsewhere(work: Path, where: Path) -> None:
+    """The work moved to another branch, which is the first thing a round is refused for."""
+    del where
+    _git("checkout", "-b", "elsewhere", at=work)
+
+
+def _untracked(work: Path, where: Path) -> None:
+    """A loop set up with the plan gitignored, in a repository where it is now committed."""
+    del work
+    at = where / "state.md"
+    at.write_text(at.read_text().replace("plan_tracked: true", "plan_tracked: false"))
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    ("spoil", "because"),
+    [
+        (_ended, "no live state file to carry on from"),
+        (_rewritten, "no live state file to carry on from"),
+        (_gone, "no live state file to carry on from"),
+        (_replanned, "docs/plan.md has changed since that loop was set up"),
+        (_elsewhere, "that loop is building on main, and this is on elsewhere"),
+        (_untracked, "docs/plan.md is now tracked in git"),
+    ],
+)
+def test_a_loop_there_is_no_carrying_on_is_a_fresh_one_and_says_so(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    spoil: Callable[[Path, Path], None],
+    because: str,
+) -> None:
+    """A loop is fifteen gates deep in what it reads, so half a resume is worse than none."""
+    monkeypatch.chdir(workspace)
+    stale = _left_off(workspace)
+    spoil(workspace, stale)
+    kept: dict[str, Any] = {"loop": f".humanize/rlcr/{stale.name}", "rounds": 4}
+    builder = Scripted(CONFIG, name="builder", doing=_walks_off(lambda _: "", 0))
+
+    with pytest.raises(Stopped):
+        humanize1.rlcr(
+            _building(builder, Scripted(CONFIG, name="reviewer", doing=_stalling([]))),
+            "add undo",
+            humanize1.Rlcr(
+                plan_file="docs/plan.md",
+                track_plan_file=True,
+                skip_quiz=True,
+                privacy=True,
+            ),
+            kept,
+        )
+
+    where = workspace / str(kept["loop"])
+    assert where != stale
+    assert kept["rounds"] == 0
+    # Set up from nothing, and the builder started on round zero rather than on round four.
+    assert builder.heard[0] == (where / "round-0-prompt.md").read_text()
+    # And said which of the things a loop is carried on by was not there to carry it.
+    said = capsys.readouterr().out
+    assert because in said
+    assert "Starting a fresh loop." in said
+
+
+#: What a run of the tests below is set up with, which is what the loop `_left_off` leaves
+#: was set up with too: a run only carries a loop on where the two agree.
+_AS_SET_UP: dict[str, Any] = {
+    "plan_file": "docs/plan.md",
+    "track_plan_file": True,
+    "skip_quiz": True,
+    "privacy": True,
+}
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    ("was", "says", "because"),
+    [
+        ({}, {"max": 9}, "that loop was set up with max 42, and this run says 9"),
+        (
+            {"agent_teams": True},
+            {},
+            "that loop was set up with agent_teams on, and this run says off",
+        ),
+        (
+            {"push_every_round": True},
+            {},
+            "that loop was set up with push_every_round on, and this run says off",
+        ),
+        (
+            {"codex_timeout": 60},
+            {},
+            "that loop was set up with codex_timeout 60, and this run says 5400",
+        ),
+        (
+            {},
+            {"plan_file": "docs/other.md"},
+            "that loop is building docs/plan.md, and this run says docs/other.md",
+        ),
+        # A loop set up review-only, which is what a state saying the BitLesson entry is not
+        # required is: this run means to build the plan, and that loop never will.
+        (
+            {"review_started": True, "bitlesson_required": False},
+            {},
+            "that loop was set up with skip_impl, and this run says it builds the plan",
+        ),
+    ],
+)
+def test_a_run_set_up_another_way_starts_a_loop_of_its_own_and_says_so(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    was: dict[str, Any],
+    says: dict[str, Any],
+    because: str,
+) -> None:
+    """Carrying a loop on means carrying its settings on: the rounds behind it ran by those.
+
+    A run that says otherwise is not a run that quietly wins and not one that is quietly
+    ignored either. Ignored is the worse of the two: the loop would go on doing what nobody
+    asked it for this time -- pushing every round, leading a team of agents -- past the very
+    checks at the top of the run that are there to say whether it may.
+    """
+    monkeypatch.chdir(workspace)
+    # A second plan for the run that names one, committed as the first one is: what a run
+    # pointed at a plan that is not there does is the test below this.
+    (workspace / "docs" / "other.md").write_text(PLAN.replace("undo", "redo"))
+    _git("add", "docs/other.md", at=workspace)
+    _git("commit", "-m", "another plan", at=workspace)
+    stale = _left_off(workspace, **was)
+    kept: dict[str, Any] = {"loop": f".humanize/rlcr/{stale.name}", "rounds": 4}
+    builder = Scripted(CONFIG, name="builder", doing=_walks_off(lambda _: "", 0))
+
+    with pytest.raises(Stopped):
+        humanize1.rlcr(
+            _building(builder, Scripted(CONFIG, name="reviewer", doing=_stalling([]))),
+            "add undo",
+            humanize1.Rlcr(**{**_AS_SET_UP, **says}),
+            kept,
+        )
+
+    where = workspace / str(kept["loop"])
+    assert where != stale
+    assert builder.heard[0] == (where / "round-0-prompt.md").read_text()
+    said = capsys.readouterr().out
+    assert because in said
+    assert "Starting a fresh loop." in said
+    # And the loop that is running is the one this run asked for, which is what the checks
+    # at the top of the run were run against.
+    fresh = loop.State.read(where / loop.BUILDING)
+    assert fresh is not None
+    assert (fresh.agent_teams, fresh.push_every_round) == (False, False)
+    assert (fresh.max_iterations, fresh.codex_timeout) == (says.get("max", 42), 5400)
+
+
+@pytest.mark.timeout(120)
+def test_a_run_pointed_at_a_plan_that_is_not_there_says_so_rather_than_carrying_on(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first thing a run of this is checked for, and a resume is a run like any other."""
+    monkeypatch.chdir(workspace)
+    stale = _left_off(workspace)
+    kept: dict[str, Any] = {"loop": f".humanize/rlcr/{stale.name}", "rounds": 4}
+    builder = Scripted(CONFIG, name="builder", doing=_walks_off(lambda _: "", 0))
+
+    with pytest.raises(ValueError, match="no plan file to build"):
+        humanize1.rlcr(
+            _building(builder, Scripted(CONFIG, name="reviewer", doing=_stalling([]))),
+            "add undo",
+            # As `_AS_SET_UP`, pointed at a plan this repository does not have.
+            humanize1.Rlcr(
+                plan_file="docs/nope.md",
+                track_plan_file=True,
+                skip_quiz=True,
+                privacy=True,
+            ),
+            kept,
+        )
+
+    assert builder.heard == []  # nothing was sent a builder back in with
+
+
+@pytest.mark.timeout(120)
+def test_the_state_names_the_reviewer_that_is_reading_the_rounds_now(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agents are chosen per run, so a loop carried on says who is reading it now.
+
+    `state.md` is what `humanize monitor rlcr` shows of a loop, and a resumed loop that went
+    on naming the last run's reviewer would name a model nothing in this run is running.
+    """
+    monkeypatch.chdir(workspace)
+    stale = _left_off(workspace, codex_model="gpt-5.6-sol", codex_effort="low")
+    kept: dict[str, Any] = {"loop": f".humanize/rlcr/{stale.name}", "rounds": 4}
+
+    with pytest.raises(Stopped):
+        humanize1.rlcr(
+            _building(
+                Scripted(CONFIG, name="builder", doing=_walks_off(lambda _: "", 0)),
+                Scripted(CONFIG, name="reviewer", doing=_stalling([])),
+            ),
+            "add undo",
+            humanize1.Rlcr(**_AS_SET_UP),
+            kept,
+        )
+
+    assert workspace / str(kept["loop"]) == stale  # the same loop, carried on
+    state = loop.State.read(stale / loop.BUILDING)
+    assert state is not None
+    assert (state.codex_model, state.codex_effort) == (CONFIG.model, CONFIG.effort)
+
+
+def _committed(work: Path, where: Path) -> None:
+    """The plan put into git since, which the loop was told it was not in."""
+    # Nothing to do: the fixture commits the plan, and the loop above is told it is not.
+    del work, where
+
+
+def _deleted(work: Path, where: Path) -> None:
+    """The plan taken away since, which is the file the loop was set up from."""
+    del where
+    _git("rm", "--quiet", "docs/plan.md", at=work)
+    _git("commit", "-m", "the plan, gone", at=work)
+
+
+@pytest.mark.timeout(120)
+def test_a_loop_in_the_code_review_is_not_thrown_away_over_the_plan(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Past the implementation phase the plan is out of it, and this reads it the same way.
+
+    The running loop's own `_plan_integrity` bails the moment the code review starts: the
+    review reads the repository rather than the plan, so a plan that has changed since, or
+    joined git, or left it, is nothing a round is judged by any more. A resume that threw the
+    loop away over one would throw away a week of rounds for a file nothing is going to read.
+
+    In the implementation phase, where a round is still judged against the plan, the same
+    repository is a fresh loop -- which is what `_untracked` and `_replanned` above are.
+    """
+    monkeypatch.chdir(workspace)
+    reviewing = _left_off(workspace, review_started=True, plan_tracked=False)
+    _committed(workspace, reviewing)
+    kept: dict[str, Any] = {"loop": f".humanize/rlcr/{reviewing.name}", "rounds": 4}
+
+    carrying = humanize1._again(
+        Scripted(CONFIG, name="reviewer", doing=lambda _: ""),
+        humanize1.Rlcr(plan_file="docs/plan.md", skip_quiz=True, privacy=True),
+        workspace,
+        workspace / "docs" / "plan.md",
+        kept,
+    )
+
+    assert carrying is not None
+    running, told = carrying
+    assert running.where == reviewing
+    assert told == "carry on with round 4"
+    assert "Starting a fresh loop." not in capsys.readouterr().out
+
+
+@pytest.mark.timeout(120)
+def test_a_loop_whose_plan_has_gone_is_not_carried_on_even_in_the_code_review(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The plan being there at all is read in every phase, because the loop's guard reads it.
+
+    A plan that has changed is out of it once the code review starts; a plan that is not
+    there is not, and the difference is what happens to the run either way. `Prompted` reads
+    the plan before every turn, in every phase, and refuses the one it cannot find -- so a
+    loop carried on without it is a run whose first turn never happens, that takes no round,
+    and that ends without a word about why. Said here instead: this loop is not carried on,
+    and setting a fresh one up then says there is no plan to build, which is the truth.
+    """
+    monkeypatch.chdir(workspace)
+    reviewing = _left_off(workspace, review_started=True, plan_tracked=False)
+    _deleted(workspace, reviewing)
+    kept: dict[str, Any] = {"loop": f".humanize/rlcr/{reviewing.name}", "rounds": 4}
+
+    carrying = humanize1._again(
+        Scripted(CONFIG, name="reviewer", doing=lambda _: ""),
+        humanize1.Rlcr(plan_file="docs/plan.md", skip_quiz=True, privacy=True),
+        workspace,
+        workspace / "docs" / "plan.md",
+        kept,
+    )
+
+    assert carrying is None
+    said = capsys.readouterr().out
+    said = said.replace(f"{workspace}/", "")
+    assert "the plan that loop is building is not at docs/plan.md any more" in said
+    assert "Starting a fresh loop." in said
+
+
+@pytest.mark.timeout(120)
+def test_a_loop_stopped_in_the_finalize_round_carries_on_in_it(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The phase renames the state file, which is where the loop is rather than the end of it.
+
+    A loop that has passed its code review is one round from done. Reading `state.md` alone
+    would find it gone, call the loop ended and plan the whole of the work again beside it.
+    """
+    monkeypatch.chdir(workspace)
+    wrote: list[str] = []
+    config = humanize1.Rlcr(**_AS_SET_UP)
+    kept: dict[str, Any] = {}
+
+    with pytest.raises(Stopped):
+        humanize1.rlcr(
+            _building(
+                Scripted(
+                    CONFIG,
+                    name="builder",
+                    doing=_walks_off(_builder(workspace, wrote), 1),
+                ),
+                Scripted(CONFIG, name="reviewer", doing=_reviewer([])),
+            ),
+            "add undo",
+            config,
+            kept,
+        )
+
+    (found,) = sorted((workspace / ".humanize" / "rlcr").iterdir())
+    assert (found / loop.FINALIZING).is_file()  # where the run was when it stopped
+    assert wrote == ["round-0"]
+
+    def finishing(prompt: str) -> str:
+        del prompt
+        (found / "finalize-summary.md").write_text("# Finalize\n\nsimplified nothing\n")
+        wrote.append("finalize")
+        return "finalized"
+
+    builder = Scripted(CONFIG, name="builder", doing=_walks_off(finishing, 1))
+    humanize1.rlcr(
+        _building(builder, Scripted(CONFIG, name="reviewer", doing=_reviewer([]))),
+        "add undo",
+        config,
+        kept,
+    )
+
+    # The same loop, one round from the end, rather than a second one planned beside it.
+    assert sorted((workspace / ".humanize" / "rlcr").iterdir()) == [found]
+    assert builder.heard[0] == (found / "finalize-prompt.md").read_text()
+    assert "Finalize Phase" in builder.heard[0]
+    assert wrote == ["round-0", "finalize"]
+    assert (found / "complete-state.md").is_file()
+    assert "in the finalize round" in capsys.readouterr().out
+
+
+@pytest.mark.timeout(120)
+def test_a_loop_stopped_in_the_methodology_analysis_carries_on_in_it(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The phase the loop exits through renames it too, and it is still a loop to finish."""
+    monkeypatch.chdir(workspace)
+    wrote: list[str] = []
+    # As `_AS_SET_UP`, less the privacy that skips the analysis this test is about.
+    config = humanize1.Rlcr(
+        plan_file="docs/plan.md", track_plan_file=True, skip_quiz=True
+    )
+    kept: dict[str, Any] = {}
+
+    with pytest.raises(Stopped):
+        humanize1.rlcr(
+            _building(
+                Scripted(
+                    CONFIG,
+                    name="builder",
+                    doing=_walks_off(_builder(workspace, wrote), 2),
+                ),
+                Scripted(CONFIG, name="reviewer", doing=_reviewer([])),
+            ),
+            "add undo",
+            config,
+            kept,
+        )
+
+    (found,) = sorted((workspace / ".humanize" / "rlcr").iterdir())
+    assert (found / loop.ANALYSING).is_file()
+    assert wrote == ["round-0", "finalize"]
+
+    def analysing(prompt: str) -> str:
+        del prompt
+        (found / "methodology-analysis-report.md").write_text("rounds were productive")
+        (found / "methodology-analysis-done.md").write_text("analysis complete\n")
+        wrote.append("methodology")
+        return "analysed"
+
+    builder = Scripted(CONFIG, name="builder", doing=_walks_off(analysing, 1))
+    humanize1.rlcr(
+        _building(builder, Scripted(CONFIG, name="reviewer", doing=_reviewer([]))),
+        "add undo",
+        config,
+        kept,
+    )
+
+    assert sorted((workspace / ".humanize" / "rlcr").iterdir()) == [found]
+    assert builder.heard[0] == (found / "methodology-analysis-prompt.md").read_text()
+    assert "Methodology Analysis Phase" in builder.heard[0]
+    assert wrote == ["round-0", "finalize", "methodology"]
+    # And it ended as what it was exiting for, which the phase was entered holding.
+    assert (found / "complete-state.md").is_file()
+    assert "in the methodology analysis" in capsys.readouterr().out

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 from hmz.agents import HumanAgent, Moment, Occasion, Question
 from hmz.flows import held
-from hmz.runner import configures, drives, wanted
+from hmz.runner import configures, drives, resumes, wanted
 
 import humanize1
 from _humanize1 import guards, loop, prompts
@@ -46,6 +46,19 @@ def test_the_file_holds_three_flows_and_names_each_of_them() -> None:
 
     assert set(said) == {"gen-idea", "gen-plan", "rlcr"}
     assert said["gen-idea"] == "Opens a loose idea into a repo-grounded draft."
+
+
+@pytest.mark.parametrize(
+    ("inside", "carries_on"),
+    [("gen-idea", False), ("gen-plan", False), ("rlcr", True)],
+)
+def test_only_the_loop_says_it_can_be_picked_up(inside: str, carries_on: bool) -> None:
+    """The two phases in front of it hand over a file, and running one again writes another.
+
+    The loop is the one that is meant to run for days, and the one with somewhere to carry
+    on from: a directory of rounds it left half finished.
+    """
+    assert resumes(f"{humanize1.__file__}:{inside}") is carries_on
 
 
 @pytest.mark.parametrize(
@@ -269,6 +282,65 @@ def test_a_marker_in_the_middle_of_a_line_is_not_a_finding() -> None:
 def test_a_review_with_nothing_to_fix_finds_nothing() -> None:
     """And is what moves the loop into the finalize phase."""
     assert loop.issues("Everything looks good. Nothing to fix before this ships.") == ""
+
+
+# ------------------------------------------------------------------------------------
+# What the loop left behind, read back
+# ------------------------------------------------------------------------------------
+
+
+def test_the_state_file_reads_back_as_the_state_that_wrote_it(tmp_path: Path) -> None:
+    """Which is what picking a loop up rests on: that file is the whole of what it left."""
+    state = loop.State(
+        current_round=3,
+        max_iterations=9,
+        codex_model="gpt-5.6-sol",
+        codex_timeout=60,
+        plan_file="docs/plan.md",
+        plan_tracked=True,
+        start_branch="main",
+        base_branch="main",
+        base_commit="a17c0de",
+        review_started=True,
+        bitlesson_required=False,
+        mainline_stall_count=2,
+        last_mainline_verdict=loop.STALLED,
+        started_at="2026-01-01T00:00:00Z",
+    )
+    at = tmp_path / "state.md"
+    at.write_text(state.written(), encoding="utf-8")
+
+    assert loop.State.read(at) == state
+
+
+def test_a_loop_directory_with_no_state_file_holds_no_state(tmp_path: Path) -> None:
+    """A loop that ended renamed it on the way out, and a loop that was deleted has none."""
+    assert loop.State.read(tmp_path / "state.md") is None
+
+
+@pytest.mark.parametrize(
+    ("was", "now"),
+    [
+        # A field gone, and a field this version has never had: each is a state file some
+        # other version of the flow wrote.
+        ("start_branch: \n", ""),
+        ("---\n", "---\nrung: 3\n"),
+        # A number that is not one, and a switch that is neither of the two words.
+        ("max_iterations: 42", "max_iterations: as many as it takes"),
+        ("privacy_mode: false", "privacy_mode: perhaps"),
+        # And a file that is not this file at all: no frontmatter, or prose inside it.
+        ("---\n", ""),
+        ("---\n", "---\nsomebody was here\n"),
+    ],
+)
+def test_a_state_file_this_version_did_not_write_is_not_carried_on(
+    tmp_path: Path, was: str, now: str
+) -> None:
+    """Half a state read back is worse than none: the loop is fifteen gates deep in it."""
+    at = tmp_path / "state.md"
+    at.write_text(loop.State().written().replace(was, now, 1), encoding="utf-8")
+
+    assert loop.State.read(at) is None
 
 
 # ------------------------------------------------------------------------------------

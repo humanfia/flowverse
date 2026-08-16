@@ -8,7 +8,9 @@ would have been blocked there is blocked here for the same reason.
 
 What the loop keeps is kept where the plugin keeps it: `.humanize/rlcr/<timestamp>/`, with
 `state.md` holding the same fields, so `humanize monitor rlcr` reads a run of this exactly as
-it reads a run of the plugin.
+it reads a run of the plugin. It is also the whole of what a stopped run left behind, which is
+why the file is written back as well as read: a loop whose `state.md` still reads is a loop the
+next run carries on in rather than one it abandons and plans again beside.
 """
 
 from __future__ import annotations
@@ -85,6 +87,15 @@ BITLESSON = ".humanize/bitlesson.md"
 #: say where the loop has got to.
 REVIEW_STARTED = ".review-phase-started"
 EXIT_REASON = ".methodology-exit-reason"
+
+#: What the live state file is called in each of the three phases a loop has: while it is
+#: building its rounds, in the finalize round, and in the methodology analysis it exits
+#: through. The two phases after the rounds rename it rather than writing a flag, which is
+#: how a loop says where it has got to -- to whatever is watching it, and to the next run of
+#: it, which reads the one that is there to find out which phase to carry on in.
+BUILDING = "state.md"
+FINALIZING = "finalize-state.md"
+ANALYSING = "methodology-analysis-state.md"
 
 #: Untracked paths that are the loop's own rather than the work's, which do not make a
 #: working tree dirty. The hook's `^\?\? \.humanize[-/]`.
@@ -274,6 +285,51 @@ class State:
         said = [f"{name}: {_yaml(value)}" for name, value in asdict(self).items()]
         return "---\n" + "\n".join(said) + "\n---\n"
 
+    @classmethod
+    def read(cls, at: Path) -> State | None:
+        """The state one loop directory holds, for a run picking that loop up where it stopped.
+
+        The other half of :meth:`written`, and as strict as that is generous: what comes back
+        is a state this version of the flow wrote, field for field, or nothing at all. A file
+        missing a field, holding one this does not have, or holding a number that is not one,
+        was written by another version of the flow or edited by hand -- and a loop is fifteen
+        gates deep in a file it trusts, so half of one read back is worse than starting again.
+
+        Args:
+          at: The state file, which is whichever of the three a loop keeps its live state in
+            -- and never one of the names it is renamed to on the way out: a loop that has
+            ended is one to read, and only a loop still in one of its phases is one to
+            carry on. :meth:`Loop.picked_up` is what asks for them in that order.
+
+        Returns:
+          The state, or None where there is nothing here to carry on from -- a file that is
+          not there, that cannot be read, or that is not one of these.
+        """
+        try:
+            held = at.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        lines = held.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return None
+        said: dict[str, str] = {}
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            name, sep, value = line.partition(":")
+            if not sep:
+                return None
+            said[name.strip()] = value.strip()
+        kept: dict[str, Any] = {}
+        for name, was in asdict(cls()).items():
+            found = _read(said.pop(name), was) if name in said else None
+            if found is None:
+                return None
+            kept[name] = found
+        # Whatever is left over is a field this State has never had, which is the same file
+        # from another version read from the other end.
+        return None if said else cls(**kept)
+
 
 def _yaml(value: object) -> str:
     """One state field, written the way the setup script writes it.
@@ -288,6 +344,29 @@ def _yaml(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _read(said: str, was: object) -> str | int | bool | None:
+    """One state field, read back as the kind of thing that field holds.
+
+    Args:
+      said: What the file says it is, as :func:`_yaml` wrote it.
+      was: What the field is worth when nothing has been written to it, which is what says
+        which kind it is: every one of them is a string, a whole number or a switch.
+
+    Returns:
+      The value, or None for one that is not of that kind at all -- which is a field this
+      version of the flow did not write. Never None for a field that reads, since none of
+      them holds nothing: an unset string is "" and an unset switch is false.
+    """
+    if isinstance(was, bool):
+        return said == "true" if said in ("true", "false") else None
+    if isinstance(was, int):
+        try:
+            return int(said)
+        except ValueError:
+            return None
+    return said
 
 
 @dataclass
@@ -308,6 +387,10 @@ class Loop:
       finalizing: Whether the work has passed review and is being tidied up.
       analysing: Whether the loop is in the methodology analysis it exits through.
       exit_reason: What the exit will be recorded as once the analysis is done.
+      kept: What the run this loop belongs to is leaving behind for the next run of it, or
+        None for a loop nobody is keeping. The loop's own record is `state.md`, which is
+        where a run picks it up from; what goes here is the round it has reached, so that
+        how far the loop got is in the run beside the directory it got there in.
     """
 
     reviewer: AgentBase
@@ -319,9 +402,61 @@ class Loop:
     finalizing: bool = False
     analysing: bool = False
     exit_reason: str = ""
+    kept: dict[str, Any] | None = None
     #: What `git status --porcelain` said this round, read once for the gates that ask, and
     #: None where this is not a git repository at all.
     _status: str | None = None
+
+    @classmethod
+    def picked_up(
+        cls,
+        reviewer: AgentBase,
+        where: Path,
+        root: Path,
+        kept: dict[str, Any] | None = None,
+    ) -> Loop | None:
+        """The loop one directory is keeping, in whichever of its phases it was left in.
+
+        Which phase that is, is which state file is there: the finalize round and the
+        methodology analysis rename it, so a loop stopped in one of them is a loop to carry
+        on inside that phase rather than one that has ended. The phase is what says which
+        state file the next round writes back, which summary it wants and which prompt the
+        builder was last sent in with, so a loop picked up in the wrong one would be a loop
+        writing over the round it thinks it is on.
+
+        Args:
+          reviewer: Who reads each round from here on.
+          where: The loop directory.
+          root: The workspace the work happens in.
+          kept: What the run picking it up is leaving behind for the run after that.
+
+        Returns:
+          The loop, or None where that directory is keeping none: a loop that has ended
+          renamed its state file to say how, and one whose state this version of the flow
+          cannot read is one to start again rather than one to half read.
+        """
+        for at, finalizing, analysing in (
+            (BUILDING, False, False),
+            (FINALIZING, True, False),
+            (ANALYSING, False, True),
+        ):
+            state = State.read(where / at)
+            if state is None:
+                continue
+            return cls(
+                reviewer,
+                where,
+                root,
+                state,
+                kept=kept,
+                finalizing=finalizing,
+                analysing=analysing,
+                # What the analysis it is in the middle of was entered for, which is what
+                # the exit will be recorded as once it is done: written down when the phase
+                # was entered, since nothing else here can work out why the loop is leaving.
+                exit_reason=_exiting(where) if analysing else "",
+            )
+        return None
 
     # --------------------------------------------------------------------------------
     # The gate
@@ -376,7 +511,7 @@ class Loop:
         loop whose round number nothing can trust.
         """
         try:
-            held = (self.where / self._state_file).read_text(encoding="utf-8")
+            held = self.state_file.read_text(encoding="utf-8")
         except OSError:
             self._ends("unexpected")
             return None
@@ -860,7 +995,7 @@ class Loop:
         """
         # Renamed before the flag is set, or the rename would look for the file it is
         # about to make: which file is the live one is what the flag says.
-        self._rename("finalize-state.md")
+        self._rename(FINALIZING)
         self.finalizing = True
         asked = render(
             prompts.FINALIZE_SKIPPED if skipped else prompts.FINALIZE,
@@ -871,6 +1006,7 @@ class Loop:
             BASE_BRANCH=self.state.base_branch,
             START_BRANCH=self.state.start_branch,
         )
+        self.prompt.write_text(asked, encoding="utf-8")
         return Verdict(refused=True, because=asked)
 
     def _next_round(self, said: str, *, aligning: bool) -> Verdict:
@@ -1050,11 +1186,11 @@ class Loop:
     # --------------------------------------------------------------------------------
 
     @property
-    def _state_file(self) -> str:
+    def state_file(self) -> Path:
         """Which state file is the live one, which is what says what phase the loop is in."""
         if self.analysing:
-            return "methodology-analysis-state.md"
-        return "finalize-state.md" if self.finalizing else "state.md"
+            return self.where / ANALYSING
+        return self.where / (FINALIZING if self.finalizing else BUILDING)
 
     @property
     def _bitlesson(self) -> Path:
@@ -1075,7 +1211,17 @@ class Loop:
 
     @property
     def prompt(self) -> Path:
-        """What the builder was told to do this round."""
+        """What the builder was told to do, in whichever phase the loop is in.
+
+        Written down in every phase and not only in the rounds, for the reason the state is:
+        a run picking this loop up opens a session of its own -- no backend reopens the one
+        that heard it the first time -- so what it sends the builder back in with is what the
+        loop last said, and it can only send what the loop wrote down.
+        """
+        if self.analysing:
+            return self.where / "methodology-analysis-prompt.md"
+        if self.finalizing:
+            return self.where / "finalize-prompt.md"
         return self.where / f"round-{self.state.current_round}-prompt.md"
 
     @property
@@ -1107,9 +1253,11 @@ class Loop:
 
     def _write_state(self) -> None:
         """Puts the state back, which is the one file the builder may not touch."""
-        (self.where / self._state_file).write_text(
-            self.state.written(), encoding="utf-8"
-        )
+        self.state_file.write_text(self.state.written(), encoding="utf-8")
+        if self.kept is not None:
+            # Here rather than wherever the round is counted, so that the round the run says
+            # it reached and the round the file says it reached are written in one breath.
+            self.kept["rounds"] = self.state.current_round
 
     def _rename(self, to: str) -> None:
         """Moves the live state file, which is how the loop says what phase it is in.
@@ -1117,7 +1265,7 @@ class Loop:
         Args:
           to: What it becomes.
         """
-        was = self.where / self._state_file
+        was = self.state_file
         if was.exists():
             shutil.move(str(was), str(self.where / to))
 
@@ -1143,26 +1291,25 @@ class Loop:
         done = self.where / "methodology-analysis-done.md"
         if (
             self.state.privacy_mode
-            or (self.where / "methodology-analysis-state.md").exists()
+            or (self.where / ANALYSING).exists()
             or _written(done)
         ):
             self._ends(reason)
             return None
-        self._rename("methodology-analysis-state.md")
+        self._rename(ANALYSING)
         self.analysing, self.exit_reason = True, reason
         (self.where / EXIT_REASON).write_text(reason, encoding="utf-8")
         done.touch()
-        return Verdict(
-            refused=True,
-            because=render(
-                prompts.METHODOLOGY_ANALYSIS,
-                EXIT_REASON=reason,
-                EXIT_REASON_DESCRIPTION=about,
-                CURRENT_ROUND=self.state.current_round,
-                MAX_ITERATIONS=self.state.max_iterations,
-                LOOP_DIR=self.where,
-            ),
+        asked = render(
+            prompts.METHODOLOGY_ANALYSIS,
+            EXIT_REASON=reason,
+            EXIT_REASON_DESCRIPTION=about,
+            CURRENT_ROUND=self.state.current_round,
+            MAX_ITERATIONS=self.state.max_iterations,
+            LOOP_DIR=self.where,
         )
+        self.prompt.write_text(asked, encoding="utf-8")
+        return Verdict(refused=True, because=asked)
 
     def _ends(self, reason: str) -> None:
         """Ends the loop, keeping the state file under the name that says why.
@@ -1202,6 +1349,22 @@ def _written(path: Path) -> bool:
         return bool(path.read_text(encoding="utf-8").strip())
     except (OSError, UnicodeDecodeError):
         return False
+
+
+def _exiting(where: Path) -> str:
+    """What a loop in its methodology analysis is on its way out for.
+
+    Args:
+      where: The loop directory.
+
+    Returns:
+      The reason the analysis was entered with, or "" where nothing wrote one down -- which
+      the analysis records as `unexpected` rather than stopping over.
+    """
+    try:
+        return (where / EXIT_REASON).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def _last(said: str) -> str:

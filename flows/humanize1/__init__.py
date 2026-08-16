@@ -24,6 +24,37 @@ another and built on a third, with whatever reading and editing you like in betw
 Run in a git repository: the work is anchored to the commit the plan was fixed in, and every
 review reads what came after it.
 
+`rlcr` is a loop meant to run for days, so a run of it can be picked up where the last one
+stopped. What it keeps is where the loop is -- `.humanize/rlcr/<stamp>` -- and the round it
+has reached; everything else about the loop is already in that directory in the plugin's own
+format, and a second copy of it here would be a second place for it to be wrong. So running
+`rlcr` again carries on in that directory instead of stamping a new one: the loop's live
+state file is read back as it stands, none of what it anchors the loop to is worked out again
+from the repository, the setup that has already happened does not happen twice, and the
+builder -- which is a new session, no backend having any way to reopen the old one -- is
+started on the prompt the loop last wrote down. Whichever phase it stopped in: the finalize
+round and the methodology analysis rename the state file rather than ending the loop, so a
+loop stopped in one of them is carried on inside it, which is a round away from the end
+rather than a week of work to plan again.
+
+A loop carries on with the settings it was set up with, which is what carrying on means: a
+loop whose `max` was halved halfway is not the loop it was, and the rounds behind it were
+judged as the loop it was. So a run set up differently is neither quietly overridden nor
+quietly ignored -- it says which setting it disagrees with the loop about and starts a loop
+of its own, set up the way this run asked for. The agents are the one thing that is not a
+setting: `-c` has no field for them, `/agents` chooses them per run, so the reviewer is
+whoever was chosen this time and the state file is brought up to date to say who is reading
+the rounds.
+
+A loop that ended renamed its state file on the way out and so is never picked up; neither is
+one whose directory has gone, one whose state this version of the flow cannot read, one this
+run was set up differently from, or one the repository has moved out from under -- the work
+on another branch now, the plan changed since, which is what the plugin tells you to do when
+a plan is wrong. Each of those starts a fresh loop and says so. `gen-idea` and
+`gen-plan` keep nothing and are not picked up. What each of them does is write one file,
+running one again is meant to write another, and between their turns there is nothing a
+second run could honestly carry on from.
+
 The side that writes remembers and the side that reads does not. The planner holds one session
 for the whole of the planning and the builder holds one for the whole of the loop; every review
 is a session that has just started, reads the repository itself, and is told nothing about how
@@ -60,7 +91,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Annotated, Literal, NamedTuple
+from typing import Annotated, Any, Literal, NamedTuple
 
 # Under a name of its own: what a person is put is one of these, and the shape of the
 # quiz below has a `Question` of its own that is a field of the model the reviewer fills.
@@ -655,6 +686,7 @@ def _rlcr(
     config: Rlcr,
     root: Path,
     plan: Path | None,
+    kept: dict[str, Any],
 ) -> None:
     """`start-rlcr-loop`: the plan is built under review until nothing is left to say.
 
@@ -664,6 +696,7 @@ def _rlcr(
       config: How this run was set up.
       root: The workspace.
       plan: The plan to build, or None for a `--skip-impl` run that has none.
+      kept: What the last run of this flow here left behind, and what this one leaves.
 
     Raises:
       ValueError: If the loop cannot start: not a git repository, no plan where one is
@@ -674,6 +707,10 @@ def _rlcr(
             "rlcr runs in a git repository: every review reads the work since the commit "
             "the plan was fixed in"
         )
+    # What this run was set up with, checked before anything is set up or picked up -- and
+    # what the loop that runs will actually be running on, either way: a fresh loop is set
+    # up from this config, and a loop carried on is one whose own state says the same, since
+    # `_again` refuses to carry a loop on into a run that was set up differently.
     if (
         config.agent_teams
         and os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") != "1"
@@ -686,6 +723,290 @@ def _rlcr(
         raise ValueError(
             "push_every_round needs a remote to push to, and this repository has none"
         )
+    # The loop the last run was in, where there is still one to carry on: a loop is set up
+    # once, and setting another up beside it is what leaves a week of rounds orphaned.
+    carrying = _again(agents.reviewer, config, root, plan, kept)
+    running, told = (
+        carrying if carrying is not None else _fresh(agents, config, root, plan, kept)
+    )
+    with (
+        agents.builder.hooks.on(Moment.STOP, running),
+        agents.builder.hooks.on(Moment.PERMISSION_REQUEST, guards.Guard(running, root)),
+        agents.builder.hooks.on(
+            Moment.USER_PROMPT_SUBMIT, guards.Prompted(running, root)
+        ),
+    ):
+        spoken(building, told)
+
+
+def _again(
+    reviewer: AgentBase,
+    config: Rlcr,
+    root: Path,
+    plan: Path | None,
+    kept: dict[str, Any],
+) -> tuple[Loop, str] | None:
+    """The loop the last run of this flow left going, and what it last told the builder.
+
+    The loop is read back off its own live state file and nothing in it is worked out again
+    from the repository. The commit the plan was fixed in, the branch the work is on and the
+    plan itself are what every round of the loop has been judged against, and a run that
+    settled them afresh would move the anchor to wherever the repository has got to since --
+    which is a loop carried on in name only.
+
+    Which is also why this run's config is compared against it rather than laid over it: what
+    the loop was set up with is what the rounds behind it were judged by. A run that says
+    something else is a run asking for a different loop, and gets one.
+
+    Args:
+      reviewer: Who reads each round, which is this run's reviewer rather than the last
+        run's: the loop is what carries on, and the agents are whoever was chosen this time.
+      config: How this run was set up, which the loop has to have been set up the same way.
+      root: The workspace, which is what the directory was written down against.
+      plan: The plan this run was pointed at, or None for a run that named none.
+      kept: What the last run left behind.
+
+    Returns:
+      The loop and what to start the builder on, or None where there is nothing here to
+      carry on -- a first run, a loop that has ended, a directory that has gone, a state file
+      this version of the flow cannot read, a phase the loop wrote no prompt for, a
+      repository that has moved out from under it, or a run set up differently from it. Each
+      of those is a fresh loop, said out loud where whoever expected the old one to go on can
+      read why it is not.
+    """
+    said = str(kept.get("loop") or "")
+    if not said:
+        return None
+    where = _under(root, said)
+    running = Loop.picked_up(reviewer, where, root, kept=kept)
+    if running is None:
+        print(
+            f"{where}: no live state file to carry on from -- that loop has ended, or was "
+            "written by another version of this flow. Starting a fresh loop."
+        )
+        return None
+    if moved := _moved(running):
+        print(f"{where}: {moved}. Starting a fresh loop.")
+        return None
+    if differs := _differs(running, config, plan):
+        print(f"{where}: {differs}. Starting a fresh loop.")
+        return None
+    # The builder is a session that has just been opened -- no backend reopens the one that
+    # heard the round the first time -- so what it is told is what the loop wrote down for
+    # the phase it is in, which is a prompt that says where everything it needs is.
+    told = (
+        running.prompt.read_text(encoding="utf-8") if running.prompt.is_file() else ""
+    )
+    if not told.strip():
+        print(
+            f"{running.prompt}: nothing was written down for where that loop is, so there "
+            "is nothing to send a builder back in with. Starting a fresh loop."
+        )
+        return None
+    # Who is reading the rounds from here on. The agents are this run's, so the state file
+    # says the reviewer that is actually reading them rather than the one that read the last
+    # run's: it is what `humanize monitor rlcr` shows of a loop, and it would otherwise name
+    # a model nothing in this run is running.
+    running.state.codex_model = reviewer.config.model
+    running.state.codex_effort = reviewer.config.effort
+    running.state_file.write_text(running.state.written(), encoding="utf-8")
+    print(f"Carrying on the loop in {where}, {_where_it_is(running)}.")
+    return running, told
+
+
+def _where_it_is(running: Loop) -> str:
+    """Where in the loop a run is picking it up, as a phrase to say out loud.
+
+    Args:
+      running: The loop as it was read back.
+
+    Returns:
+      The phase, or the round for a loop still building.
+    """
+    if running.analysing:
+        return "in the methodology analysis it is exiting through"
+    if running.finalizing:
+        return "in the finalize round"
+    return f"at round {running.state.current_round}"
+
+
+def _moved(running: Loop) -> str:
+    """What one loop is anchored to that has moved since, or "" for a repository that fits it.
+
+    Two of the things a round is judged against live outside the loop's own directory: the
+    branch the work is on, and the plan being built -- which has to be where it was, as it
+    was, and in or out of git as the loop was told. Either of them having moved is a loop
+    whose every turn its own guards would now refuse, and the plugin's own answer to a plan
+    that has to change is to stop, change it and start again -- which has always meant a loop
+    of its own rather than this one spending a run refusing itself.
+
+    How much of the plan still matters depends on where the loop is. In the code review the
+    plan is out of it and only its being there at all is read; while the implementation is
+    going every round is judged against it, so where it is, what is in it and whether git
+    holds it are all read.
+
+    Args:
+      running: The loop as it was read back.
+
+    Returns:
+      What has moved, in a clause, or "" for a loop the repository still fits.
+    """
+    state, root = running.state, running.root
+    branch = _head(root)
+    if state.start_branch and branch != state.start_branch:
+        return f"that loop is building on {state.start_branch}, and this is on {branch}"
+    plan, backup = root / state.plan_file, running.where / "plan.md"
+    # A plan that is gone is the one thing no phase excuses. The loop's own prompt guard
+    # reads the plan in every phase, so a run carried on without it is a run whose first
+    # turn is refused before it starts -- which is a run that does nothing and says nothing.
+    # Answered here instead: this loop cannot be carried on, and the setup that follows says
+    # there is no plan to build, which is the truth said out loud.
+    if not plan.is_file():
+        return f"the plan that loop is building is not at {plan} any more"
+    # Past the implementation phase the rest of the plan is out of it: the code review reads
+    # the repository itself, and the gate that holds the plan still is skipped there too. So
+    # is everything below, for that gate's own reason -- a plan that has changed, joined git
+    # or left it since is nothing to throw a loop away over once no round is judged by it.
+    if state.review_started:
+        return ""
+    if state.plan_file:
+        tracked = git("ls-files", "--error-unmatch", state.plan_file, at=root)[0] == 0
+        if tracked is not state.plan_tracked:
+            return (
+                f"{state.plan_file} is {'now' if tracked else 'no longer'} tracked in git, "
+                "which is not how that loop was set up"
+            )
+    if not backup.is_file():
+        return f"that loop's own copy of {state.plan_file} is not in {running.where} any more"
+    if plan.read_bytes() != backup.read_bytes():
+        return f"{plan} has changed since that loop was set up"
+    return ""
+
+
+def _differs(running: Loop, config: Rlcr, plan: Path | None) -> str:
+    """What this run was set up with that the loop was not, or "" for a run that fits it.
+
+    A loop keeps what it was set up with in its own state file, and every round behind it was
+    run under exactly that: refused for the plan it was given, sent back at the round `max`
+    called the last one, reviewed against the branch that was named. A run that says
+    something else about any of it is not a run this loop carries on into -- the settings
+    would have to be ignored, which is a `-c` nobody read, or taken up halfway, which is a
+    loop whose rounds were not all run by the same rules.
+
+    Three are not here. The agents are nobody's config field: whoever was chosen this run
+    reads the rounds from here on. `skip_quiz` says whether a loop is set up with a quiz on
+    the plan, which happens once, when it is set up -- a loop already running is past the
+    question, and a run that answers it differently would be carrying on into nothing. And a
+    run that says `skip_impl` of a loop already in its code review is carried on: the run
+    asks for the implementation to be skipped and the loop has finished it, which is two ways
+    of saying where the work starts, and the rounds from here are the same rounds either way.
+
+    The other direction is not that. A loop set up review-only is one whose state says the
+    BitLesson entry is not required -- it is set from `skip_impl` when a loop is set up and
+    never again -- and a run that means to build the plan would spend itself on a loop that
+    never will.
+
+    Args:
+      running: The loop as it was read back.
+      config: How this run was set up.
+      plan: The plan this run was pointed at, or None for a run that named none.
+
+    Returns:
+      What disagrees, in a clause, or "" for a loop this run would have set up the same way.
+    """
+    state, root = running.state, running.root
+    if plan is not None and (named := _named(root, plan)) != state.plan_file:
+        return f"that loop is building {state.plan_file}, and this run says {named}"
+    if config.skip_impl and not state.review_started:
+        return "that loop is building a plan, and this run says skip_impl"
+    if not config.skip_impl and not state.bitlesson_required:
+        return (
+            "that loop was set up with skip_impl, and this run says it builds the plan"
+        )
+    if config.base_branch and config.base_branch != state.base_branch:
+        return (
+            f"that loop is reviewing against {state.base_branch or 'nothing'}, and this "
+            f"run says {config.base_branch}"
+        )
+    settings: tuple[tuple[str, object, object], ...] = (
+        ("max", state.max_iterations, config.max),
+        ("codex_timeout", state.codex_timeout, config.codex_timeout),
+        ("full_review_round", state.full_review_round, config.full_review_round),
+        ("track_plan_file", state.plan_tracked, config.track_plan_file),
+        ("push_every_round", state.push_every_round, config.push_every_round),
+        ("agent_teams", state.agent_teams, config.agent_teams),
+        (
+            "claude_answer_codex",
+            not state.ask_codex_question,
+            config.claude_answer_codex,
+        ),
+        ("privacy", state.privacy_mode, config.privacy),
+        (
+            "require_bitlesson_entry_for_none",
+            not state.bitlesson_allow_empty_none,
+            config.require_bitlesson_entry_for_none,
+        ),
+    )
+    for name, was, now in settings:
+        if was != now:
+            return (
+                f"that loop was set up with {name} {_says(was)}, and this run says "
+                f"{_says(now)}"
+            )
+    return ""
+
+
+def _named(root: Path, plan: Path) -> str:
+    """The plan, by the name a loop's state file calls it.
+
+    Args:
+      root: The workspace.
+      plan: The plan.
+
+    Returns:
+      Where it is under the workspace, or the path itself for a plan kept outside one.
+    """
+    return str(plan.relative_to(root) if plan.is_relative_to(root) else plan)
+
+
+def _says(value: object) -> str:
+    """One setting, as a sentence about it says it.
+
+    Args:
+      value: What it is set to.
+
+    Returns:
+      A switch as on or off, which is what the flags these stand for are, and anything else
+      as it stands.
+    """
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    return str(value)
+
+
+def _fresh(
+    agents: Building,
+    config: Rlcr,
+    root: Path,
+    plan: Path | None,
+    kept: dict[str, Any],
+) -> tuple[Loop, str]:
+    """Sets a loop up from nothing: the checks, the copy, the scaffolding and round zero.
+
+    Args:
+      agents: The agents the flow drives.
+      config: How this run was set up.
+      root: The workspace.
+      plan: The plan to build, or None for a `--skip-impl` run that has none.
+      kept: What this run leaves behind, which is where the new loop is written down.
+
+    Returns:
+      The loop and what to start the builder on.
+
+    Raises:
+      ValueError: If the loop cannot start: no plan where one is needed, a plan that is not
+        this repository's, or one that would move the work to another branch.
+    """
     held = ""
     if plan is not None:
         if not plan.is_file():
@@ -722,10 +1043,10 @@ def _rlcr(
             "No implementation plan was provided - this is expected for skip-impl mode.\n",
             encoding="utf-8",
         )
-        named = str((where / "plan.md").relative_to(root))
+        named = _named(root, where / "plan.md")
     else:
         shutil.copyfile(plan, where / "plan.md")
-        named = str(plan.relative_to(root) if plan.is_relative_to(root) else plan)
+        named = _named(root, plan)
 
     base = _base(root, config.base_branch)
     commit = git("rev-parse", base, at=root)[1] if base else ""
@@ -753,7 +1074,7 @@ def _rlcr(
         mainline_stall_count=0,
         started_at=_utc(),
     )
-    running = Loop(agents.reviewer, where, root, state)
+    running = Loop(agents.reviewer, where, root, state, kept=kept)
     _set_up(running, config, plan, held)
     if config.skip_impl:
         (where / loop.REVIEW_STARTED).write_text(
@@ -762,14 +1083,11 @@ def _rlcr(
 
     told = _round_zero(running, config, held)
     running.prompt.write_text(told, encoding="utf-8")
-    with (
-        agents.builder.hooks.on(Moment.STOP, running),
-        agents.builder.hooks.on(Moment.PERMISSION_REQUEST, guards.Guard(running, root)),
-        agents.builder.hooks.on(
-            Moment.USER_PROMPT_SUBMIT, guards.Prompted(running, root)
-        ),
-    ):
-        spoken(building, told)
+    # Written down only now, with the whole of the loop on disk behind it: a directory named
+    # before it holds a state file and a prompt is a directory the next run cannot pick up
+    # anyway, and would be one it read past to find that out.
+    kept.update(loop=str(where.relative_to(root)), rounds=state.current_round)
+    return running, told
 
 
 #: How few lines a plan may have before it is not a plan, as the setup script counts them.
@@ -845,7 +1163,6 @@ def _set_up(running: Loop, config: Rlcr, plan: Path | None, held: str) -> None:
       plan: The plan, or None for a review-only run.
       held: What the plan says.
     """
-    where = running.where
     lessons = running.root / running.state.bitlesson_file
     if not lessons.exists():
         lessons.parent.mkdir(parents=True, exist_ok=True)
@@ -890,7 +1207,7 @@ def _set_up(running: Loop, config: Rlcr, plan: Path | None, held: str) -> None:
             else prompts.ROUND_CONTRACT_SKIP_IMPL,
             encoding="utf-8",
         )
-    (where / "state.md").write_text(running.state.written(), encoding="utf-8")
+    running.state_file.write_text(running.state.written(), encoding="utf-8")
 
 
 def _round_zero(running: Loop, config: Rlcr, held: str) -> str:
@@ -1009,8 +1326,13 @@ def gen_plan(agents: Planning, task: str, config: Plan | None = None) -> None:
     _plan(agents, agents.planner.new(), task, setting, root, draft)
 
 
-@flow(name="rlcr")
-def rlcr(agents: Building, task: str, config: Rlcr | None = None) -> None:  # noqa: ARG001
+@flow(name="rlcr", resumable=True)
+def rlcr(
+    agents: Building,
+    task: str,  # noqa: ARG001
+    config: Rlcr | None = None,
+    state: dict[str, Any] | None = None,
+) -> None:
     """Builds the plan under review until nothing is left to say.
 
     Args:
@@ -1018,6 +1340,10 @@ def rlcr(agents: Building, task: str, config: Rlcr | None = None) -> None:  # no
       task: What was asked for. The plan is what the loop runs on, so this is not put to an
         agent -- it is what the run is called wherever it is watched.
       config: How the run was set up, or None for the plugin's own defaults.
+      state: What the last run of this flow here left behind -- the loop it was working in,
+        which this run carries on in where it is still there to carry on, in whichever of
+        its phases it stopped in. A first run is handed nothing and starts one; so is a run
+        whose loop has ended or gone, and one set up differently from the loop it was handed.
 
     Raises:
       ValueError: If the loop cannot start: outside a git repository, no plan where one is
@@ -1035,4 +1361,14 @@ def rlcr(agents: Building, task: str, config: Rlcr | None = None) -> None:  # no
         if setting.skip_impl
         else _under(root, PLAN)
     )
-    _rlcr(agents, agents.builder.new(), setting, root, plan)
+    # A run of a flow that is not being written down is handed nothing to write down in --
+    # one called from a test, one called by a flow that opened no cycle -- and is a loop
+    # that starts fresh and is not picked up, rather than a run that refuses to happen.
+    _rlcr(
+        agents,
+        agents.builder.new(),
+        setting,
+        root,
+        plan,
+        state if state is not None else {},
+    )
