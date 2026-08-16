@@ -2,7 +2,9 @@
 
 Nothing here runs a coding agent. What is checked is the governing: that the effort moves one
 rung a round towards the answer size the flow was set up to hold, that it settles rather than
-swings once it is there, and that neither end of the ladder is stepped past.
+swings once it is there, and that neither end of the ladder is stepped past. And the picking
+up: what a run leaves behind of where the governor got to, and that the run after it takes its
+first turn on that rung rather than spending rounds arriving at it a second time.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ if TYPE_CHECKING:
     import os
     from collections.abc import Iterator
     from pathlib import Path
+    from typing import Any
 
     from pydantic import BaseModel
 
@@ -75,6 +78,12 @@ class _Enough(Exception):  # noqa: N818  -- the way out of a loop that has no ot
     """Raised out of the wait to end a loop that would otherwise run for days."""
 
 
+#: Every test here drives a `while True` loop and is ended by something the test itself
+#: raises. A stop that never lands is a suite that hangs rather than one that fails, so the
+#: clock is on all of them; a test that needs longer says so itself.
+pytestmark = pytest.mark.timeout(60)
+
+
 #: How many rounds a test runs before the wait ends it.
 _ROUNDS = 4
 
@@ -111,10 +120,20 @@ def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return rested
 
 
-def _run(agent: _Scripted, **setting: float) -> None:
-    """Runs the loop until the wait says that is enough of it."""
+def _run(
+    agent: _Scripted, *, state: dict[str, Any] | None = None, **setting: float
+) -> None:
+    """Runs the loop until the wait says that is enough of it.
+
+    Args:
+      agent: The agent to drive it with.
+      state: What a run before this one left behind, or None for a first run.
+      setting: How much juice to hold it to and how to hold it.
+    """
     with pytest.raises(_Enough):
-        fixed_juice_ralph.run((agent,), "add undo", fixed_juice_ralph.Config(**setting))
+        fixed_juice_ralph.run(
+            (agent,), "add undo", fixed_juice_ralph.Config(**setting), state
+        )
 
 
 def test_the_ladder_is_the_one_the_agents_own_model_takes() -> None:
@@ -205,6 +224,117 @@ def test_the_width_of_a_turn_rides_along_with_the_rung() -> None:
     agent.effort = "swarmhigh"
 
     assert fixed_juice_ralph._at(agent, ("max", "high", "low")) == 1
+
+
+def test_what_it_keeps_is_the_rung_it_settled_at_and_the_round_it_is_on(
+    waits: list[float],
+) -> None:
+    """And nothing else: four rounds of steering, written down as where the steering got to."""
+    agent = _Scripted([9000.0] * 4)
+    kept: dict[str, Any] = {}
+
+    _run(agent, state=kept, juice=2000.0, rest=0.0)
+
+    # The answer size that moved it is not among them: it is an average over the last few
+    # minutes of turns, and the minutes before a restart are not minutes the next run has.
+    assert kept == {"rounds": _ROUNDS, "effort": "low"}
+
+
+def test_a_run_picked_up_takes_its_first_turn_on_the_rung_the_last_one_settled_at(
+    waits: list[float],
+) -> None:
+    """Which is what keeping it is for: the rounds spent converging are rounds paid for."""
+    agent = _Scripted([2000.0] * 4)  # on target, so nothing moves it off that rung
+    kept: dict[str, Any] = {"rounds": 12, "effort": "low"}
+
+    _run(agent, state=kept, juice=2000.0, rest=0.0)
+
+    assert agent.efforts == ["low"] * _ROUNDS  # the first of them included
+    # And the round it is on goes on being counted rather than starting over.
+    assert kept["rounds"] == 12 + _ROUNDS
+
+
+def test_a_rung_the_ladder_no_longer_holds_starts_it_where_a_first_run_would(
+    waits: list[float],
+) -> None:
+    """A catalogue changes under a loop left for a week: a model retired, a rung renamed."""
+    # Sonnet's ladder is Opus's without the rung above `max`.
+    agent = _Scripted([2000.0] * 4, model="claude-sonnet-5")
+
+    _run(agent, state={"rounds": 12, "effort": "ultracode"}, juice=2000.0, rest=0.0)
+
+    assert agent.efforts == ["high"] * _ROUNDS  # the effort it was configured with
+
+
+def test_the_rung_that_was_settled_at_is_read_as_a_word_rather_than_a_place() -> None:
+    """A place on the ladder is a different rung the day the ladder is a different ladder."""
+    agent = _Scripted([])  # configured at `high`
+
+    assert fixed_juice_ralph._at(agent, ("max", "high", "low"), "low") == 2
+    # A word this ladder does not hold places it where a first run places it, which is on
+    # its own effort where the ladder holds that one.
+    assert fixed_juice_ralph._at(agent, ("max", "high", "low"), "ultracode") == 1
+    # And on the middle rung where it holds neither.
+    assert fixed_juice_ralph._at(agent, ("a", "b", "c", "d", "e"), "ultracode") == 2
+
+
+def test_the_width_rides_along_with_a_rung_that_was_picked_up(
+    waits: list[float],
+) -> None:
+    """What is kept is a rung rather than an agent's effort, and the width is not a rung."""
+    agent = _Scripted([2000.0] * 4)
+    agent.effort = "swarmhigh"
+
+    _run(agent, state={"effort": "medium"}, juice=2000.0, rest=0.0)
+
+    assert agent.efforts == ["swarmmedium"] * _ROUNDS
+
+
+def test_it_says_it_can_be_picked_up_and_takes_the_state_after_the_config() -> None:
+    """The mark and the signature go together: a flow that says so and takes no dict raises."""
+    import inspect
+
+    from hmz.runner import resumes
+
+    assert resumes(fixed_juice_ralph.__file__)
+    assert list(inspect.signature(fixed_juice_ralph.run).parameters)[-2:] == [
+        "config",
+        "state",
+    ]
+
+
+def test_a_run_of_it_leaves_its_rung_where_the_next_run_of_it_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole chain: what a run wrote is kept in its cycle and handed to the run after."""
+    from hmz.cycle import cycles, state
+    from hmz.runner import Runner
+
+    monkeypatch.chdir(tmp_path)  # where the runs of a workspace are looked for
+    rounds = {"at": 0}
+
+    def slept(seconds: float) -> None:
+        del seconds
+        rounds["at"] += 1
+        if rounds["at"] % 2 == 0:  # two rounds apiece, and the second run picks up
+            raise _Enough
+
+    monkeypatch.setattr(fixed_juice_ralph.time, "sleep", slept)
+    driven = [_Scripted([9000.0] * 2), _Scripted([9000.0] * 2)]
+
+    for agent in driven:
+        with pytest.raises(_Enough):
+            Runner(
+                fixed_juice_ralph.__file__, [agent], {"juice": 2000.0, "rest": 0.0}
+            ).run("add undo")
+
+    # A run of its own each time -- a cycle is never reopened -- and the second starts on the
+    # rung the first left off at rather than back where the agent was configured.
+    first, second = cycles()
+    assert state(first) == {"rounds": 2, "effort": "low"}
+    assert state(second) == {"rounds": 4, "effort": "low"}
+    assert driven[0].efforts == ["high", "medium"]
+    assert driven[1].efforts == ["low", "low"]
 
 
 def test_a_flow_that_was_set_up_with_nothing_has_an_answer_size_of_its_own() -> None:

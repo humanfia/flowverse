@@ -19,11 +19,23 @@ ladder per round, so that the loop settles rather than swings.
 Nothing here is a clock. How long a round takes and what it costs an hour are what the model
 and the work make of it; what this holds steady is how much of an answer each turn is worth.
 
+It can be picked up where the last run of it left off, and what is worth picking up is where
+the governor got to: it keeps the rung it settled at, as `effort`, and which round it is on,
+as `rounds`. A loop started again from the middle of the ladder walks back up to that rung a
+round at a time, and every one of those rounds is a turn of a model somebody is paying for.
+The rung is kept as the effort's own word rather than as a place on the ladder, because the
+ladder is whatever the account says its CLI runs today: a model retired and an effort added
+both move the places, and a word that is no longer on the ladder at all is read as no rung
+and leaves the agent where a first run would start it. The answer size is not kept -- it is an
+average over the last few minutes of turns, and a run starting today has none of yesterday's
+minutes to average, so the first round of it measures its own.
+
 Which is a flow rather than a setting because it is a policy: how much thinking a job is worth
 is the sort of thing that changes between projects, and this is one answer to it written down.
 """
 
 import time
+from typing import Any
 
 from hmz import models
 from hmz.agents import SWARM, AgentBase
@@ -79,11 +91,13 @@ def ladder(agent: AgentBase) -> tuple[str, ...]:
       agent: The agent whose model it is.
 
     Returns:
-      One effort per rung, hardest first, or just the configured one where none is known.
+      One effort per rung, hardest first, or just the configured one where none is known --
+      the thinking of it, since a width written in front of that is not a rung and rides
+      along with whichever one the loop is on.
     """
     offered = models.offered(agent.backend, agent.config.provider)
     if not offered:
-        return (agent.config.effort,)
+        return (agent.config.effort.removeprefix(SWARM),)
     named = agent.config.model
     for model in offered:
         if model.name == named:
@@ -91,8 +105,15 @@ def ladder(agent: AgentBase) -> tuple[str, ...]:
     return offered[0].efforts
 
 
-def _at(agent: AgentBase, rungs: tuple[str, ...]) -> int:
-    """Which rung the agent is on, or the middle one where it is on none of them.
+def _at(agent: AgentBase, rungs: tuple[str, ...], settled: str = "") -> int:
+    """Which rung the loop starts on: the one it settled at last, or the agent's own.
+
+    The rung a run before this one settled at is what this run has to steer from, and it is
+    read here as a word rather than trusted as a place: the ladder is read off what that
+    account says its CLI runs, which is an answer that moves, and a word it no longer holds
+    is a rung this model does not have. Then the agent is placed as it would be on a first
+    run -- on the effort it was configured with, or on the middle rung where the ladder does
+    not hold that one either.
 
     Kimi's effort says how wide to run as well as how hard, and the width goes with it: the
     rung is the thinking, and the prefix rides along.
@@ -100,31 +121,49 @@ def _at(agent: AgentBase, rungs: tuple[str, ...]) -> int:
     Args:
       agent: The agent to place.
       rungs: The ladder, hardest first.
+      settled: The rung the last run of this flow settled at, or "" for a first run.
 
     Returns:
-      The index of the rung it is on.
+      The index of the rung it starts on.
     """
-    thinking = agent.effort.removeprefix(SWARM)
-    if thinking in rungs:
-        return rungs.index(thinking)
+    for said in (settled, agent.effort.removeprefix(SWARM)):
+        if said in rungs:
+            return rungs.index(said)
     return len(rungs) // 2
 
 
-@flow
-def run(agents: tuple[AgentBase], task: str, config: Config | None = None) -> None:
+@flow(resumable=True)
+def run(
+    agents: tuple[AgentBase],
+    task: str,
+    config: Config | None = None,
+    state: dict[str, Any] | None = None,
+) -> None:
     """Runs the loop, holding the agent to the answer size it was set up with.
 
     Args:
       agents: The one agent it drives.
       task: What it is to do, every turn, from the repository and nothing else.
       config: How much juice to hold it to and how to hold it, or None for the defaults.
+      state: What the last run of it settled at, and what this one writes its own into, or
+        None for a call from outside a run -- which is a loop that governs itself as ever
+        and leaves nothing behind.
     """
     (agent,) = agents
     held = config or Config()
+    kept = state if state is not None else {}
     rungs = ladder(agent)
     wide = SWARM if agent.effort.startswith(SWARM) else ""
-    at = _at(agent, rungs)
+    at = _at(agent, rungs, kept.get("effort", ""))
     while True:
+        # Said before the turn rather than counted after it, so that a run watched from the
+        # outside says which round the one going now is.
+        kept["rounds"] = kept.get("rounds", 0) + 1
+        # And the rung asked for before the turn rather than after it, so that the first turn
+        # of a run picked up is taken at the rung the run before it settled at: an effort set
+        # only once a turn has been taken would have that turn steer the loop from a rung
+        # nobody meant it to be on.
+        agent.effort = f"{wide}{rungs[at]}"
         # A session of its own each round: the agent starts from the task and the repository,
         # with nothing of the last round in context. What carries over is the effort.
         agent(task, suppress=True)
@@ -136,6 +175,12 @@ def run(agents: tuple[AgentBase], task: str, config: Config | None = None) -> No
             at = max(at - 1, 0)  # thin answers: think harder, and write more in each
         elif juice > held.juice * (1 + held.slack):
             at = min(at + 1, len(rungs) - 1)  # long ones: think less, and answer sooner
-        agent.effort = f"{wide}{rungs[at]}"
-        print(f"{juice:.0f}/{held.juice:g} out per turn · {agent.effort}")
+        # Where the governor has got to, which is what the next run of this starts from. The
+        # answer size that moved it is not kept: it is measured over the last few minutes of
+        # turns, and a run that has not taken any has no minutes to read it over.
+        kept["effort"] = rungs[at]
+        print(
+            f"round {kept['rounds']} · {juice:.0f}/{held.juice:g} out per turn · "
+            f"{wide}{rungs[at]}"
+        )
         time.sleep(held.rest)
