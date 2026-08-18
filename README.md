@@ -3,7 +3,7 @@
 > The flows humanize offers but does not ship.
 
 A flowverse is a git repository with a `flows/` directory of
-[humanize](https://github.com/humanfia/humanize) flows in it. A flow is a module, in either of
+[humanize](https://github.com/humanfia/humanize2) flows in it. A flow is a module, in either of
 its two shapes: a directory holding the `__init__.py` that is the flow, whatever it imports
 beside it and the `skills/` it brings, or a single `.py` file for one that needs neither.
 Nothing outside `flows/` is read. This is the official one. It is offered from the start,

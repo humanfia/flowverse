@@ -15,7 +15,7 @@ dependencies = ["hmz", "pydantic>=2.9"]
 package = false
 
 [tool.uv.sources]
-hmz = { git = "https://github.com/humanfia/humanize" }
+hmz = { git = "https://github.com/humanfia/humanize2" }
 
 [dependency-groups]
 dev = [
