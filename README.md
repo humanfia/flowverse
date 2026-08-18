@@ -74,7 +74,9 @@ flowverse/
 ```
 
 A flow is one directory in `flows/` whose `__init__.py` imports nothing of humanize but
-`hmz.agents` and holds a `run(agents, task)` -- or several entry points marked with `@flow`,
+`hmz.flows` -- the mark, the `Agent` and `Session` interfaces it drives, and whatever else it
+needs, all handed through from that one name -- and holds a `run(agents, task)` -- or several
+entry points marked with `@flow`,
 which is what makes one flow three flows. `@flow(resumable=True)` takes a dict after that,
 holding whatever the last run of it here wrote there; keep to what JSON holds, and write it as
 you go rather than at the end, since a run worth picking up is one that was stopped. A flow

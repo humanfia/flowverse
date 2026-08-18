@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from hmz.agents import Verdict
+from hmz.flows import Verdict
 
 from . import blocks, prompts
 from .prompts import render
@@ -34,8 +34,7 @@ from .prompts import render
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from hmz.agents import AgentBase, Occasion, SessionBase
-    from hmz.backends import Profile
+    from hmz.flows import Agent, Occasion, Profile, Session
     from pydantic import BaseModel
 
 __all__ = [
@@ -132,7 +131,7 @@ _LESSON_ID = re.compile(r"^Lesson ID:\s*(\S+)\s*$", re.MULTILINE)
 ALLOWED = ("complete", "cancel", "maxiter", "stop", "unexpected")
 
 
-def spoken(agent: AgentBase | SessionBase, prompt: str) -> tuple[str, float]:
+def spoken(agent: Agent | Session, prompt: str) -> tuple[str, float]:
     """What a turn answered, taking it again for as long as taking it keeps failing.
 
     A turn that failed is a turn to take again, and only that turn: a round here is hours of
@@ -158,9 +157,7 @@ def spoken(agent: AgentBase | SessionBase, prompt: str) -> tuple[str, float]:
         time.sleep(5)
 
 
-def answered[T: BaseModel](
-    agent: AgentBase | SessionBase, prompt: str, schema: type[T]
-) -> T:
+def answered[T: BaseModel](agent: Agent | Session, prompt: str, schema: type[T]) -> T:
     """What a turn answered as the shape it was asked for, taking it again while it fails.
 
     :func:`spoken` for a question rather than for work: the answer is a field to read instead
@@ -393,7 +390,7 @@ class Loop:
         how far the loop got is in the run beside the directory it got there in.
     """
 
-    reviewer: AgentBase
+    reviewer: Agent
     where: Path
     root: Path
     state: State
@@ -410,7 +407,7 @@ class Loop:
     @classmethod
     def picked_up(
         cls,
-        reviewer: AgentBase,
+        reviewer: Agent,
         where: Path,
         root: Path,
         kept: dict[str, Any] | None = None,
@@ -1442,7 +1439,7 @@ def _stamp() -> str:
     return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _open_tasks(agent: AgentBase, occasion: Occasion) -> list[str]:
+def _open_tasks(agent: Agent, occasion: Occasion) -> list[str]:
     """Every task the builder still has open, read from where its backend keeps them.
 
     The plugin's `check-todos-from-transcript.py`: the tasks the backend files under the
@@ -1457,7 +1454,7 @@ def _open_tasks(agent: AgentBase, occasion: Occasion) -> list[str]:
       One line per task still open, as the plugin lists them, and nothing at all where the
       backend keeps none of this where it can be read.
     """
-    from hmz import backends
+    from hmz.flows import backends
 
     profile = backends.named(agent.backend)
     if profile is None or not occasion.session:

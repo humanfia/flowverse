@@ -15,12 +15,11 @@ repository rather than a history.
 import time
 from typing import Any
 
-from hmz.agents import AgentBase
-from hmz.flows import flow
+from hmz.flows import Agent, flow
 
 
 @flow(resumable=True)
-def run(agents: tuple[AgentBase, AgentBase], task: str, state: dict[str, Any]) -> None:
+def run(agents: tuple[Agent, Agent], task: str, state: dict[str, Any]) -> None:
     at = state.get("turn", 0) % len(agents)
     while True:
         agents[at](task, suppress=True)  # which reads the repository, not a history

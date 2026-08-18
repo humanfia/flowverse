@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from hmz.agents import HumanAgent, Moment, Occasion, Question
-from hmz.flows import held
-from hmz.runner import configures, drives, resumes, wanted
+from hmz.flows import configures, drives, held, resumes, wanted
 
 import humanize1
 from _humanize1 import guards, loop, prompts

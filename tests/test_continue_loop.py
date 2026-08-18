@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from hmz.agents import AgentBase, AgentConfig, Event, SessionBase
-from hmz.runner import resumes
+from hmz.flows import resumes
 
 import continue_loop
 
@@ -148,7 +148,7 @@ def test_a_run_picked_up_opens_on_the_task_rather_than_a_nudge(
 
 def test_it_says_it_can_be_picked_up_and_drives_the_one_agent() -> None:
     """Which is what hands it the dict at all: a flow that only took one would never see it."""
-    from hmz.runner import drives
+    from hmz.flows import drives
 
     assert resumes(continue_loop.__file__)
     assert drives(continue_loop.__file__) == ("",)

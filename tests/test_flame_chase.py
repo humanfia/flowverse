@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from hmz.agents import AgentBase, AgentConfig, Event, SessionBase
-from hmz.runner import resumes
+from hmz.flows import resumes
 
 import flame_chase
 
@@ -189,7 +189,7 @@ def test_a_round_the_first_agent_was_cut_off_in_is_counted_once(
 
 def test_it_says_it_can_be_picked_up_and_drives_two_agents() -> None:
     """Which is what hands it the dict at all: a flow that only took one would never see it."""
-    from hmz.runner import drives
+    from hmz.flows import drives
 
     assert resumes(flame_chase.__file__)
     assert drives(flame_chase.__file__) == ("", "")

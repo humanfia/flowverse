@@ -37,9 +37,7 @@ is the sort of thing that changes between projects, and this is one answer to it
 import time
 from typing import Any
 
-from hmz import models
-from hmz.agents import SWARM, AgentBase
-from hmz.flows import flow
+from hmz.flows import SWARM, Agent, flow, models
 from pydantic import BaseModel, Field
 
 
@@ -75,7 +73,7 @@ class Config(BaseModel):
     )
 
 
-def ladder(agent: AgentBase) -> tuple[str, ...]:
+def ladder(agent: Agent) -> tuple[str, ...]:
     """The efforts this agent's model takes, hardest first.
 
     Read out of what that CLI last said it runs as this agent's account, which is where every
@@ -105,7 +103,7 @@ def ladder(agent: AgentBase) -> tuple[str, ...]:
     return offered[0].efforts
 
 
-def _at(agent: AgentBase, rungs: tuple[str, ...], settled: str = "") -> int:
+def _at(agent: Agent, rungs: tuple[str, ...], settled: str = "") -> int:
     """Which rung the loop starts on: the one it settled at last, or the agent's own.
 
     The rung a run before this one settled at is what this run has to steer from, and it is
@@ -134,7 +132,7 @@ def _at(agent: AgentBase, rungs: tuple[str, ...], settled: str = "") -> int:
 
 @flow(resumable=True)
 def run(
-    agents: tuple[AgentBase],
+    agents: tuple[Agent],
     task: str,
     config: Config | None = None,
     state: dict[str, Any] | None = None,

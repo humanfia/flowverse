@@ -18,6 +18,7 @@ from hmz.agents import (
     AgentBase,
     AgentConfig,
     Event,
+    HumanAgent,
     Moment,
     Occasion,
     SessionBase,
@@ -257,7 +258,7 @@ def test_a_loop_that_is_accepted_runs_to_complete(
     agents = humanize1.Building(
         builder=Scripted(CONFIG, name="builder", doing=_builder(workspace, wrote)),
         reviewer=Scripted(CONFIG, name="reviewer", doing=_reviewer(asked)),
-        human=humanize1.HumanAgent(),
+        human=HumanAgent(),
     )
     config = humanize1.Rlcr(
         plan_file="docs/plan.md",
@@ -311,7 +312,7 @@ def test_a_round_that_wrote_nothing_is_sent_back_rather_than_reviewed(
     agents = humanize1.Building(
         builder=Scripted(CONFIG, name="builder", doing=forgetful),
         reviewer=Scripted(CONFIG, name="reviewer", doing=_reviewer(asked)),
-        human=humanize1.HumanAgent(),
+        human=HumanAgent(),
     )
 
     humanize1.rlcr(
@@ -360,7 +361,7 @@ def test_findings_send_the_builder_back_before_the_loop_can_finish(
     agents = humanize1.Building(
         builder=Scripted(CONFIG, name="builder", doing=_builder(workspace, wrote)),
         reviewer=Scripted(CONFIG, name="reviewer", doing=reviewing),
-        human=humanize1.HumanAgent(),
+        human=HumanAgent(),
     )
 
     humanize1.rlcr(
@@ -404,7 +405,7 @@ def test_a_review_with_no_verdict_is_sent_back_for_one(
     agents = humanize1.Building(
         builder=Scripted(CONFIG, name="builder", doing=_builder(workspace, wrote)),
         reviewer=Scripted(CONFIG, name="reviewer", doing=reviewing),
-        human=humanize1.HumanAgent(),
+        human=HumanAgent(),
     )
 
     humanize1.rlcr(
@@ -442,7 +443,7 @@ def test_the_loop_stops_after_as_many_rounds_as_it_was_given(
                 else "Still wrong.\n\nMainline Progress Verdict: ADVANCED\n"
             ),
         ),
-        human=humanize1.HumanAgent(),
+        human=HumanAgent(),
     )
 
     humanize1.rlcr(
@@ -481,7 +482,7 @@ def test_the_circuit_breaks_after_three_rounds_of_no_progress(
                 else "Nothing moved.\n\nMainline Progress Verdict: STALLED\n"
             ),
         ),
-        human=humanize1.HumanAgent(),
+        human=HumanAgent(),
     )
 
     humanize1.rlcr(
@@ -527,7 +528,7 @@ def test_the_methodology_analysis_is_the_way_out_unless_privacy_says_otherwise(
     agents = humanize1.Building(
         builder=Scripted(CONFIG, name="builder", doing=turn),
         reviewer=Scripted(CONFIG, name="reviewer", doing=_reviewer([])),
-        human=humanize1.HumanAgent(),
+        human=HumanAgent(),
     )
 
     humanize1.rlcr(
@@ -558,7 +559,7 @@ def test_skip_impl_goes_straight_to_the_code_review(
     agents = humanize1.Building(
         builder=Scripted(CONFIG, name="builder", doing=_builder(workspace, wrote)),
         reviewer=Scripted(CONFIG, name="reviewer", doing=_reviewer(asked)),
-        human=humanize1.HumanAgent(),
+        human=HumanAgent(),
     )
 
     humanize1.rlcr(
@@ -744,9 +745,7 @@ def _stalling(said: list[str]) -> Callable[[str], str]:
 
 def _building(builder: AgentBase, reviewer: AgentBase) -> humanize1.Building:
     """The three the loop is driven by, for a run that is about the two that work."""
-    return humanize1.Building(
-        builder=builder, reviewer=reviewer, human=humanize1.HumanAgent()
-    )
+    return humanize1.Building(builder=builder, reviewer=reviewer, human=HumanAgent())
 
 
 @pytest.mark.timeout(120)

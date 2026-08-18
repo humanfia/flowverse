@@ -49,16 +49,15 @@ this flow that wants its reviews written differently edits that file and runs.
 import time
 from typing import Any, NamedTuple
 
-from hmz.agents import AgentBase
-from hmz.flows import flow
+from hmz.flows import Agent, flow
 from pydantic import BaseModel, Field
 
 
 class Agents(NamedTuple):
     """The two the flow drives: one that works in a session, and one that arrives fresh."""
 
-    actor: AgentBase
-    reviewer: AgentBase
+    actor: Agent
+    reviewer: Agent
 
 
 class Review(BaseModel):

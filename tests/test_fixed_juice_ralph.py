@@ -294,7 +294,7 @@ def test_it_says_it_can_be_picked_up_and_takes_the_state_after_the_config() -> N
     """The mark and the signature go together: a flow that says so and takes no dict raises."""
     import inspect
 
-    from hmz.runner import resumes
+    from hmz.flows import resumes
 
     assert resumes(fixed_juice_ralph.__file__)
     assert list(inspect.signature(fixed_juice_ralph.run).parameters)[-2:] == [
@@ -356,7 +356,7 @@ def test_an_answer_size_of_nothing_is_refused_where_it_is_set_up() -> None:
 
 def test_the_flow_says_how_many_agents_it_drives_and_what_it_takes() -> None:
     """Which is what a command line reads before it starts one, and what `/config` asks."""
-    from hmz.runner import configures, drives
+    from hmz.flows import configures, drives
 
     where = fixed_juice_ralph.__file__
 

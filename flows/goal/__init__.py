@@ -13,14 +13,13 @@ the first run did.
 import time
 from typing import Annotated, Any, NamedTuple
 
-from hmz.agents import AgentBase, Goal
-from hmz.flows import flow
+from hmz.flows import Agent, Goal, flow
 
 
 class Agents(NamedTuple):
     """The one this drives, which is run under a goal rather than by turns."""
 
-    worker: Annotated[AgentBase, Goal]
+    worker: Annotated[Agent, Goal]
 
 
 @flow(resumable=True)

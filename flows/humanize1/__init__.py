@@ -95,9 +95,8 @@ from typing import Annotated, Any, Literal, NamedTuple
 
 # Under a name of its own: what a person is put is one of these, and the shape of the
 # quiz below has a `Question` of its own that is a field of the model the reviewer fills.
-from hmz.agents import AgentBase, HumanAgent, Moment, SessionBase
-from hmz.agents import Question as Asking
-from hmz.flows import flow
+from hmz.flows import Agent, Moment, Person, Session, flow
+from hmz.flows import Question as Asking
 from pydantic import BaseModel, Field, model_validator
 
 from _humanize1 import guards, loop, planning, prompts
@@ -108,14 +107,14 @@ from _humanize1.prompts import render
 class Drafting(NamedTuple):
     """`gen-idea`'s one agent, which explores the idea and writes the draft."""
 
-    drafter: AgentBase
+    drafter: Agent
 
 
 class Planning(NamedTuple):
     """`gen-plan`'s two: the one that writes the plan, and the one that reads it back."""
 
-    planner: AgentBase
-    analyst: AgentBase
+    planner: Agent
+    analyst: Agent
 
 
 class Building(NamedTuple):
@@ -126,9 +125,9 @@ class Building(NamedTuple):
     tool is not one of them. The plugin is a Claude Code plugin for the same reason.
     """
 
-    builder: Annotated[AgentBase, Moment.PERMISSION_REQUEST]
-    reviewer: AgentBase
-    human: HumanAgent
+    builder: Annotated[Agent, Moment.PERMISSION_REQUEST]
+    reviewer: Agent
+    human: Person
 
 
 #: Every language the plugin will write a translated plan in, by name and by ISO code.
@@ -469,7 +468,7 @@ def _section(held: str, *headings: str) -> str:
     return ""
 
 
-def _asked(human: HumanAgent, question: str, options: list[str]) -> str:
+def _asked(human: Person, question: str, options: list[str]) -> str:
     """Puts one multiple-choice question to whoever is at the prompt.
 
     Asked as a question with options rather than as a paragraph with a list in it: it is the
@@ -503,7 +502,7 @@ def _asked(human: HumanAgent, question: str, options: list[str]) -> str:
     return said.strip()[:1].upper()
 
 
-def _idea(drafting: SessionBase, task: str, config: Idea, root: Path) -> Path:
+def _idea(drafting: Session, task: str, config: Idea, root: Path) -> Path:
     """`gen-idea`: opens the idea from N directions at once and closes it to one.
 
     Args:
@@ -544,7 +543,7 @@ def _idea(drafting: SessionBase, task: str, config: Idea, root: Path) -> Path:
 
 def _plan(
     agents: Planning,
-    writing: SessionBase,
+    writing: Session,
     task: str,
     config: Plan,
     root: Path,
@@ -682,7 +681,7 @@ def _plan(
 
 def _rlcr(
     agents: Building,
-    building: SessionBase,
+    building: Session,
     config: Rlcr,
     root: Path,
     plan: Path | None,
@@ -740,7 +739,7 @@ def _rlcr(
 
 
 def _again(
-    reviewer: AgentBase,
+    reviewer: Agent,
     config: Rlcr,
     root: Path,
     plan: Path | None,

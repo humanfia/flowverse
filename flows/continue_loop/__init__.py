@@ -14,12 +14,11 @@ flow's.
 import time
 from typing import Any
 
-from hmz.agents import AgentBase
-from hmz.flows import flow
+from hmz.flows import Agent, flow
 
 
 @flow(resumable=True)
-def run(agents: tuple[AgentBase], task: str, state: dict[str, Any]) -> None:
+def run(agents: tuple[Agent], task: str, state: dict[str, Any]) -> None:
     (agent,) = agents
     session = agent.new()
     # The task, whatever run this is picking up from: the session is new either way, and a

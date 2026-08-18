@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import itertools
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from hmz.agents import AgentBase, AgentConfig, Event, SessionBase
-from hmz.runner import resumes
+from hmz.flows import resumes
 
 import goal
 
@@ -36,7 +36,8 @@ class _Scripted(AgentBase):
     """An agent with a goal feature that does nothing but say it was given one."""
 
     #: What the flow declares its agent runs under, which a stand-in has to answer to.
-    pursues = True
+    #: Annotated as the interface declares it: a fact of the backend, written on the class.
+    pursues: ClassVar[bool] = True
 
     def __init__(self) -> None:
         super().__init__(CONFIG, name="worker")
@@ -134,7 +135,7 @@ def test_a_run_picked_up_goes_on_from_the_round_it_reached(
 
 def test_it_says_it_can_be_picked_up_and_runs_its_agent_under_a_goal() -> None:
     """Which is what hands it the dict at all: a flow that only took one would never see it."""
-    from hmz.runner import drives
+    from hmz.flows import drives
 
     assert resumes(goal.__file__)
     assert drives(goal.__file__) == ("worker",)

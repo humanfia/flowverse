@@ -279,7 +279,7 @@ def test_the_mark_and_the_signature_both_say_it_can_be_picked_up() -> None:
     """The mark and the signature go together: one without the other is a run that raises."""
     import inspect
 
-    from hmz.runner import drives, resumes
+    from hmz.flows import drives, resumes
 
     assert resumes(rlar.__file__)
     assert drives(rlar.__file__) == ("actor", "reviewer")
