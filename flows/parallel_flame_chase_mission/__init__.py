@@ -22,6 +22,8 @@ from _parallel_flame_chase.core.api import Agents, BaseConfig
 from hmz.flows import flow
 from pydantic import Field
 
+from parallel_flame_chase_mission.runtime.engine import execute
+
 
 class Config(BaseConfig):
     """Isolation, mission cadence, interruption, and resume policy."""
@@ -65,8 +67,6 @@ def run(
     state: dict[str, Any] | None = None,
 ) -> None:
     """Run mission-governed lanes with scoped audits and integration handoff."""
-    from .runtime.engine import execute
-
     execute(agents, task, config or Config(), state)
 
 

@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hmz.flows import configures, drives, held, offered, resumes
+from hmz.flows import configures, drives, held, loaded, offered, resumes
 from hmz.flows.skills import brought
 
 
@@ -54,3 +54,15 @@ def test_base_flow_does_not_load_the_mission_package() -> None:
         "for name in sys.modules)"
     )
     subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_mission_entry_runs_after_directory_loading() -> None:
+    mission = Path(__file__).parents[1] / "flows" / "parallel_flame_chase_mission"
+    namespace = loaded(mission)
+    calls: list[tuple[object, ...]] = []
+    namespace["run"].__globals__["execute"] = lambda *args: calls.append(args)
+
+    namespace["run"](None, "task", None, None)
+
+    assert len(calls) == 1
+    assert calls[0][1:] == ("task", namespace["Config"](), None)
