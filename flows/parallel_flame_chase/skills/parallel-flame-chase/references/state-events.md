@@ -14,6 +14,11 @@ replan; a different substantive task starts a new run. Configuration may force a
 
 Protected paths are detection-only: modifying one blocks the affected lane and records evidence.
 The runtime never rolls back an actor's files, because rollback could erase unrelated user work.
+Generated `__pycache__` directories below a protected directory are excluded because ordinary
+Python execution rewrites their bytecode. Explicitly protecting a cache path still fingerprints
+it, and replacing a cache directory with a file or symlink remains a violation. When an older run
+resumes, the runtime migrates its fingerprint and clears an exact prior cache false-positive only
+after every non-cache entry still matches the original baseline.
 
 ## External event ingress
 

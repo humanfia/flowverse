@@ -32,9 +32,7 @@ def _require_every_property(schema: dict[str, Any]) -> None:
 class StrictModel(BaseModel):
     """A runtime contract rejects unknown fields rather than silently losing them."""
 
-    model_config = ConfigDict(
-        extra="forbid", json_schema_extra=_require_every_property
-    )
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_require_every_property)
 
 
 class ArtifactRef(StrictModel):

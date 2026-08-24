@@ -13,7 +13,7 @@ import subprocess
 import threading
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Self, cast
 
 from .models import LANES, Deliverable, ExternalEventV1, LaneName
@@ -24,6 +24,7 @@ EXTERNAL_SKIP_LIMIT = 8 * 1024 * 1024
 DELIVERY_EVENTS_PER_SOURCE = 12
 DELIVERY_BYTES_PER_SOURCE = 131_072
 ARTIFACT_FILE_LIMIT = 64 * 1024 * 1024
+PROTECTED_FINGERPRINT_VERSION = 2
 
 
 def now() -> str:
@@ -329,8 +330,85 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _fingerprint_entries(entries: dict[str, object]) -> dict[str, object]:
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
+    return {"sha256": hashlib.sha256(encoded).hexdigest(), "entries": entries}
+
+
+def _inside_generated_python_cache(protected_root: Path, candidate: Path) -> bool:
+    """Ignore only real ``__pycache__`` directories below a protected root.
+
+    An explicitly protected cache path remains protected because the cache component is then the
+    root, not a descendant. A symlink or regular file named ``__pycache__`` is also retained so an
+    actor cannot hide an import redirection behind the generated-cache exception.
+    """
+    suffix = candidate.relative_to(protected_root)
+    for index, part in enumerate(suffix.parts):
+        if part != "__pycache__":
+            continue
+        cache_root = protected_root.joinpath(*suffix.parts[: index + 1])
+        try:
+            return stat.S_ISDIR(cache_root.lstat().st_mode)
+        except OSError:
+            return False
+    return False
+
+
+def migrate_legacy_tree_fingerprint(
+    fingerprint: object, protected: tuple[str, ...]
+) -> dict[str, object]:
+    """Project a version-1 fingerprint onto the generated-cache-safe policy.
+
+    The legacy checksum is verified before projection. This lets a stopped run migrate only when
+    every non-cache entry still agrees with the original baseline; callers must compare the result
+    with a fresh version-2 fingerprint before accepting the migration.
+    """
+    if not isinstance(fingerprint, dict):
+        raise TypeError("legacy protected fingerprint is not an object")
+    entries = fingerprint.get("entries")
+    if not isinstance(entries, dict) or not all(
+        isinstance(path, str) and isinstance(value, dict)
+        for path, value in entries.items()
+    ):
+        raise ValueError("legacy protected fingerprint entries are malformed")
+    checked = _fingerprint_entries(cast("dict[str, object]", entries))
+    if fingerprint.get("sha256") != checked["sha256"]:
+        raise ValueError(
+            "legacy protected fingerprint checksum does not match its entries"
+        )
+
+    normalized: dict[str, object] = {}
+    parsed_entries = {
+        PurePosixPath(path): (path, value) for path, value in entries.items()
+    }
+    for raw in protected:
+        protected_root = PurePosixPath(Path(raw).as_posix())
+        for candidate, (path, value) in parsed_entries.items():
+            if candidate == protected_root:
+                normalized[path] = value
+                continue
+            try:
+                suffix = candidate.relative_to(protected_root)
+            except ValueError:
+                continue
+            cache_root: PurePosixPath | None = None
+            for index, part in enumerate(suffix.parts):
+                if part == "__pycache__":
+                    cache_root = protected_root.joinpath(*suffix.parts[: index + 1])
+                    break
+            if cache_root is not None:
+                cache_entry = parsed_entries.get(cache_root)
+                if (
+                    cache_entry is not None
+                    and cache_entry[1].get("kind") == "directory"
+                ):
+                    continue
+            normalized[path] = value
+    return _fingerprint_entries(normalized)
+
+
 def tree_fingerprint(root: Path, protected: tuple[str, ...]) -> dict[str, object]:
-    """Hash configured paths without following links or changing the workspace."""
+    """Hash configured paths while excluding generated Python cache directories."""
     entries: dict[str, object] = {}
     for raw in protected:
         relative = Path(raw)
@@ -344,6 +422,8 @@ def tree_fingerprint(root: Path, protected: tuple[str, ...]) -> dict[str, object
         if path.is_dir() and not path.is_symlink():
             candidates.extend(sorted(path.rglob("*")))
         for candidate in candidates:
+            if _inside_generated_python_cache(path, candidate):
+                continue
             rel = candidate.relative_to(root).as_posix()
             info = candidate.lstat()
             if stat.S_ISLNK(info.st_mode):
@@ -359,8 +439,7 @@ def tree_fingerprint(root: Path, protected: tuple[str, ...]) -> dict[str, object
                 }
             else:
                 entries[rel] = {"kind": "special", "mode": info.st_mode}
-    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
-    return {"sha256": hashlib.sha256(encoded).hexdigest(), "entries": entries}
+    return _fingerprint_entries(entries)
 
 
 def validate_deliverable(

@@ -27,13 +27,17 @@ from .models import (
     LaneReport,
 )
 from .prompts import (
+    AUDIT_PROMPT_MAX_CHARS,
+    AUDIT_PROMPT_RETRY_MAX_CHARS,
     audit_prompt,
     audit_repair_prompt,
+    compact_audit_packet,
     lane_prompt,
     lane_repair_prompt,
     planning_prompt,
 )
 from .storage import (
+    PROTECTED_FINGERPRINT_VERSION,
     ExternalEventReader,
     ReportBus,
     RunPaths,
@@ -43,6 +47,7 @@ from .storage import (
     atomic_text,
     initialize_paths,
     inspect_workspace,
+    migrate_legacy_tree_fingerprint,
     now,
     snapshot,
     task_fingerprint,
@@ -64,6 +69,9 @@ CONTINUATION_MARKERS = {
     "继续",
     "继续。",
 }
+PROTECTED_VIOLATION_ERROR = (
+    "configured protected paths changed; the runtime blocked the lane without rollback"
+)
 
 
 @dataclass(slots=True)
@@ -189,13 +197,23 @@ def _semantic_decision_error(
     return None
 
 
+def _input_too_large(error: str) -> bool:
+    lowered = error.lower()
+    return "input_too_large" in lowered or (
+        "input exceeds" in lowered and "maximum length" in lowered
+    )
+
+
 def _run_audit_session(
     session: Session,
     packet: dict[str, object],
 ) -> tuple[AuditDecision | None, list[dict[str, object]]]:
     """Try one proposal and two same-session repairs before yielding no decision."""
     attempts: list[dict[str, object]] = []
-    prompt = audit_prompt(packet)
+    prompt_packet = compact_audit_packet(
+        packet, max_prompt_chars=AUDIT_PROMPT_MAX_CHARS
+    )
+    prompt = audit_prompt(prompt_packet, max_chars=AUDIT_PROMPT_MAX_CHARS)
     for number in range(1, 4):
         try:
             proposed = session(prompt, suppress=False, schema=AuditDecision)
@@ -204,21 +222,37 @@ def _run_audit_session(
         except ValueError as why:
             error = f"{type(why).__name__}: {why}"[:2000]
             attempts.append({"number": number, "at": now(), "error": error})
-            prompt = audit_repair_prompt(error, packet)
+            if _input_too_large(error) and number < 3:
+                prompt_packet = compact_audit_packet(
+                    packet, max_prompt_chars=AUDIT_PROMPT_RETRY_MAX_CHARS
+                )
+                prompt = audit_prompt(
+                    prompt_packet, max_chars=AUDIT_PROMPT_RETRY_MAX_CHARS
+                )
+                continue
+            prompt = audit_repair_prompt(error, prompt_packet)
             continue
         except Exception as why:  # noqa: BLE001 - backend failures are an open set
             error = f"{type(why).__name__}: {why}"[:2000]
             attempts.append({"number": number, "at": now(), "error": error})
+            if _input_too_large(error) and number < 3:
+                prompt_packet = compact_audit_packet(
+                    packet, max_prompt_chars=AUDIT_PROMPT_RETRY_MAX_CHARS
+                )
+                prompt = audit_prompt(
+                    prompt_packet, max_chars=AUDIT_PROMPT_RETRY_MAX_CHARS
+                )
+                continue
             return None, attempts
         if proposed is None:
             error = "coordinator returned no structured decision"
         else:
-            error = _semantic_decision_error(packet, proposed)
+            error = _semantic_decision_error(prompt_packet, proposed)
             if error is None:
                 attempts.append({"number": number, "at": now(), "valid": True})
                 return proposed, attempts
         attempts.append({"number": number, "at": now(), "error": error})
-        prompt = audit_repair_prompt(error, packet)
+        prompt = audit_repair_prompt(error, prompt_packet)
     return None, attempts
 
 
@@ -397,6 +431,7 @@ class ParallelRuntime:
             "latest_reports": {},
             "protected_baselines": {},
             "protected_policy": [],
+            "protected_fingerprint_version": PROTECTED_FINGERPRINT_VERSION,
             "missions": None,
             "external": {"cursor": None, "seen_ids": [], "errors": []},
             "events": [],
@@ -486,6 +521,29 @@ class ParallelRuntime:
                     "lane": lane,
                     "prior_consecutive_failures": prior_failures,
                     "prior_error": "actor returned no structured report",
+                }
+            )
+
+    def _recover_generated_cache_blocks(self, lanes: tuple[LaneName, ...]) -> None:
+        """Unblock only the exact false positive proven safe by fingerprint migration."""
+        for lane in lanes:
+            durable = cast("dict[str, Any]", self.control["lanes"][lane])
+            if (
+                durable.get("blocked") is not True
+                or durable.get("last_error") != PROTECTED_VIOLATION_ERROR
+            ):
+                continue
+            prior_failures = int(durable.get("consecutive_failures", 0))
+            durable["blocked"] = False
+            durable["consecutive_failures"] = 0
+            durable["last_error"] = None
+            self.control["events"].append(
+                {
+                    "at": now(),
+                    "kind": "generated_cache_false_positive_recovered",
+                    "lane": lane,
+                    "prior_consecutive_failures": prior_failures,
+                    "prior_error": PROTECTED_VIOLATION_ERROR,
                 }
             )
 
@@ -606,13 +664,57 @@ class ParallelRuntime:
         if self.control.get("protected_policy") != policy:
             baselines.clear()
             self.control["protected_policy"] = policy
+            self.control["protected_fingerprint_version"] = (
+                PROTECTED_FINGERPRINT_VERSION
+            )
             self.control["events"].append(
                 {
                     "at": now(),
                     "kind": "protected_policy_baseline_reset",
                     "paths": policy,
+                    "fingerprint_version": PROTECTED_FINGERPRINT_VERSION,
                 }
             )
+        elif self.control.get("protected_fingerprint_version", 1) != (
+            PROTECTED_FINGERPRINT_VERSION
+        ):
+            previous_version = self.control.get("protected_fingerprint_version", 1)
+            if previous_version != 1:
+                raise ValueError(
+                    f"unsupported protected fingerprint version: {previous_version!r}"
+                )
+            migrated: dict[str, object] = {}
+            verified: list[LaneName] = []
+            for lane in cast("tuple[LaneName, ...]", LANES):
+                current = tree_fingerprint(self.paths.workspace(lane), protected)
+                legacy = baselines.get(lane)
+                if legacy is None:
+                    migrated[lane] = current
+                    continue
+                projected = migrate_legacy_tree_fingerprint(legacy, protected)
+                if projected != current:
+                    raise RuntimeError(
+                        "protected fingerprint migration found a non-cache change in "
+                        f"{lane}; refusing to reset its baseline"
+                    )
+                migrated[lane] = current
+                verified.append(lane)
+            baselines.clear()
+            baselines.update(migrated)
+            self.control["protected_fingerprint_version"] = (
+                PROTECTED_FINGERPRINT_VERSION
+            )
+            self.control["events"].append(
+                {
+                    "at": now(),
+                    "kind": "protected_fingerprint_migrated",
+                    "from_version": previous_version,
+                    "to_version": PROTECTED_FINGERPRINT_VERSION,
+                    "ignored_generated_directories": ["__pycache__"],
+                    "verified_lanes": list(verified),
+                }
+            )
+            self._recover_generated_cache_blocks(tuple(verified))
         if protected:
             for lane in cast("tuple[LaneName, ...]", LANES):
                 if lane not in baselines:
@@ -837,7 +939,7 @@ class ParallelRuntime:
         after = tree_fingerprint(self.paths.workspace(lane), protected)
         if before == after:
             return None
-        return "configured protected paths changed; the runtime blocked the lane without rollback"
+        return PROTECTED_VIOLATION_ERROR
 
     def _record_report(
         self,
@@ -1121,13 +1223,26 @@ class ParallelRuntime:
         revision = int(audit["revision"])
         packet_path = directory / f"packet-r{revision}.json"
         atomic_json(packet_path, packet)
+        coordinator_packet = compact_audit_packet(
+            packet, max_prompt_chars=AUDIT_PROMPT_MAX_CHARS
+        )
+        projection = coordinator_packet.get("_prompt_projection")
+        if isinstance(projection, dict):
+            projection["full_packet_file"] = str(packet_path)
+        coordinator_packet = compact_audit_packet(
+            coordinator_packet, max_prompt_chars=AUDIT_PROMPT_MAX_CHARS
+        )
+        atomic_json(
+            directory / f"coordinator-packet-r{revision}.json",
+            coordinator_packet,
+        )
         if audit["scope"] != "global":
-            return directory, packet
+            return directory, coordinator_packet
         source_snapshot = directory / f"source-r{revision}"
         if not source_snapshot.exists():
             size = inspect_workspace(self.source)
             snapshot(self.source, source_snapshot, size)
-        return source_snapshot, packet
+        return source_snapshot, coordinator_packet
 
     def _start_audit_decision(self) -> None:
         if self.controller is None or self.coordinator.future is not None:

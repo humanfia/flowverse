@@ -60,7 +60,10 @@ class Config(BaseModel):
     protected_paths: tuple[str, ...] = Field(
         default=(),
         max_length=50,
-        description="Relative paths each lane may inspect but must not modify.",
+        description=(
+            "Relative paths each lane may inspect but must not modify; generated descendant "
+            "__pycache__ directories are excluded from content fingerprints."
+        ),
     )
     resume_mode: Literal["auto", "fresh"] = Field(
         default="auto",

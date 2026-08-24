@@ -27,6 +27,13 @@ Audit evidence is the latest validated report, exact-identity checkpoint when pr
 events, active missions, queue, manifest, and—only for a global audit—an immutable source snapshot.
 Decide that packet, not speculation or earlier conversational context.
 
+The runtime persists the complete revision packet, then sends the coordinator a deterministic
+prompt projection with a hard character budget. The projection preserves the exact audit identity,
+targets, active missions, current evidence, and actionable queue entries; it summarizes duplicated
+manifest state, completed integration history, prior audits, and coordinator failure history. An
+`input_too_large` backend rejection immediately retries a stricter projection in the same session.
+It never discards the complete durable packet or enters backoff merely to resend an oversized copy.
+
 ## Decisions
 
 Return one verdict for every exact target and no other lane:

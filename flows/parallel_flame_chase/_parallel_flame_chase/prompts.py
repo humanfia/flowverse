@@ -3,10 +3,303 @@
 from __future__ import annotations
 
 import json
+from typing import Any
+
+AUDIT_PROMPT_MAX_CHARS = 750_000
+AUDIT_PROMPT_RETRY_MAX_CHARS = 300_000
+
+_AUDIT_HISTORY_FIELDS = (
+    "id",
+    "scope",
+    "targets",
+    "revision",
+    "status",
+    "trigger_kind",
+    "requested_at",
+    "updated_at",
+    "completed_at",
+    "decision",
+)
+_MANIFEST_FIELDS = (
+    "version",
+    "protocol",
+    "mode",
+    "run_id",
+    "status",
+    "source",
+    "objective_fingerprint",
+    "updated_at",
+    "lanes",
+    "external_ingress",
+    "remote_actions",
+)
+_QUEUE_SUMMARY_FIELDS = (
+    "id",
+    "status",
+    "source_lane",
+    "source_mission_id",
+    "priority",
+    "accepted_at",
+    "integration_mission_id",
+    "started_at",
+    "completed_at",
+    "reason",
+)
 
 
 def _document(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+
+
+def _json_copy(value: object) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _trim_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    marker = f"\n… [prompt projection omitted {len(value) - limit} characters]"
+    kept = max(0, limit - len(marker))
+    return value[:kept] + marker
+
+
+def _bound_projection(
+    value: Any,
+    *,
+    text_limit: int,
+    list_limit: int,
+    path: tuple[str, ...] = (),
+) -> Any:
+    """Bound verbose evidence while preserving audit identity and target semantics."""
+    if isinstance(value, str):
+        return _trim_text(value, text_limit)
+    if isinstance(value, list):
+        if path == ("audit", "targets"):
+            return list(value)
+        kept = value[:list_limit]
+        bounded = [
+            _bound_projection(
+                item,
+                text_limit=text_limit,
+                list_limit=list_limit,
+                path=(*path, str(index)),
+            )
+            for index, item in enumerate(kept)
+        ]
+        if len(value) > list_limit:
+            bounded.append(
+                {"_prompt_projection_omitted_items": len(value) - list_limit}
+            )
+        return bounded
+    if isinstance(value, dict):
+        return {
+            str(key): _bound_projection(
+                item,
+                text_limit=text_limit,
+                list_limit=list_limit,
+                path=(*path, str(key)),
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
+def _terminal_queue_summary(item: dict[str, Any]) -> dict[str, object]:
+    summary = {key: _json_copy(item.get(key)) for key in _QUEUE_SUMMARY_FIELDS}
+    directive = item.get("directive")
+    if isinstance(directive, dict):
+        summary["directive"] = {
+            "objective": _json_copy(directive.get("objective")),
+        }
+    deliverable = item.get("deliverable")
+    if isinstance(deliverable, dict):
+        summary["deliverable"] = {
+            "title": _json_copy(deliverable.get("title")),
+            "approach_class": _json_copy(deliverable.get("approach_class")),
+        }
+    return summary
+
+
+def _base_audit_projection(packet: dict[str, object]) -> dict[str, object]:
+    """Remove duplicated history from a coordinator view, not from durable state."""
+    projected = _json_copy(packet)
+    audit = projected.get("audit")
+    attempt_count = 0
+    if isinstance(audit, dict):
+        attempts = audit.get("decision_attempts")
+        if isinstance(attempts, list):
+            attempt_count = len(attempts)
+            latest = _json_copy(attempts[-1]) if attempts else None
+            audit["decision_attempts"] = []
+            audit["decision_attempt_summary"] = {
+                "count": attempt_count,
+                "latest": latest,
+            }
+
+    current_audit_id = audit.get("id") if isinstance(audit, dict) else None
+    recent = projected.get("recent_audits")
+    recent_summaries: list[dict[str, object]] = []
+    recent_count = 0
+    if isinstance(recent, list):
+        recent_count = len(recent)
+        for raw in recent:
+            if not isinstance(raw, dict) or raw.get("id") == current_audit_id:
+                continue
+            recent_summaries.append(
+                {key: _json_copy(raw.get(key)) for key in _AUDIT_HISTORY_FIELDS}
+            )
+    projected["recent_audits"] = recent_summaries[-10:]
+
+    manifest = projected.get("manifest")
+    if isinstance(manifest, dict):
+        projected["manifest"] = {
+            key: _json_copy(manifest.get(key)) for key in _MANIFEST_FIELDS
+        }
+
+    queue = projected.get("integration_queue")
+    terminal_count = 0
+    if isinstance(queue, list):
+        compact_queue: list[object] = []
+        for raw in queue:
+            if not isinstance(raw, dict):
+                compact_queue.append(_json_copy(raw))
+                continue
+            if raw.get("status") in {"accepted", "rejected"}:
+                terminal_count += 1
+                compact_queue.append(_terminal_queue_summary(raw))
+            else:
+                compact_queue.append(_json_copy(raw))
+        projected["integration_queue"] = compact_queue
+
+    prior_projection = projected.pop("_prompt_projection", None)
+    prior_source_chars = (
+        prior_projection.get("source_chars")
+        if isinstance(prior_projection, dict)
+        else None
+    )
+    projected["_prompt_projection"] = {
+        "source_chars": prior_source_chars or len(_document(packet)),
+        "decision_attempts_omitted": attempt_count,
+        "recent_audits_summarized": recent_count,
+        "terminal_integrations_summarized": terminal_count,
+    }
+    return projected
+
+
+def _render_audit_prompt(packet: dict[str, object]) -> str:
+    return f"""You are a fresh, read-only coordinator deciding one revision of a generic parallel
+Flame Chase audit. Read the mounted `parallel-flame-chase` skill and its mission-audit reference.
+Inspect the evidence packet and any snapshot available in the working directory. Do not edit any
+lane workspace, defend with the actors, run remote actions, or assume evidence absent from the
+packet.
+
+Decide exactly the target lanes named by the audit, once each:
+- continue: the current mission remains the best next information-bearing work;
+- redirect: end it and supply a materially different, falsifiable replacement;
+- accept: only for a validated `deliverable_ready` outcome.
+
+For Lane 2 or 3, accept must provide both an integration directive for Lane 1 and a next mission
+for that research lane. Lane 1 never enqueues to itself. An accepted Lane 1 integration may resume
+its paused research mission by omitting `next_mission`; otherwise define its successor. Bind the
+answer to the exact audit_id and revision. Reasons must cite concrete packet evidence.
+
+The packet below is a deterministic prompt projection. Full evidence remains in the packet file
+recorded by the runtime; projection metadata states what was summarized or bounded.
+
+Evidence packet:
+{_document(packet)}
+
+Return only the structured AuditDecision requested by the runtime.
+"""
+
+
+def compact_audit_packet(
+    packet: dict[str, object],
+    *,
+    max_prompt_chars: int = AUDIT_PROMPT_MAX_CHARS,
+) -> dict[str, object]:
+    """Build a deterministic coordinator packet that always fits its prompt budget."""
+    if max_prompt_chars < 20_000:
+        raise ValueError("audit prompt budget must be at least 20000 characters")
+    if (
+        isinstance(packet.get("_prompt_projection"), dict)
+        and len(_render_audit_prompt(packet)) <= max_prompt_chars
+    ):
+        return _json_copy(packet)
+    base = _base_audit_projection(packet)
+    levels = (
+        (24_000, 128),
+        (12_000, 64),
+        (6_000, 32),
+        (3_000, 16),
+        (1_500, 8),
+        (750, 4),
+        (320, 2),
+        (160, 1),
+    )
+    for text_limit, list_limit in levels:
+        candidate = _bound_projection(
+            base,
+            text_limit=text_limit,
+            list_limit=list_limit,
+        )
+        metadata = candidate.get("_prompt_projection")
+        if isinstance(metadata, dict):
+            metadata["max_prompt_chars"] = max_prompt_chars
+            metadata["text_limit"] = text_limit
+            metadata["list_limit"] = list_limit
+        if len(_render_audit_prompt(candidate)) <= max_prompt_chars:
+            return candidate
+
+    raw_audit = base.get("audit")
+    audit = raw_audit if isinstance(raw_audit, dict) else {}
+    raw_missions = base.get("active_missions")
+    missions = raw_missions if isinstance(raw_missions, dict) else {}
+    raw_targets = audit.get("targets")
+    targets = raw_targets if isinstance(raw_targets, list) else []
+    raw_reports = base.get("latest_reports")
+    reports = raw_reports if isinstance(raw_reports, dict) else {}
+    emergency = {
+        "version": base.get("version"),
+        "protocol": base.get("protocol"),
+        "run_id": base.get("run_id"),
+        "objective": _trim_text(str(base.get("objective", "")), 2_000),
+        "audit": {
+            key: _json_copy(audit.get(key))
+            for key in (
+                "id",
+                "scope",
+                "targets",
+                "revision",
+                "status",
+                "trigger_kind",
+                "requested_at",
+                "updated_at",
+            )
+        },
+        "active_missions": {
+            str(lane): _bound_projection(
+                missions.get(lane), text_limit=500, list_limit=2
+            )
+            for lane in targets
+        },
+        "latest_reports": {
+            str(lane): _bound_projection(
+                reports.get(lane),
+                text_limit=500,
+                list_limit=2,
+            )
+            for lane in targets
+        },
+        "_prompt_projection": {
+            "source_chars": len(_document(packet)),
+            "max_prompt_chars": max_prompt_chars,
+            "emergency_identity_projection": True,
+        },
+    }
+    if len(_render_audit_prompt(emergency)) > max_prompt_chars:
+        raise RuntimeError("audit identity packet exceeds the configured prompt budget")
+    return emergency
 
 
 def planning_prompt(
@@ -132,29 +425,14 @@ where appropriate. Do not add prose outside the structured report.
 """
 
 
-def audit_prompt(packet: dict[str, object]) -> str:
+def audit_prompt(
+    packet: dict[str, object],
+    *,
+    max_chars: int = AUDIT_PROMPT_MAX_CHARS,
+) -> str:
     """Ask a fresh coordinator to decide one immutable audit revision."""
-    return f"""You are a fresh, read-only coordinator deciding one revision of a generic parallel
-Flame Chase audit. Read the mounted `parallel-flame-chase` skill and its mission-audit reference.
-Inspect the evidence packet and any snapshot available in the working directory. Do not edit any
-lane workspace, defend with the actors, run remote actions, or assume evidence absent from the
-packet.
-
-Decide exactly the target lanes named by the audit, once each:
-- continue: the current mission remains the best next information-bearing work;
-- redirect: end it and supply a materially different, falsifiable replacement;
-- accept: only for a validated `deliverable_ready` outcome.
-
-For Lane 2 or 3, accept must provide both an integration directive for Lane 1 and a next mission
-for that research lane. Lane 1 never enqueues to itself. An accepted Lane 1 integration may resume
-its paused research mission by omitting `next_mission`; otherwise define its successor. Bind the
-answer to the exact audit_id and revision. Reasons must cite concrete packet evidence.
-
-Evidence packet:
-{_document(packet)}
-
-Return only the structured AuditDecision requested by the runtime.
-"""
+    projected = compact_audit_packet(packet, max_prompt_chars=max_chars)
+    return _render_audit_prompt(projected)
 
 
 def audit_repair_prompt(error: str, packet: dict[str, object]) -> str:
@@ -171,8 +449,11 @@ change files or add prose. Return the corrected AuditDecision.
 
 
 __all__ = [
+    "AUDIT_PROMPT_MAX_CHARS",
+    "AUDIT_PROMPT_RETRY_MAX_CHARS",
     "audit_prompt",
     "audit_repair_prompt",
+    "compact_audit_packet",
     "lane_prompt",
     "lane_repair_prompt",
     "planning_prompt",
