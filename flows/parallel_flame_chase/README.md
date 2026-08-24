@@ -5,7 +5,8 @@ creates an initial three-lane plan and then leaves the run. Each lane alternates
 fresh sessions and coordinates through durable reports.
 
 This ordinary flow intentionally stops at durable peer coordination. The planning coordinator
-does not return for audits, interruptions, redirections, or acceptance decisions.
+does not return for audits, interruptions, redirections, or acceptance decisions. Use the
+separately selectable `parallel_flame_chase_mission` flow when those controls are required.
 
 ## Topology
 
@@ -54,7 +55,8 @@ The flow coordinates local work only. It contains no release, deployment, submis
 purchase, or other remote-action executor.
 
 The bundled `parallel-flame-chase` skill defines the actor, report, artifact, checkpoint, and
-resume protocol. Small implementation units for lifecycle, lane scheduling, workspaces, reports,
-events, checkpoints, and utilities live in the hidden sibling module
-`flows/_parallel_flame_chase`, keeping the public entry point small without making the runtime
-monolithic.
+resume protocol. Small shared units for lifecycle, lane scheduling, workspaces, reports, events,
+checkpoints, and utilities live in the hidden sibling module `flows/_parallel_flame_chase` so both
+public flows reuse isolation and recovery behavior without sharing a public identity. Mission
+state and audit policy remain owned by `flows/parallel_flame_chase_mission` and are not loaded by
+this base flow.
