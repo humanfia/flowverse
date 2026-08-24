@@ -22,9 +22,9 @@ Pass exactly seven agents in this order:
 ```console
 hmz exec -f ./flows/parallel_flame_chase \
   -a codex/gpt-5.6-sol:max \
-  -a claude/claude-opus-4-8:max -a codex/gpt-5.6-sol:max \
-  -a claude/claude-opus-4-8:max -a codex/gpt-5.6-sol:max \
-  -a claude/claude-opus-4-8:max -a codex/gpt-5.6-sol:max \
+  -a claude/claude-opus-5:max -a codex/gpt-5.6-sol:max \
+  -a claude/claude-opus-5:max -a codex/gpt-5.6-sol:max \
+  -a claude/claude-opus-5:max -a codex/gpt-5.6-sol:max \
   -c ./flows/parallel_flame_chase/examples/base.yaml \
   "$(cat TASK.md)"
 ```
