@@ -1,0 +1,10 @@
+# Generic mission-mode defaults. All paths are relative to the source workspace except the
+# optional external event stream, which may be absolute.
+rest_seconds: 1.0
+resume_mode: auto
+global_audit_hours: 6.0
+mission_deadline_hours: 6.0
+max_turns_without_outcome: 6
+interrupt_grace_seconds: 60.0
+protected_paths: []
+external_events: null

@@ -1,0 +1,160 @@
+"""Prompts that bind agents to the generic collaboration protocol."""
+
+from __future__ import annotations
+
+import json
+
+
+def _document(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+
+
+def planning_prompt(
+    *,
+    objective: str,
+    workspace_map: dict[str, object],
+    mission_mode: bool,
+) -> str:
+    """Ask the coordinator for three diverse, falsifiable initial lanes."""
+    cadence = (
+        "Every lane mission will later be audited against an explicit outcome."
+        if mission_mode
+        else "This is the only coordinator turn; lanes will subsequently self-coordinate "
+        "through durable reports."
+    )
+    return f"""You are the planning coordinator for a generic parallel Flame Chase.
+
+Read the repository and the mounted `parallel-flame-chase` skill before deciding. Plan only:
+do not edit the repository, execute remote actions, or start implementation. Split the objective
+into exactly three materially different lanes. Lane 1 is the sole integration owner and works in
+the original source. Lanes 2 and 3 work in private snapshots and must publish reconstructable
+artifact packages. Make each mission falsifiable, information-seeking, and independently useful.
+Avoid three cosmetic variants of one approach. {cadence}
+
+Objective:
+{objective}
+
+Workspace map:
+{_document(workspace_map)}
+
+Return only the structured InitialPlan requested by the runtime.
+"""
+
+
+def lane_prompt(
+    *,
+    objective: str,
+    lane: str,
+    actor_role: str,
+    turn: int,
+    workspace_map: dict[str, object],
+    mission: dict[str, object] | None,
+    initial_brief: dict[str, object],
+    unread_reports: list[dict[str, object]],
+    checkpoint_path: str,
+    artifact_root: str,
+    identity: dict[str, object],
+    integration_item: dict[str, object] | None,
+    runtime_status: dict[str, object],
+) -> str:
+    """Build a self-contained fresh-session prompt for one alternating actor."""
+    ownership = (
+        "You are Lane 1, the sole integration owner. You may edit the original source. "
+        "Integrate other lanes only from validated artifact packages and keep the source coherent."
+        if lane == "lane-1"
+        else "You are a private research lane. Work only in your snapshot. Do not edit the "
+        "original source. Publish every offered deliverable as explicit files under your artifact "
+        "root, with enough integration notes for Lane 1 to reconstruct it."
+    )
+    mission_text = (
+        _document(mission) if mission is not None else _document(initial_brief)
+    )
+    integration_text = (
+        _document(integration_item)
+        if integration_item is not None
+        else "No accepted integration package is assigned this turn."
+    )
+    reports_text = _document(unread_reports) if unread_reports else "[]"
+    return f"""You are {actor_role}, taking turn {turn} for {lane} in a generic parallel Flame
+Chase. This is a fresh session. Read the repository, TASK.md when present, and the mounted
+`parallel-flame-chase` skill. Your partner alternates with you; leave durable work and evidence,
+not conversational memory.
+
+{ownership}
+
+Do substantive work now. Test claims proportionally. Do not invoke remote release, deployment,
+submission, purchase, or messaging actions: this flow has no remote-action authority. Do not
+invent success. A `deliverable_ready` report means the declared files exist and another lane can
+reconstruct the result. Use `no_result` when a falsifiable direction has been exhausted, `blocked`
+for a concrete external or technical blocker, and `progress` only when another local turn is
+worth taking. The runtime records `turn_failed`; do not select it yourself.
+
+Objective:
+{objective}
+
+Current mission or base lane brief:
+{mission_text}
+
+Lane-local runtime status from the preceding attempt:
+{_document(runtime_status)}
+
+Accepted integration work (Lane 1 only):
+{integration_text}
+
+Workspace ownership:
+{_document(workspace_map)}
+
+Reports from other lanes not yet acknowledged by this lane:
+{reports_text}
+
+Your artifact root is `{artifact_root}`. Artifact paths in a deliverable are relative to that
+root. You may update `{checkpoint_path}` during meaningful work using the LaneCheckpoint schema
+and this exact identity:
+{_document(identity)}
+The checkpoint is recovery evidence only; it does not trigger audits and it is ignored unless its
+identity and generation match this turn.
+
+Finish by returning only the structured LaneReport requested by the runtime. Summarize actual
+changes, evidence, tests, risks, and the next useful step.
+"""
+
+
+def audit_prompt(packet: dict[str, object]) -> str:
+    """Ask a fresh coordinator to decide one immutable audit revision."""
+    return f"""You are a fresh, read-only coordinator deciding one revision of a generic parallel
+Flame Chase audit. Read the mounted `parallel-flame-chase` skill and its mission-audit reference.
+Inspect the evidence packet and any snapshot available in the working directory. Do not edit any
+lane workspace, defend with the actors, run remote actions, or assume evidence absent from the
+packet.
+
+Decide exactly the target lanes named by the audit, once each:
+- continue: the current mission remains the best next information-bearing work;
+- redirect: end it and supply a materially different, falsifiable replacement;
+- accept: only for a validated `deliverable_ready` outcome.
+
+For Lane 2 or 3, accept must provide both an integration directive for Lane 1 and a next mission
+for that research lane. Lane 1 never enqueues to itself. An accepted Lane 1 integration may resume
+its paused research mission by omitting `next_mission`; otherwise define its successor. Bind the
+answer to the exact audit_id and revision. Reasons must cite concrete packet evidence.
+
+Evidence packet:
+{_document(packet)}
+
+Return only the structured AuditDecision requested by the runtime.
+"""
+
+
+def audit_repair_prompt(error: str, packet: dict[str, object]) -> str:
+    """Repair a semantic decision in the same coordinator session."""
+    raw_audit = packet.get("audit")
+    audit = raw_audit if isinstance(raw_audit, dict) else {}
+    return f"""Your proposed audit decision was rejected by the protocol:
+{error}
+
+Repair only the structured decision. It must target exactly {_document(audit.get("targets", []))},
+use audit_id {_document(audit.get("id"))}, and revision {_document(audit.get("revision"))}. Do not
+change files or add prose. Return the corrected AuditDecision.
+"""
+
+
+__all__ = ["audit_prompt", "audit_repair_prompt", "lane_prompt", "planning_prompt"]
