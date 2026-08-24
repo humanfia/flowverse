@@ -188,10 +188,10 @@ class AcceptDecision(StrictModel):
     integration: IntegrationDirective | None = None
 
 
-LaneDecision = Annotated[
-    ContinueDecision | RedirectDecision | AcceptDecision,
-    Field(discriminator="verdict"),
-]
+# Codex/OpenAI strict structured output supports ``anyOf`` but rejects the ``oneOf``
+# emitted for Pydantic discriminated unions. The literal ``verdict`` fields and forbidden
+# extras still make this ordinary union unambiguous at validation time.
+LaneDecision = ContinueDecision | RedirectDecision | AcceptDecision
 
 
 class AuditDecision(StrictModel):

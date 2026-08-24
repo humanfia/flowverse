@@ -26,7 +26,13 @@ from .models import (
     LaneName,
     LaneReport,
 )
-from .prompts import audit_prompt, audit_repair_prompt, lane_prompt, planning_prompt
+from .prompts import (
+    audit_prompt,
+    audit_repair_prompt,
+    lane_prompt,
+    lane_repair_prompt,
+    planning_prompt,
+)
 from .storage import (
     ExternalEventReader,
     ReportBus,
@@ -192,9 +198,14 @@ def _run_audit_session(
     prompt = audit_prompt(packet)
     for number in range(1, 4):
         try:
-            proposed = session(prompt, suppress=True, schema=AuditDecision)
+            proposed = session(prompt, suppress=False, schema=AuditDecision)
         except Stopped:
             raise
+        except ValueError as why:
+            error = f"{type(why).__name__}: {why}"[:2000]
+            attempts.append({"number": number, "at": now(), "error": error})
+            prompt = audit_repair_prompt(error, packet)
+            continue
         except Exception as why:  # noqa: BLE001 - backend failures are an open set
             error = f"{type(why).__name__}: {why}"[:2000]
             attempts.append({"number": number, "at": now(), "error": error})
@@ -209,6 +220,26 @@ def _run_audit_session(
         attempts.append({"number": number, "at": now(), "error": error})
         prompt = audit_repair_prompt(error, packet)
     return None, attempts
+
+
+def _run_lane_session(session: Session, prompt: str) -> LaneReport | None:
+    """Preserve diagnostics and repair report-shape mistakes in the same actor session."""
+    current = prompt
+    for number in range(1, 4):
+        try:
+            report = session(current, suppress=False, schema=LaneReport)
+        except Stopped:
+            raise
+        except ValueError as why:
+            if number == 3:
+                raise
+            current = lane_repair_prompt(f"{type(why).__name__}: {why}"[:2000])
+            continue
+        if report is not None:
+            return report
+        if number < 3:
+            current = lane_repair_prompt("the actor returned no structured report")
+    return None
 
 
 class ParallelRuntime:
@@ -435,6 +466,29 @@ class ParallelRuntime:
             f"initial coordinator failed after 3 fresh sessions: {failures}"
         )
 
+    def _recover_legacy_protocol_blocks(self) -> None:
+        """Unblock the exact failure hidden by the pre-repair report protocol once."""
+        for lane in cast("tuple[LaneName, ...]", LANES):
+            durable = cast("dict[str, Any]", self.control["lanes"][lane])
+            if (
+                durable.get("blocked") is not True
+                or durable.get("last_error") != "actor returned no structured report"
+            ):
+                continue
+            prior_failures = int(durable.get("consecutive_failures", 0))
+            durable["blocked"] = False
+            durable["consecutive_failures"] = 0
+            durable["last_error"] = None
+            self.control["events"].append(
+                {
+                    "at": now(),
+                    "kind": "legacy_protocol_block_recovered",
+                    "lane": lane,
+                    "prior_consecutive_failures": prior_failures,
+                    "prior_error": "actor returned no structured report",
+                }
+            )
+
     def prepare(self) -> SourceLock:
         objective, resume, revised = self._resolve_objective()
         if resume:
@@ -565,6 +619,9 @@ class ParallelRuntime:
                     baselines[lane] = tree_fingerprint(
                         self.paths.workspace(lane), protected
                     )
+
+        if resume:
+            self._recover_legacy_protocol_blocks()
 
         pairs = {
             "lane-1": (self.agents.lane_1_actor_a, self.agents.lane_1_actor_b),
@@ -758,10 +815,9 @@ class ParallelRuntime:
             session = actor.new(cwd=runtime.workspace)
             runtime.session = session
             runtime.future = self.executor.submit(
+                _run_lane_session,
                 session,
                 prompt,
-                suppress=True,
-                schema=LaneReport,
             )
         except Stopped:
             raise

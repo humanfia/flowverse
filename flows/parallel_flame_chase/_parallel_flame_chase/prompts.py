@@ -119,6 +119,19 @@ changes, evidence, tests, risks, and the next useful step.
 """
 
 
+def lane_repair_prompt(error: str) -> str:
+    """Repair an invalid report without discarding the actor's conversation context."""
+    return f"""Your preceding answer was rejected by the LaneReport protocol:
+{error}
+
+Return only a corrected structured LaneReport for the work you just completed. Preserve the
+facts and evidence from that work; do not start another implementation turn. Use status
+`deliverable_ready` exactly when `deliverable` is non-null. Every other status requires
+`deliverable` to be null. Include every requested field, using empty lists or an empty string
+where appropriate. Do not add prose outside the structured report.
+"""
+
+
 def audit_prompt(packet: dict[str, object]) -> str:
     """Ask a fresh coordinator to decide one immutable audit revision."""
     return f"""You are a fresh, read-only coordinator deciding one revision of a generic parallel
@@ -157,4 +170,10 @@ change files or add prose. Return the corrected AuditDecision.
 """
 
 
-__all__ = ["audit_prompt", "audit_repair_prompt", "lane_prompt", "planning_prompt"]
+__all__ = [
+    "audit_prompt",
+    "audit_repair_prompt",
+    "lane_prompt",
+    "lane_repair_prompt",
+    "planning_prompt",
+]
