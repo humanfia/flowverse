@@ -17,10 +17,24 @@ Criterion = Annotated[str, Field(min_length=1, max_length=2000)]
 Dependency = Annotated[str, Field(min_length=1, max_length=500)]
 
 
+def _require_every_property(schema: dict[str, Any]) -> None:
+    """Make each object compatible with Codex/OpenAI strict structured output.
+
+    Pydantic omits fields with defaults from ``required``. Codex strict output instead requires
+    every declared property to be present, including nullable and defaulted ones. Applying this
+    hook on the shared base also covers nested definitions such as ``MissionSpec``.
+    """
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        schema["required"] = list(properties)
+
+
 class StrictModel(BaseModel):
     """A runtime contract rejects unknown fields rather than silently losing them."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid", json_schema_extra=_require_every_property
+    )
 
 
 class ArtifactRef(StrictModel):

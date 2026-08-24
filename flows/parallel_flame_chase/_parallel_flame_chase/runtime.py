@@ -409,20 +409,28 @@ class ParallelRuntime:
             mission_mode=self.mission_mode,
         )
         failures: list[str] = []
-        for _ in range(3):
+        for attempt in range(1, 4):
             session = self.agents.coordinator.new(cwd=cwd or self.paths.planning)
             try:
-                result = session(prompt, suppress=True, schema=InitialPlan)
+                # This block already catches backend and shape failures. Do not suppress them at
+                # the session boundary, or three actionable errors collapse into an empty list.
+                result = session(prompt, suppress=False, schema=InitialPlan)
             except Stopped:
                 raise
             except Exception as why:  # noqa: BLE001 - retry any backend failure fresh
-                failures.append(f"{type(why).__name__}: {why}"[:1000])
+                failures.append(
+                    f"attempt {attempt}: {type(why).__name__}: {why}"[:1000]
+                )
                 result = None
             finally:
                 with contextlib.suppress(BaseException):
                     session.close()
             if result is not None:
                 return result
+            if len(failures) < attempt:
+                failures.append(
+                    f"attempt {attempt}: coordinator returned no structured plan"
+                )
         raise RuntimeError(
             f"initial coordinator failed after 3 fresh sessions: {failures}"
         )
