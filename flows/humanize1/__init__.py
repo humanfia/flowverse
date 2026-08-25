@@ -131,6 +131,13 @@ class Building(NamedTuple):
     The builder has to run `PermissionRequest`: the plugin's validators are what keep the plan
     fixed and the loop's state out of the builder's hands, and a hook that cannot say no to a
     tool is not one of them. The plugin is a Claude Code plugin for the same reason.
+
+    The person is only ever asked, and never said to. A loop meant to run for days is one that
+    is left running with nobody at the prompt, and a turn said to the person waits for them to
+    type it back however long that takes -- so the one thing this puts to them, the plan
+    understanding quiz, goes the road a coding agent's own question goes and is answered with
+    nothing where there is nobody to answer. `/afk` and a command line are then the same thing
+    to it, which is what they are meant to be.
     """
 
     builder: Annotated[Agent, Moment.PERMISSION_REQUEST]
@@ -1583,8 +1590,15 @@ def _understood(agents: Building, plan: Path, held: str) -> None:
 
     Two questions about how the plan will be built, put to whoever is at the prompt. Getting
     one wrong is not refused: what it earns is the summary of what the plan actually does,
-    and the choice to go on or to stop and read it. Nobody at the prompt is nobody to quiz,
-    so a command line runs straight through.
+    and the choice to go on or to stop and read it.
+
+    Every one of the three is asked as a question with options rather than said to the person
+    as a turn, and that is what makes this a quiz a run nobody is at can pass through. A turn
+    said to the person waits for them to type, and waits however long that takes -- which for
+    a run left going overnight, or one told with `/afk` that nobody is here, is a loop meant
+    to run for days stopped on its first minute by a multiple-choice question. A question is
+    answered with nothing instead, and nothing is what this reads as go on: the quiz is
+    advisory, and somebody who is away has not asked for the loop to stop.
 
     Args:
       agents: The agents the flow drives.
@@ -1592,7 +1606,8 @@ def _understood(agents: Building, plan: Path, held: str) -> None:
       held: What it says.
 
     Raises:
-      ValueError: If the person read the summary and chose to stop and review the plan.
+      ValueError: If the person read the summary and chose to stop and review the plan, which
+        is the one answer that ends the run and has to be given for it to.
     """
     # Advisory, so a turn that failed or would not answer in the shape asked for is a quiz
     # that is not run rather than one that is asked for again: the plugin warns and goes on.
@@ -1615,17 +1630,20 @@ def _understood(agents: Building, plan: Path, held: str) -> None:
     if asked and right == asked:
         print("Your understanding of the plan looks solid. Proceeding with setup.")
         return
-    going = agents.human(
+    going = _asked(
+        agents.human,
         f"{quiz.summary}\n\nThe answers were "
         + ", ".join(
             f"Q{at + 1}: {question.answer}"
             for at, question in enumerate(quiz.questions)
         )
         + ".\n\nWould you like to proceed with the RLCR loop anyway, or stop and review "
-        "the plan more carefully first?\n  A. Proceed with RLCR loop\n"
-        "  B. Stop and review the plan first\n\nAnswer with A or B."
+        "the plan more carefully first?",
+        ["Proceed with RLCR loop", "Stop and review the plan first"],
     )
-    if going.strip()[:1].upper() == "B":
+    # Asked the way the questions were, so that a run nobody is at answers with nothing and
+    # goes on: the quiz is advisory, and a person who is away has not asked for it to stop.
+    if going == "B":
         raise ValueError(
             "stopping. Please review the plan file and run the flow again when ready"
         )
