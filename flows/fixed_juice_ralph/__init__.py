@@ -9,6 +9,13 @@ setup.
 The ralph loop with a governor on it: a fresh session every turn, and between the turns the
 effort moved to hold the agent to `juice` output tokens per turn of the model.
 
+A governor is not a brake. What it holds steady is the size of an answer, so a loop held to
+2000 output tokens a turn is a loop that goes on producing 2000 output tokens a turn for as
+long as anybody leaves it running. What ends it is `budget`, which is how many millions of
+output tokens the whole of it may come to, and 0 is the loop that goes on until it is stopped
+by hand. The two are one quantity read at two scales: `juice` is what a turn is worth, and
+`budget` is what the loop is.
+
 Per turn of the *model* -- one request and the answer to it -- rather than per turn of the
 flow, which is many of those and as many again of whatever the tools took. That average is
 what an effort actually moves: a model asked to think harder writes more in each answer and
@@ -20,8 +27,9 @@ Nothing here is a clock. How long a round takes and what it costs an hour are wh
 and the work make of it; what this holds steady is how much of an answer each turn is worth.
 
 It can be picked up where the last run of it left off, and what is worth picking up is where
-the governor got to: it keeps the rung it settled at, as `effort`, and which round it is on,
-as `rounds`. A loop started again from the middle of the ladder walks back up to that rung a
+the governor got to: it keeps the rung it settled at, as `effort`, which round it is on, as
+`rounds`, and what it has spent, as `output` -- a budget that started again at nothing every
+time the loop was picked up being no budget at all for the loop a week of restarts is. A loop started again from the middle of the ladder walks back up to that rung a
 round at a time, and every one of those rounds is a turn of a model somebody is paying for.
 The rung is kept as the effort's own word rather than as a place on the ladder, because the
 ladder is whatever the account says its CLI runs today: a model retired and an effort added
@@ -29,6 +37,10 @@ both move the places, and a word that is no longer on the ladder at all is read 
 and leaves the agent where a first run would start it. The answer size is not kept -- it is an
 average over the last few minutes of turns, and a run starting today has none of yesterday's
 minutes to average, so the first round of it measures its own.
+
+A loop that has spent its budget is over, and what is over is not picked up: it clears what it
+kept, so the next run here opens on a budget of its own, at round one and at the rung the
+agent was configured with, rather than stopping before it has taken a turn.
 
 Which is a flow rather than a setting because it is a policy: how much thinking a job is worth
 is the sort of thing that changes between projects, and this is one answer to it written down.
@@ -39,6 +51,11 @@ from typing import Any
 
 from hmz.flows import SWARM, Agent, flow, models
 from pydantic import BaseModel, Field
+
+#: Output tokens in one of the millions a budget is written in. The budget is written that
+#: way because that is the size these loops come in: a round of one is thousands, and a day
+#: of rounds is millions.
+MILLION = 1_000_000.0
 
 
 class Config(BaseModel):
@@ -70,6 +87,12 @@ class Config(BaseModel):
         ge=0,
         le=600,
         description="how long to wait between rounds, in seconds",
+    )
+    budget: float = Field(
+        default=10.0,
+        ge=0,
+        description="millions of output tokens the loop may spend before it stops, counted "
+        "across every run of it in this workspace, or 0 to go on until it is stopped",
     )
 
 
@@ -150,6 +173,9 @@ def run(
     (agent,) = agents
     held = config or Config()
     kept = state if state is not None else {}
+    # What the runs before this one spent, which this run's own is added to: an agent counts
+    # what it has spent since it was made, and the loop is older than any of them.
+    before = kept.get("output", 0.0)
     rungs = ladder(agent)
     wide = SWARM if agent.effort.startswith(SWARM) else ""
     at = _at(agent, rungs, kept.get("effort", ""))
@@ -177,8 +203,18 @@ def run(
         # answer size that moved it is not kept: it is measured over the last few minutes of
         # turns, and a run that has not taken any has no minutes to read it over.
         kept["effort"] = rungs[at]
+        kept["output"] = spent = before + agent.spent().output
+        # The budget said beside the round only where there is one: a loop told to go on
+        # until it is stopped has no fraction of anything to report.
+        of = f" · {spent / MILLION:.2f}M of {held.budget:g}M" if held.budget else ""
         print(
             f"round {kept['rounds']} · {juice:.0f}/{held.juice:g} out per turn · "
-            f"{wide}{rungs[at]}"
+            f"{wide}{rungs[at]}{of}"
         )
+        if held.budget and spent >= held.budget * MILLION:
+            print(f"stopping: {spent / MILLION:.2f}M output tokens of {held.budget:g}M")
+            # Emptied rather than left, which is what the next run here is handed and reads
+            # as a run to start clean rather than as a run to carry on and stop at once.
+            kept.clear()
+            return
         time.sleep(held.rest)
