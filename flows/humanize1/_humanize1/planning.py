@@ -361,7 +361,7 @@ Each task must include exactly one routing tag:
 | task1 | <...> | AC-1 | coding | - |
 | task2 | <...> | AC-2 | analyze | task1 |
 
-## Claude-Codex Deliberation
+## Planner-Reviewer Deliberation
 
 ### Agreements
 - <Point both sides agree on>
@@ -375,8 +375,8 @@ Each task must include exactly one routing tag:
 ## Pending User Decisions
 
 - DEC-1: <Decision topic>
-  - Claude Position: <...>
-  - Codex Position: <...>
+  - Planner Position: <...>
+  - Reviewer Position: <...>
   - Tradeoff Summary: <...>
   - Decision Status: `PENDING` or `<User's final decision>`
 
@@ -467,7 +467,8 @@ Design Draft End ---`. Write the plan into it, keeping the draft where it is.
 Use the draft plus the analysis below -- which comes from a reviewer that read this repository \
 without seeing your reasoning -- to produce an initial candidate plan and issue map.
 
-Deeply analyze the draft for potential issues. Use Explore agents to investigate the codebase.
+Deeply analyze the draft for potential issues. Investigate the codebase with the tools available \
+to you; do not depend on a backend-specific subagent or tool name.
 
 Alongside candidate plan v1, prepare a concise implementation summary covering scope, \
 boundaries, dependencies, and known risks.
@@ -495,7 +496,7 @@ boundaries, dependencies, and known risks.
 
 ### Exploration Strategy
 
-Use the Task tool with `subagent_type: "Explore"` to investigate:
+Inspect directly, or delegate only when your backend offers that capability:
 - Components mentioned in the draft
 - Related files and directories
 - Existing patterns and conventions
@@ -512,37 +513,42 @@ The analysis:
 {{ANALYSIS}}
 """
 
-#: commands/gen-plan.md phase 5, the second Codex pass, one round of it.
-GEN_PLAN_CONVERGENCE = """A coding agent has written the candidate plan at @{{OUTPUT_FILE}} \
-for this repository. Review it for reasonability against the repository itself, rather than \
-against how a plan usually looks.
+#: commands/gen-plan.md phase 5, the independent review pass, one round of it.
+GEN_PLAN_CONVERGENCE = """Review the complete candidate plan below for this repository. Judge \
+it against repository facts and the requested work, rather than against how a plan usually \
+looks. This is convergence round {{ROUND}} of at most {{TOTAL_ROUNDS}}.
 
-Your review MUST be written under these headings and no others:
+Return JSON matching the schema you were given. Put the complete review in `review` under the \
+five required headings. `DISAGREE` and `REQUIRED_CHANGES` are blockers: include only issues that \
+would materially change implementation or correctness. Preferences and polish belong in \
+`OPTIONAL_IMPROVEMENTS`. `UNRESOLVED` is only for genuine opposite choices requiring a user \
+decision. The `converged` field is provisional; the flow checks the headings itself.
 
-- `AGREE:` points accepted as reasonable
-- `DISAGREE:` points considered unreasonable and why
-- `REQUIRED_CHANGES:` must-fix items before convergence
-- `OPTIONAL_IMPROVEMENTS:` non-blocking improvements
-- `UNRESOLVED:` opposite opinions needing user decisions
-
-Say the plan has converged when nothing is required and nothing under DISAGREE would change \
-the work, and mean it: a plan is not improved by being asked for one more thing.
+On round 1, check the whole candidate. On later rounds, verify the prior blockers and the \
+material changes made for them. Do not restart an open-ended repository audit, repeat accepted \
+points as new blockers, or ask for one more improvement after the implementation contract is \
+reasonable. Use tools only for a concrete fact needed to decide a blocker.
 
 What was asked for:
 
 {{TASK}}
 
-{{PRIOR}}"""
+{{PRIOR}}
+
+The candidate plan (the immutable original-draft appendix is intentionally omitted):
+
+{{PLAN_CONTENT}}"""
 
 #: commands/gen-plan.md phase 5 step 2, the builder's revision of its own plan.
 GEN_PLAN_REVISION = """Revise the plan at {{OUTPUT_FILE}} against the review below, and answer \
 with the path you wrote and nothing else.
 
 Address everything under `REQUIRED_CHANGES` or argue with it in the plan itself, saying why. \
-What is under `OPTIONAL_IMPROVEMENTS` is yours to take or leave. Document accepted and \
-rejected suggestions with rationale in the `Claude-Codex Deliberation` section, and update the \
-per-round convergence matrix: topic, your position, the reviewer's position, resolution status \
-(`resolved`, `needs_user_decision`, `deferred`), and the round-to-round delta.
+What is under `OPTIONAL_IMPROVEMENTS` is yours to take or leave. Keep one concise, consolidated \
+`Planner-Reviewer Deliberation` section: update the current convergence matrix and short delta \
+instead of appending the full review or another historical section each round. The matrix names \
+the topic, each position, resolution status (`resolved`, `needs_user_decision`, `deferred`), and \
+the round-to-round delta.
 
 Keep the plan the shape it already has, keep the original draft where it is, and do not start \
 the work.
@@ -570,12 +576,13 @@ last round's state, not intermediate rounds
 evidence of resolution.
 5. Write all remaining unresolved items into `## Pending User Decisions`. Use `DEC-N` \
 identifiers. Set `Decision Status` to `PENDING`.
-   - For disagreements: fill `Claude Position`, `Codex Position`, and `Tradeoff Summary`
-   - For open questions (no opposing positions): set `Claude Position` to your tentative answer \
-(if any), `Codex Position` to `N/A - open question`, and `Tradeoff Summary` to the question's \
-context
+   - For disagreements: fill `Planner Position`, `Reviewer Position`, and `Tradeoff Summary`
+   - For open questions (no opposing positions): set `Planner Position` to your tentative answer \
+     (if any), `Reviewer Position` to `N/A - open question`, and `Tradeoff Summary` to the \
+     question's context
 
 {{DECISIONS}}
+{{PLANNING_NOTES}}
 ## Final Plan
 
 The plan must follow the template it was created from, with every section filled in. In \
@@ -588,7 +595,7 @@ direction to move in, unless it said otherwise.
 thing, and what is allowed either way.
 - **Task Breakdown**: every task carries exactly one routing tag, `coding` or `analyze`, and \
 names the AC it serves.
-- **Claude-Codex Deliberation**: what was agreed, what was disagreed and how it resolved, and \
+- **Planner-Reviewer Deliberation**: what was agreed, what was disagreed and how it resolved, and \
 `Convergence Status` set to `{{CONVERGENCE_STATUS}}`.
 
 Keep the original design draft at the end of the file, between its own markers, exactly as it \
@@ -602,7 +609,8 @@ GEN_PLAN_TRANSLATE = """Write a full translation of {{OUTPUT_FILE}} into {{LANGU
 {{VARIANT_FILE}}.
 
 All identifiers (`AC-*`, task IDs, file paths, API names, command flags) remain unchanged, as \
-they are language-neutral. Change nothing about the plan itself.
+they are language-neutral. Change nothing about the plan itself. Keep the original design draft \
+appendix exactly as it is; it is source material, not content to translate a second time.
 
 Answer with the path you wrote and nothing else.
 """

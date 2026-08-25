@@ -87,21 +87,29 @@ rather than phases of this one, and are not here: stopping the flow is what canc
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
+import subprocess
+import threading
+import time
+import uuid
 from pathlib import Path
-from typing import Annotated, Any, Literal, NamedTuple
-
-# Under a name of its own: what a person is put is one of these, and the shape of the
-# quiz below has a `Question` of its own that is a field of the model the reviewer fills.
-from hmz.flows import Agent, Moment, Person, Session, flow
-from hmz.flows import Question as Asking
-from pydantic import BaseModel, Field, model_validator
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple, cast
 
 from _humanize1 import guards, loop, planning, prompts
 from _humanize1.loop import Loop, State, answered, git, spoken
 from _humanize1.prompts import render
+from pydantic import BaseModel, Field, model_validator
+
+# Under a name of its own: what a person is put is one of these, and the shape of the
+# quiz below has a `Question` of its own that is a field of the model the reviewer fills.
+from hmz.flows import Agent, Moment, Person, Session, Stopped, Unrecoverable, flow
+from hmz.flows import Question as Asking
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class Drafting(NamedTuple):
@@ -146,6 +154,21 @@ LANGUAGES = {
 #: How many rounds `gen-plan` gives its convergence loop, which is the plugin's own maximum.
 CONVERGING = 3
 
+#: The headings the original command requires in every convergence review.
+_REVIEW_HEADINGS = (
+    "AGREE",
+    "DISAGREE",
+    "REQUIRED_CHANGES",
+    "OPTIONAL_IMPROVEMENTS",
+    "UNRESOLVED",
+)
+
+#: The original command's second convergence stop: two revisions with no implementation delta.
+_NO_MATERIAL_ROUNDS = 2
+
+#: How long a stopped backend is given to unwind before the bounded flow moves on.
+_STOP_GRACE = 1.0
+
 #: Where a draft goes when nobody said, as `validate-gen-idea-io.sh` resolves it.
 IDEAS = ".humanize/ideas"
 
@@ -172,19 +195,81 @@ class Relevance(BaseModel):
 
 
 class Convergence(BaseModel):
-    """One round of the planning conversation: the review, and whether it is settled."""
+    """One review round, retaining the original flow's public answer shape."""
 
     model_config = {"extra": "forbid"}
 
     converged: bool = Field(
-        description="True only if nothing is required and nothing you disagree with would "
-        "change the work, so the plan is done being argued over."
+        default=False,
+        description="Your provisional convergence judgment; the flow verifies it from review "
+        "headings before acting on it.",
     )
     review: str = Field(
-        description="The review itself, under the AGREE, DISAGREE, REQUIRED_CHANGES, "
-        "OPTIONAL_IMPROVEMENTS and UNRESOLVED headings and no others. The agent that wrote "
-        "the plan is given this word for word to revise against."
+        default="",
+        description="The review under AGREE, DISAGREE, REQUIRED_CHANGES, "
+        "OPTIONAL_IMPROVEMENTS and UNRESOLVED headings. Keep each item concise.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_structured(cls, value: Any) -> Any:
+        """Accept the temporary list-shaped schema emitted by early fixed flow versions."""
+        if not isinstance(value, dict) or "review" in value:
+            return value
+        names = (
+            "agree",
+            "disagree",
+            "required_changes",
+            "optional_improvements",
+            "unresolved",
+        )
+        if not any(name in value for name in names):
+            return value
+
+        def section(name: str, items: Any) -> str:
+            values = items if isinstance(items, list) else []
+            body = "\n".join(f"- {item}" for item in values) or "- None"
+            return f"{name.upper()}:\n{body}"
+
+        review = "\n\n".join(section(name, value.get(name, [])) for name in names)
+        return {"converged": bool(value.get("converged", False)), "review": review}
+
+    def _sections(self) -> dict[str, list[str]]:
+        """Reads the five review headings into blocker lists."""
+        sections = {name: [] for name in _REVIEW_HEADINGS}
+        current: str | None = None
+        for line in self.review.splitlines():
+            match = re.match(r"^\s*(?:[-*]\s*)?([A-Z_]+):\s*(.*)$", line)
+            if match is not None and match.group(1) in sections:
+                current = match.group(1)
+                if match.group(2).strip() and match.group(2).strip().lower() != "none":
+                    sections[current].append(match.group(2).strip())
+            elif current is not None and line.strip():
+                item = re.sub(r"^[-*]\s+", "", line.strip())
+                if item.lower() != "none":
+                    sections[current].append(item)
+        return sections
+
+    @property
+    def settled(self) -> bool:
+        """Whether the review contains no material disagreement or open decision."""
+        sections = self._sections()
+        if any(sections.values()):
+            return not any(
+                sections[name]
+                for name in ("DISAGREE", "REQUIRED_CHANGES", "UNRESOLVED")
+            )
+        # Older flow tests used a compact `AGREE` review without colons. Preserve that
+        # migration shape, but never let an empty/malformed review converge by boolean alone.
+        return self.converged and bool(
+            re.search(r"\bAGREE\b", self.review, re.IGNORECASE)
+        )
+
+    def rendered(self) -> str:
+        """Renders the original plugin's five review headings for the planner."""
+        if self.review.strip():
+            return self.review.strip()
+        return "\n\n".join(f"{name}:\n- None" for name in _REVIEW_HEADINGS)
 
 
 class Compliance(BaseModel):
@@ -274,6 +359,22 @@ class Plan(BaseModel):
     alternative_plan_language: str = Field(
         default="",
         description="a translated plan too: zh, ko, ja, es, fr, de, pt, ru, ar",
+    )
+    turn_timeout: float = Field(
+        default=3600,
+        ge=0,
+        description="seconds any one planning turn may take, zero for no per-turn limit",
+    )
+    total_timeout: float = Field(
+        default=14400,
+        ge=0,
+        description="seconds the whole planning flow may take, zero for no overall limit",
+    )
+    turn_retries: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        description="how many times a failed or empty turn is retried",
     )
 
 
@@ -502,6 +603,200 @@ def _asked(human: Person, question: str, options: list[str]) -> str:
     return said.strip()[:1].upper()
 
 
+class _DeadlineError(TimeoutError):
+    """A planning turn that did not finish inside its wall-clock budget."""
+
+    def __init__(self, message: str, done: threading.Event) -> None:
+        super().__init__(message)
+        self.done = done
+
+
+class _TurnError(RuntimeError):
+    """A bounded planning stage which could not produce a usable answer."""
+
+    def __init__(
+        self,
+        stage: str,
+        why: str,
+        *,
+        timed_out: bool = False,
+        done: threading.Event | None = None,
+    ) -> None:
+        super().__init__(f"{stage}: {why}")
+        self.stage = stage
+        self.timed_out = timed_out
+        self.done = done
+
+
+class _EmptyTurnError(ValueError):
+    """A turn that landed without answering what the flow asked."""
+
+
+def _within[T](owner: Agent, call: Callable[[], T], seconds: float, stage: str) -> T:
+    """Runs one backend-neutral turn, stopping its agent when its deadline passes.
+
+    ``Agent.stop`` is part of the flow-facing contract and ends the flow's wait whatever backend
+    is behind it. A timed-out role is therefore not retried in this run; planner writes happen
+    on staging files so a command which takes longer to unwind cannot corrupt the durable plan.
+    """
+    if seconds <= 0:
+        return call()
+
+    landed: list[tuple[bool, object]] = []
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            landed.append((True, call()))
+        except BaseException as why:  # noqa: BLE001 -- carried back to the flow's thread
+            landed.append((False, why))
+        finally:
+            done.set()
+
+    worker = threading.Thread(
+        target=run,
+        name=f"humanize1-{owner.id}-{stage}",
+        daemon=True,
+    )
+    worker.start()
+    if not done.wait(seconds):
+        owner.stop()
+        worker.join(timeout=_STOP_GRACE)
+        raise _DeadlineError(f"took longer than {seconds:g}s", done)
+
+    succeeded, answer = landed[0]
+    if succeeded:
+        return cast("T", answer)
+    raise cast("BaseException", answer)
+
+
+def _turn_limit(config: Plan, began: float, stage: str) -> float:
+    """The smaller of this turn's limit and what remains of the whole plan budget."""
+    limits = [config.turn_timeout] if config.turn_timeout > 0 else []
+    if config.total_timeout > 0:
+        remaining = config.total_timeout - (time.monotonic() - began)
+        if remaining <= 0:
+            raise _TurnError(
+                stage,
+                f"the {config.total_timeout:g}s total planning budget was exhausted",
+                timed_out=True,
+            )
+        limits.append(remaining)
+    return min(limits) if limits else 0
+
+
+def _take(
+    owner: Agent,
+    target: Agent | Session,
+    prompt: str,
+    config: Plan,
+    began: float,
+    stage: str,
+    *,
+    schema: type[BaseModel] | None = None,
+) -> Any:
+    """Takes one planning turn with bounded retries and a real wall-clock deadline."""
+    attempts = config.turn_retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            limit = _turn_limit(config, began, stage)
+
+            def call() -> Any:
+                answer = (
+                    target(prompt, suppress=True, schema=schema)
+                    if schema is not None
+                    else target(prompt, suppress=True)
+                )
+                if answer is None or not str(answer).strip():
+                    raise _EmptyTurnError("the turn returned an empty answer")
+                return answer
+
+            return _within(owner, call, limit, stage)
+        except Stopped:
+            raise
+        except _DeadlineError as why:
+            raise _TurnError(stage, str(why), timed_out=True, done=why.done) from why
+        except Unrecoverable as why:
+            raise _TurnError(stage, str(why)) from why
+        except (subprocess.CalledProcessError, ValueError) as why:
+            if attempt == attempts:
+                raise _TurnError(stage, str(why)) from why
+            print(f"Warning: {stage} failed; retrying ({attempt} of {attempts}): {why}")
+    raise AssertionError("a positive number of planning attempts took no turn")
+
+
+def _candidate_text(plan: str) -> str:
+    """The structured candidate, without the immutable draft appendix."""
+    return plan.partition("\n--- Original Design Draft Start ---\n")[0].rstrip()
+
+
+def _material_digest(plan: str) -> str:
+    """A digest of implementation content, excluding deliberation-only changes."""
+    candidate = _candidate_text(plan)
+    endings = [
+        candidate.find(heading)
+        for heading in (
+            "\n## Planner-Reviewer Deliberation",
+            "\n## Claude-Codex Deliberation",
+            "\n## Pending User Decisions",
+        )
+        if candidate.find(heading) >= 0
+    ]
+    material = candidate[: min(endings)] if endings else candidate
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _partial(where: Path, why: str) -> None:
+    """Marks the last durable candidate partial when no agent can finish it."""
+    held = where.read_text(encoding="utf-8")
+    status = "- Final Status: `partially_converged`"
+    held, changed = re.subn(r"(?m)^- Final Status:.*$", status, held, count=1)
+    note = f"- Flow Note: {' '.join(why.split())}"
+    if changed:
+        held = held.replace(status, f"{status}\n{note}", 1)
+    else:
+        section = (
+            "## Planner-Reviewer Deliberation\n\n### Convergence Status\n"
+            f"{status}\n{note}\n\n"
+        )
+        marker = "## Pending User Decisions"
+        held = (
+            held.replace(marker, section + marker, 1)
+            if marker in held
+            else section + held
+        )
+    where.write_text(held, encoding="utf-8")
+
+
+def _stage(where: Path) -> Path:
+    """Copies a durable plan to the hidden file one writing turn is allowed to mutate."""
+    staged = where.with_name(f".humanize-plan-{uuid.uuid4().hex}.tmp")
+    shutil.copyfile(where, staged)
+    return staged
+
+
+def _abandon(staged: Path, why: _TurnError, owner: Agent) -> None:
+    """Removes a finished failed attempt, retaining one a timed-out command may still hold."""
+    if not why.timed_out or not owner.stopped or why.done is None:
+        staged.unlink(missing_ok=True)
+        return
+
+    def remove_after_turn() -> None:
+        why.done.wait()
+        staged.unlink(missing_ok=True)
+
+    threading.Thread(
+        target=remove_after_turn,
+        name=f"humanize1-cleanup-{staged.name}",
+        daemon=True,
+    ).start()
+
+
+def _promote(staged: Path, where: Path) -> None:
+    """Atomically makes a successfully written staging plan the durable candidate."""
+    staged.replace(where)
+
+
 def _idea(drafting: Session, task: str, config: Idea, root: Path) -> Path:
     """`gen-idea`: opens the idea from N directions at once and closes it to one.
 
@@ -566,6 +861,7 @@ def _plan(
       ValueError: If the draft is not there, is empty, does not belong to this repository, or
         the plan cannot be written where it was asked for.
     """
+    began = time.monotonic()
     if not draft.is_file():
         raise ValueError(f"{draft}: input file not found")
     held = draft.read_text(encoding="utf-8")
@@ -585,11 +881,32 @@ def _plan(
     if not os.access(where.parent, os.W_OK):
         raise ValueError(f"{where.parent}: no write permission to output directory")
 
-    read = answered(
-        agents.analyst,
-        render(planning.RELEVANCE, INPUT_FILE=draft, DRAFT_CONTENT=held),
-        Relevance,
-    )
+    try:
+        read = cast(
+            "Relevance",
+            _take(
+                agents.analyst,
+                agents.analyst,
+                render(planning.RELEVANCE, INPUT_FILE=draft, DRAFT_CONTENT=held),
+                config,
+                began,
+                "draft relevance check",
+                schema=Relevance,
+            ),
+        )
+    except _TurnError as why:
+        template = (
+            planning.GEN_PLAN_TEMPLATE
+            + "\n--- Original Design Draft Start ---\n\n"
+            + held
+            + "\n--- Original Design Draft End ---\n"
+        )
+        where.write_text(template, encoding="utf-8")
+        _partial(where, str(why))
+        print(
+            f"Warning: {why}; returning the template and original draft as a partial plan."
+        )
+        return where
     if not read.relevant:
         raise ValueError(
             f"the draft does not appear to be related to this repository: {read.why}"
@@ -598,47 +915,156 @@ def _plan(
     # The plan file starts as the template with the draft under it, which is what the plugin
     # copies into place before the builder writes a word: the draft is the human input, and
     # it stays in the file rather than being read once and paraphrased away.
-    where.write_text(
+    template = (
         planning.GEN_PLAN_TEMPLATE
         + "\n--- Original Design Draft Start ---\n\n"
         + held
-        + "\n--- Original Design Draft End ---\n",
-        encoding="utf-8",
+        + "\n--- Original Design Draft End ---\n"
     )
+    where.write_text(template, encoding="utf-8")
+    draft_suffix = (
+        "\n--- Original Design Draft Start ---\n\n"
+        + held
+        + "\n--- Original Design Draft End ---\n"
+    )
+    limitations: list[str] = []
 
-    analysis = spoken(
-        agents.analyst,
-        render(planning.GEN_PLAN_ANALYSIS, INPUT_FILE=draft, DRAFT_CONTENT=held),
-    )[0]
-    spoken(
-        writing,
-        render(planning.GEN_PLAN_CANDIDATE, OUTPUT_FILE=where, ANALYSIS=analysis),
-    )
+    try:
+        analysis = cast(
+            "str",
+            _take(
+                agents.analyst,
+                agents.analyst,
+                render(
+                    planning.GEN_PLAN_ANALYSIS,
+                    INPUT_FILE=draft,
+                    DRAFT_CONTENT=held,
+                ),
+                config,
+                began,
+                "independent planning analysis",
+            ),
+        )
+    except _TurnError as why:
+        limitations.append(str(why))
+        analysis = (
+            "CORE_RISKS:\n- Independent analysis was unavailable; the planner must identify "
+            "risks directly.\n\nMISSING_REQUIREMENTS:\n- Determine from the draft and repository."
+            "\n\nTECHNICAL_GAPS:\n- Determine from the draft and repository.\n\n"
+            "ALTERNATIVE_DIRECTIONS:\n- Compare alternatives only where the draft leaves a "
+            "choice.\n\nQUESTIONS_FOR_USER:\n- Preserve genuine open decisions in the plan."
+            "\n\nCANDIDATE_CRITERIA:\n- Derive testable criteria from repository evidence."
+        )
+        print(f"Warning: {why}; continuing with planner-only candidate generation.")
+
+    before_candidate = where.read_text(encoding="utf-8")
+    staged = _stage(where)
+    try:
+        _take(
+            agents.planner,
+            writing,
+            render(
+                planning.GEN_PLAN_CANDIDATE,
+                OUTPUT_FILE=staged,
+                ANALYSIS=analysis,
+            ),
+            config,
+            began,
+            "candidate plan",
+        )
+    except _TurnError as why:
+        _abandon(staged, why, agents.planner)
+        _partial(where, str(why))
+        print(
+            f"Warning: {why}; returning the template and original draft as a partial plan."
+        )
+        return where
+    candidate = staged.read_text(encoding="utf-8")
+    if _candidate_text(candidate) == _candidate_text(before_candidate):
+        staged.unlink(missing_ok=True)
+        raise RuntimeError(
+            "gen-plan's planner returned without writing the candidate plan"
+        )
+    if not candidate.endswith(draft_suffix):
+        staged.unlink(missing_ok=True)
+        raise RuntimeError("gen-plan's planner did not preserve the original draft")
+    _promote(staged, where)
 
     converged = False
     prior = ""
-    if config.mode == "discussion":
-        for _ in range(CONVERGING):
-            round_ = answered(
-                agents.analyst,
-                render(
-                    planning.GEN_PLAN_CONVERGENCE,
-                    OUTPUT_FILE=where,
-                    TASK=task,
-                    PRIOR=prior,
-                ),
-                Convergence,
-            )
-            if round_.converged:
+    unchanged = 0
+    material = _material_digest(candidate)
+    if config.mode == "discussion" and not agents.analyst.stopped:
+        for round_number in range(1, CONVERGING + 1):
+            current = where.read_text(encoding="utf-8")
+            try:
+                round_ = cast(
+                    "Convergence",
+                    _take(
+                        agents.analyst,
+                        agents.analyst,
+                        render(
+                            planning.GEN_PLAN_CONVERGENCE,
+                            OUTPUT_FILE=where,
+                            TASK=task,
+                            PRIOR=prior,
+                            ROUND=round_number,
+                            TOTAL_ROUNDS=CONVERGING,
+                            PLAN_CONTENT=_candidate_text(current),
+                        ),
+                        config,
+                        began,
+                        f"reasonability review {round_number}",
+                        schema=Convergence,
+                    ),
+                )
+            except _TurnError as why:
+                limitations.append(str(why))
+                print(
+                    f"Warning: {why}; finishing the last candidate as partially converged."
+                )
+                break
+            review = round_.rendered()
+            if round_.settled:
                 converged = True
                 break
-            prior = f"What was still open after the last round:\n\n{round_.review}\n"
-            spoken(
-                writing,
-                render(
-                    planning.GEN_PLAN_REVISION, OUTPUT_FILE=where, REVIEW=round_.review
-                ),
-            )
+            prior = f"What was still open after the last round:\n\n{review}\n"
+            staged = _stage(where)
+            try:
+                _take(
+                    agents.planner,
+                    writing,
+                    render(
+                        planning.GEN_PLAN_REVISION,
+                        OUTPUT_FILE=staged,
+                        REVIEW=review,
+                    ),
+                    config,
+                    began,
+                    f"plan revision {round_number}",
+                )
+            except _TurnError as why:
+                _abandon(staged, why, agents.planner)
+                limitations.append(str(why))
+                print(f"Warning: {why}; keeping the previous candidate.")
+                break
+            revised = staged.read_text(encoding="utf-8")
+            if not revised.endswith(draft_suffix):
+                staged.unlink(missing_ok=True)
+                limitations.append(
+                    f"plan revision {round_number}: the original draft was not preserved"
+                )
+                break
+            _promote(staged, where)
+            changed = _material_digest(revised)
+            unchanged = unchanged + 1 if changed == material else 0
+            material = changed
+            if unchanged >= _NO_MATERIAL_ROUNDS:
+                limitations.append(
+                    "convergence stopped after two consecutive revisions made no material "
+                    "plan changes"
+                )
+                break
 
     # `--auto-start-rlcr-if-converged` is the one thing that skips the person: it is only
     # ever satisfied in discussion mode, with the plan converged and nothing left to decide.
@@ -647,35 +1073,87 @@ def _plan(
         and converged
         and config.mode == "discussion"
     )
-    spoken(
-        writing,
-        render(
-            planning.GEN_PLAN_FINAL,
-            OUTPUT_FILE=where,
-            CONVERGENCE_STATUS="converged" if converged else "partially_converged",
-            DECISIONS=(
-                "\nPut every remaining `PENDING` decision to the person at the prompt with "
-                "`AskUserQuestion` before writing the final plan, and record what they "
-                "decide in place of the `PENDING` status. Confirm every quantitative metric "
-                "the draft states with them too: whether it is a hard requirement or a "
-                "direction to move in, which changes how the acceptance criteria are "
-                "written.\n"
-                if reviewing
-                else ""
-            ),
-        ),
-    )
-    language, code = _language(config.alternative_plan_language)
-    if language:
-        spoken(
+    status = "converged" if converged else "partially_converged"
+    if agents.planner.stopped:
+        _partial(where, limitations[-1] if limitations else "the planner timed out")
+        return where
+    staged = _stage(where)
+    try:
+        _take(
+            agents.planner,
             writing,
             render(
-                planning.GEN_PLAN_TRANSLATE,
-                OUTPUT_FILE=where,
-                LANGUAGE=language,
-                VARIANT_FILE=where.with_name(f"{where.stem}_{code}{where.suffix}"),
+                planning.GEN_PLAN_FINAL,
+                OUTPUT_FILE=staged,
+                CONVERGENCE_STATUS=status,
+                DECISIONS=(
+                    "\nPut every remaining `PENDING` decision to the person through the "
+                    "user-question facility available to your backend, and record what they "
+                    "decide in place of the `PENDING` status. If no person is available, keep "
+                    "the item explicitly `PENDING` rather than waiting. Confirm every "
+                    "quantitative metric the draft states too: whether it is a hard requirement "
+                    "or a direction to move in, which changes how the acceptance criteria are "
+                    "written.\n"
+                    if reviewing
+                    else ""
+                ),
+                PLANNING_NOTES=(
+                    "\nPlanning limitations to record without expanding them into new scope:\n- "
+                    + "\n- ".join(limitations)
+                    + "\n"
+                    if limitations
+                    else ""
+                ),
             ),
+            config,
+            began,
+            "final plan consolidation",
         )
+    except _TurnError as why:
+        _abandon(staged, why, agents.planner)
+        limitations.append(str(why))
+        _partial(where, str(why))
+        print(f"Warning: {why}; returning the last durable candidate.")
+        return where
+    finished = staged.read_text(encoding="utf-8")
+    if not finished.endswith(draft_suffix):
+        staged.unlink(missing_ok=True)
+        _partial(where, "final consolidation did not preserve the original draft")
+        return where
+    finished = re.sub(
+        r"(?m)^- Final Status:.*$",
+        f"- Final Status: `{status}`",
+        finished,
+        count=1,
+    )
+    staged.write_text(finished, encoding="utf-8")
+    _promote(staged, where)
+
+    language, code = _language(config.alternative_plan_language)
+    if language:
+        variant = where.with_name(f"{where.stem}_{code}{where.suffix}")
+        staged = variant.with_name(f".humanize-plan-{uuid.uuid4().hex}.tmp")
+        try:
+            _take(
+                agents.planner,
+                writing,
+                render(
+                    planning.GEN_PLAN_TRANSLATE,
+                    OUTPUT_FILE=where,
+                    LANGUAGE=language,
+                    VARIANT_FILE=staged,
+                ),
+                config,
+                began,
+                f"{language} plan translation",
+            )
+        except _TurnError as why:
+            _abandon(staged, why, agents.planner)
+            print(
+                f"Warning: {why}; the main plan is complete but no translation was kept."
+            )
+        else:
+            staged.replace(variant)
     return where
 
 
