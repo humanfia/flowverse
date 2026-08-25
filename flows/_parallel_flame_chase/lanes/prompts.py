@@ -1,4 +1,4 @@
-"""Planning and lane prompts for the report-driven parallel flow."""
+"""Planning and lane prompts shared by both public parallel flows."""
 
 from __future__ import annotations
 

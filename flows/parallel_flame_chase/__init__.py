@@ -8,7 +8,8 @@ The coordinator plans once and does not return. Lane 1 alone owns the original s
 Lanes 2 and 3 work in private snapshots; the six lane actors alternate in fresh sessions and
 coordinate through durable reports and reconstructable artifacts.
 
-This ordinary flow has no mission audits or coordinator-driven interruptions.
+This ordinary flow has no mission audits or coordinator-driven interruptions. Use the separate
+``parallel_flame_chase_mission`` flow when scoped review and redirection are required.
 
 Runs are resumable. Repeating the same task or entering ``continue`` resumes compatible state.
 For ``continue``, a changed TASK.md produces a new plan over a fresh source snapshot; a different

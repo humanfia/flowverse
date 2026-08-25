@@ -1,6 +1,7 @@
 # Shared Parallel Flame Chase Runtime
 
-This hidden package contains the ordinary flow implementation, grouped by responsibility:
+This hidden package contains only implementation reused by the two public flows. Files are grouped
+by responsibility:
 
 ```text
 _parallel_flame_chase/
@@ -12,5 +13,6 @@ _parallel_flame_chase/
 ```
 
 `runtime.py` composes the scheduler layers; leaf modules under `core` and `persistence` do not
-import the public flow. Mission decisions, coordinator audits, external ingress, and remote-action
-execution are outside this package.
+import a public flow. Mission decisions, coordination state, external ingress, audit scheduling,
+and Mission runtime extensions all live under `flows/parallel_flame_chase_mission`; importing the
+base flow does not load that package.

@@ -1,4 +1,4 @@
-"""Public agent and configuration types for Parallel Flame Chase."""
+"""Shared public types for the two independently registered flows."""
 
 from __future__ import annotations
 
