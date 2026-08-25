@@ -1,0 +1,3 @@
+# Generic report-driven defaults.
+rest_seconds: 1.0
+resume_mode: auto
