@@ -12,6 +12,7 @@ from ..core.utils import close_safely, json_copy, now
 from ..orchestration.state import RuntimeState
 from ..persistence.checkpoints import checkpoint_fingerprint, checkpoint_report
 from ..persistence.events import ReportBus
+from ..persistence.leaderboard import with_submission
 from ..persistence.workspace import validate_deliverable
 from .prompts import lane_prompt
 from .runtime import LaneRuntime, run_lane_session
@@ -93,6 +94,8 @@ class LaneScheduler(RuntimeState):
             artifact_root=str(self.paths.artifact_root(lane)),
             identity=identity,
             integration_item=self._integration_item(lane),
+            candidate_board=json_copy(self.control["candidate_board"]),
+            leaderboard_path=str(self.paths.leaderboard),
             runtime_status={
                 "consecutive_failures": int(durable.get("consecutive_failures", 0)),
                 "last_error": durable.get("last_error"),
@@ -150,12 +153,37 @@ class LaneScheduler(RuntimeState):
             if report.deliverable is not None
             else []
         )
+        header = self._report_header(runtime, recovered=recovered)
         record: dict[str, object] = {
-            **self._report_header(runtime, recovered=recovered),
+            **header,
             **report.model_dump(mode="json"),
             "artifacts": artifacts,
         }
+        updated_board: dict[str, object] | None = None
+        candidate: dict[str, object] | None = None
+        became_best = False
+        if report.submission is not None:
+            updated_board, candidate, became_best = with_submission(
+                cast("dict[str, object]", self.control["candidate_board"]), record
+            )
         self.bus.publish(lane, record)
+        if updated_board is not None and candidate is not None:
+            self.control["candidate_board"] = updated_board
+            self.control["events"].append(
+                {
+                    "at": header["at"],
+                    "kind": (
+                        "candidate_best_updated"
+                        if became_best
+                        else "candidate_submitted"
+                    ),
+                    "lane": lane,
+                    "submission_id": candidate["submission_id"],
+                    "metric": candidate["metric"],
+                    "value": candidate["value"],
+                    "direction": candidate["direction"],
+                }
+            )
         self.control["latest_reports"][lane] = json_copy(record)
         ReportBus.acknowledge(
             lane,
@@ -182,6 +210,7 @@ class LaneScheduler(RuntimeState):
             "risks": [],
             "next_step": "Retry with the alternating partner or report a concrete blocker.",
             "deliverable": None,
+            "submission": None,
             "artifacts": [],
         }
         self.bus.publish(lane, failure)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,9 @@ from typing import Any
 
 import pytest
 from _parallel_flame_chase.core.models import (
+    ArtifactRef,
+    CandidateSubmission,
+    Deliverable,
     InitialPlan,
     LaneBrief,
     LaneReport,
@@ -71,15 +75,59 @@ class FakeAgent:
         return session
 
 
-def agents() -> SimpleNamespace:
+class CandidateSession(FakeSession):
+    def __call__(self, prompt: str, *, suppress: bool, schema: type[Any]) -> Any:
+        self.agent.prompts.append((self.cwd, prompt, schema))
+        if schema is InitialPlan:
+            return PLAN
+        if schema is not LaneReport:
+            raise AssertionError(schema)
+        lane = self.agent.name.rsplit("-", 1)[0]
+        values = {"lane-1": 1100, "lane-2": 900, "lane-3": 1000}
+        marker = "Your artifact root is `"
+        artifact_root = Path(prompt.split(marker, 1)[1].split("`", 1)[0])
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        (artifact_root / "candidate.py").write_text(
+            f"# {lane} evaluator-accepted candidate\n", encoding="utf-8"
+        )
+        return LaneReport(
+            status="deliverable_ready",
+            summary=f"{lane} published an evaluator-accepted candidate.",
+            evidence=["local evaluator exit 0"],
+            deliverable=Deliverable(
+                title=f"{lane} candidate",
+                approach_class="test candidate",
+                artifacts=[
+                    ArtifactRef(path="candidate.py", description="complete candidate")
+                ],
+                integration_notes="Compare and reconstruct this candidate.",
+            ),
+            submission=CandidateSubmission(
+                title=f"{lane} candidate",
+                metric="cycles",
+                value=values[lane],
+                direction="minimize",
+                evaluator="task-provided local evaluator, exit 0",
+            ),
+        )
+
+
+class CandidateAgent(FakeAgent):
+    def new(self, cwd: str | Path | None = None) -> CandidateSession:
+        session = CandidateSession(self, Path(cwd or ".").resolve())
+        self.sessions.append(session)
+        return session
+
+
+def agents(agent_type: type[FakeAgent] = FakeAgent) -> SimpleNamespace:
     return SimpleNamespace(
-        coordinator=FakeAgent("coordinator"),
-        lane_1_actor_a=FakeAgent("lane-1-a"),
-        lane_1_actor_b=FakeAgent("lane-1-b"),
-        lane_2_actor_a=FakeAgent("lane-2-a"),
-        lane_2_actor_b=FakeAgent("lane-2-b"),
-        lane_3_actor_a=FakeAgent("lane-3-a"),
-        lane_3_actor_b=FakeAgent("lane-3-b"),
+        coordinator=agent_type("coordinator"),
+        lane_1_actor_a=agent_type("lane-1-a"),
+        lane_1_actor_b=agent_type("lane-1-b"),
+        lane_2_actor_a=agent_type("lane-2-a"),
+        lane_2_actor_b=agent_type("lane-2-b"),
+        lane_3_actor_a=agent_type("lane-3-a"),
+        lane_3_actor_b=agent_type("lane-3-b"),
     )
 
 
@@ -168,6 +216,9 @@ def test_runtime_isolates_lanes_and_resumes_actor_turn(
     assert all(state["lanes"][lane]["next_actor"] == 1 for lane in state["lanes"])
     assert chosen.coordinator.prompts[0][0] == root / "shared" / "planning-workspace"
 
+    # Simulate a compatible run created before the shared candidate board existed.
+    state.pop("candidate_board")
+    (root / "shared" / "leaderboard.json").unlink()
     resumed = agents()
     execute(
         resumed,
@@ -178,10 +229,52 @@ def test_runtime_isolates_lanes_and_resumes_actor_turn(
         _max_turns=3,
     )
     assert state["run_id"] == run_id
+    assert state["candidate_board"]["submission_count"] == 0
+    assert (root / "shared" / "leaderboard.json").is_file()
     assert resumed.coordinator.prompts == []
     assert resumed.lane_1_actor_b.prompts
     assert resumed.lane_2_actor_b.prompts
     assert resumed.lane_3_actor_b.prompts
+
+
+def test_runtime_accepts_every_lane_submission_and_shares_the_best(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    runtime_home = tmp_path / "humanize-home"
+    monkeypatch.chdir(source)
+    monkeypatch.setattr(runtime_state, "home", lambda: runtime_home)
+    chosen = agents(CandidateAgent)
+    state: dict[str, Any] = {}
+
+    execute(
+        chosen,
+        "Find the fastest correct local candidate.",
+        config(),
+        state,
+        _sleep=lambda _: time.sleep(0.002),
+        _max_turns=6,
+    )
+
+    board = state["candidate_board"]
+    assert board["submission_count"] == 6
+    assert board["best"]["lane"] == "lane-2"
+    assert board["best"]["value"] == 900.0
+    assert all(
+        state["latest_reports"][lane]["submission"] is not None
+        for lane in ("lane-1", "lane-2", "lane-3")
+    )
+    leaderboard = Path(state["run_root"]) / "shared/leaderboard.json"
+    assert json.loads(leaderboard.read_text(encoding="utf-8")) == board
+    for actor in (
+        chosen.lane_1_actor_b,
+        chosen.lane_2_actor_b,
+        chosen.lane_3_actor_b,
+    ):
+        prompt = actor.prompts[0][1]
+        assert str(leaderboard) in prompt
+        assert '"value": 900.0' in prompt
 
 
 class FailingStartAgent(FakeAgent):

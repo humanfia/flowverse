@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
@@ -66,6 +67,41 @@ class Deliverable(StrictModel):
     validation: list[ReportItem] = Field(default_factory=list, max_length=30)
 
 
+class CandidateSubmission(StrictModel):
+    """One evaluator-accepted candidate offered to the shared leaderboard."""
+
+    title: str = Field(min_length=1, max_length=200)
+    metric: str = Field(min_length=1, max_length=200)
+    value: float
+    direction: Literal["minimize", "maximize"]
+    evaluator: str = Field(min_length=1, max_length=1000)
+    evidence: list[ReportItem] = Field(default_factory=list, max_length=30)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def numeric_not_boolean(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError(  # noqa: TRY004 - Pydantic validators require ValueError
+                "candidate value must be numeric, not boolean"
+            )
+        return value
+
+    @field_validator("value")
+    @classmethod
+    def finite_value(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("candidate value must be finite")
+        return value
+
+    @field_validator("title", "metric", "evaluator")
+    @classmethod
+    def nonblank_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("candidate text fields must not be blank")
+        return stripped
+
+
 class LaneReport(StrictModel):
     """The complete result of one actor turn."""
 
@@ -79,6 +115,7 @@ class LaneReport(StrictModel):
     risks: list[ReportItem] = Field(default_factory=list, max_length=30)
     next_step: str = Field(default="", max_length=4000)
     deliverable: Deliverable | None = None
+    submission: CandidateSubmission | None = None
 
     @model_validator(mode="after")
     def deliverable_matches_status(self) -> LaneReport:
@@ -86,6 +123,10 @@ class LaneReport(StrictModel):
             raise ValueError("deliverable_ready requires a deliverable")
         if self.status != "deliverable_ready" and self.deliverable is not None:
             raise ValueError("only deliverable_ready may carry a deliverable")
+        if self.submission is not None and self.deliverable is None:
+            raise ValueError(
+                "a candidate submission requires a reconstructable deliverable"
+            )
         return self
 
 

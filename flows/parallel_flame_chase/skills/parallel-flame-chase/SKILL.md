@@ -14,7 +14,7 @@ durable handoffs, reports, artifacts, and alternating fresh sessions.
 Then route by role:
 
 - Initial coordinator: plan only. Give all three lanes distinct, falsifiable work; make Lane 1 the
-  integration owner.
+  integration owner while allowing every lane to produce locally evaluated candidates.
 - Lane actor: do the assigned work and return an evidence-backed `LaneReport`.
 - A resumed run, changed TASK.md, or checkpoint recovery: also read
   [state-events.md](references/state-events.md).
@@ -23,6 +23,7 @@ There is no audit coordinator in this flow. Terminal reports remain durable coll
 they do not pause lanes or request a coordinator verdict. Use `parallel_flame_chase_mission` when
 the task requires scoped audits, interruption, or mission redirection.
 
-This flow owns local coordination only. Do not upload, deploy, publish, submit, purchase, message,
-or invoke any domain-specific remote action. A separate caller remains responsible for such an
-action and its authorization.
+This flow owns local coordination, including task-provided local evaluator submissions. Those
+evaluator calls do not authorize uploading, deploying, publishing, remotely submitting to a
+competition or service, purchasing, messaging, or any other domain-specific remote action. A
+separate caller remains responsible for such an action and its authorization.
