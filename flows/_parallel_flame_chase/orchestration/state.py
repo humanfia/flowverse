@@ -10,8 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
 
-from hmz.flows import Stopped, home
+from hmz.flows import Question, Stopped, home
 
+from ..core.api import DEFAULT_WORKSPACE_FILE_WARNING_THRESHOLD
 from ..core.models import LANES, InitialPlan, LaneName
 from ..core.utils import (
     atomic_json,
@@ -31,6 +32,7 @@ from ..persistence.workspace import (
     SourceLock,
     initialize_paths,
     inspect_workspace,
+    inspect_workspace_stats,
     snapshot,
     validate_runtime_layout,
 )
@@ -46,6 +48,24 @@ CONTINUATION_MARKERS = {
     "继续",
     "继续。",
 }
+_CONFIRMATION_OPTIONS = ("Start anyway", "Stop")
+_ACCEPTED_CONFIRMATIONS = frozenset(
+    {"a", "1", "y", "yes", "是", "继续", "start anyway", "proceed"}
+)
+
+
+class WorkspaceStartupCancelled(Stopped):
+    """A large-workspace confirmation ended startup before a run was created."""
+
+
+def _confirmed(answer: str | None) -> bool:
+    """Return whether a person selected the option to continue startup."""
+    if not isinstance(answer, str):
+        return False
+    normalized = answer.strip().casefold()
+    if normalized in _ACCEPTED_CONFIRMATIONS:
+        return True
+    return normalized.startswith("a. start anyway")
 
 
 class RuntimeState:
@@ -347,6 +367,58 @@ class RuntimeState:
         self.paths.root.mkdir(parents=True, exist_ok=False)
         initialize_paths(self.paths, make_snapshots=True)
 
+    def _confirm_workspace_snapshot(self, *, snapshot_required: bool) -> None:
+        """Warn and ask before creating snapshots for a large source workspace."""
+        if not snapshot_required:
+            return
+        stats = inspect_workspace_stats(self.source)
+        threshold = getattr(
+            self.config,
+            "workspace_file_warning_threshold",
+            DEFAULT_WORKSPACE_FILE_WARNING_THRESHOLD,
+        )
+        if (
+            not isinstance(threshold, int)
+            or isinstance(threshold, bool)
+            or threshold < 1
+        ):
+            threshold = DEFAULT_WORKSPACE_FILE_WARNING_THRESHOLD
+        if stats.regular_files <= threshold:
+            return
+        warning = (
+            f"WARNING: source workspace {self.source} contains "
+            f"{stats.regular_files:,} regular files, above the "
+            f"workspace_file_warning_threshold of {threshold:,}.\n"
+            "Starting Parallel Flame Chase will create three workspace snapshots "
+            "(planning, private lane-2, and private lane-3) before any agent runs. This can "
+            f"consume substantial disk space (source apparent size: {stats.total_bytes:,} bytes; "
+            f"up to {stats.total_bytes * 3:,} bytes without filesystem COW).\n"
+            "No runtime directory or snapshot has been created yet."
+        )
+        print(warning)
+        human = getattr(self.agents, "human", None)
+        asked = cast(
+            "Callable[[Question], str | None] | None",
+            getattr(human, "asked", None),
+        )
+        if not callable(asked):
+            print("No interactive confirmation is available; startup cancelled.")
+            raise WorkspaceStartupCancelled(
+                "large workspace startup requires confirmation"
+            )
+        answer = asked(
+            Question(
+                text=(
+                    f"{warning}\n\n"
+                    "Start anyway and create the three workspace snapshots?"
+                ),
+                options=_CONFIRMATION_OPTIONS,
+            )
+        )
+        if not _confirmed(answer):
+            print("Parallel Flame Chase startup cancelled; no snapshots were created.")
+            raise WorkspaceStartupCancelled("large workspace startup cancelled")
+
     def _open_run(self, objective: str, resume: bool) -> None:
         if resume:
             self._resume_run(objective)
@@ -426,6 +498,10 @@ class RuntimeState:
     def prepare(self) -> SourceLock:
         """Resolve, open, plan, and attach one resumable parallel run."""
         objective, resume, revised = self._resolve_objective()
+        self._confirm_workspace_snapshot(
+            snapshot_required=not resume
+            or (revised and self.replan_on_objective_revision)
+        )
         self._open_run(objective, resume)
         self._prepare_plan(objective, resume=resume, revised=revised)
         self._prepare_mode(objective, revised=revised)

@@ -7,7 +7,8 @@
 Lane 1 alone owns the original source while Lanes 2 and 3 work in private snapshots. A fresh
 coordinator adjudicates terminal outcomes, deadlines, stalls, failures, objective revisions,
 external review requests, and periodic portfolio audits. Accepted private-lane artifacts enter
-Lane 1's durable integration queue.
+Lane 1's durable integration queue. Before a run that needs snapshots, an oversized source
+workspace is shown to the person at the prompt for confirmation.
 
 This is a separate public flow from ``parallel_flame_chase``. It has its own configuration,
 mounted mission skill, and resumable Humanize state; the two flows share only a hidden runtime

@@ -18,6 +18,7 @@ from _parallel_flame_chase.core.models import (
 )
 from _parallel_flame_chase.orchestration import state as runtime_state
 from _parallel_flame_chase.runtime import ParallelRuntime, execute
+from hmz.flows import Stopped
 
 
 def spec(title: str, approach: str) -> MissionSpec:
@@ -119,7 +120,21 @@ class CandidateAgent(FakeAgent):
         return session
 
 
-def agents(agent_type: type[FakeAgent] = FakeAgent) -> SimpleNamespace:
+class FakeHuman:
+    def __init__(self, answer: str | None = None) -> None:
+        self.answer = answer
+        self.questions: list[Any] = []
+
+    def asked(self, question: Any) -> str | None:
+        self.questions.append(question)
+        return self.answer
+
+
+def agents(
+    agent_type: type[FakeAgent] = FakeAgent,
+    *,
+    human_answer: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         coordinator=agent_type("coordinator"),
         lane_1_actor_a=agent_type("lane-1-a"),
@@ -128,11 +143,16 @@ def agents(agent_type: type[FakeAgent] = FakeAgent) -> SimpleNamespace:
         lane_2_actor_b=agent_type("lane-2-b"),
         lane_3_actor_a=agent_type("lane-3-a"),
         lane_3_actor_b=agent_type("lane-3-b"),
+        human=FakeHuman(human_answer),
     )
 
 
 def config() -> SimpleNamespace:
-    return SimpleNamespace(resume_mode="auto", rest_seconds=0.001)
+    return SimpleNamespace(
+        resume_mode="auto",
+        rest_seconds=0.001,
+        workspace_file_warning_threshold=5_000,
+    )
 
 
 class RejectingPlanSession:
@@ -158,6 +178,107 @@ class RejectingPlanAgent:
         session = RejectingPlanSession()
         self.sessions.append(session)
         return session
+
+
+def test_large_workspace_warning_stops_before_snapshot_creation(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(3):
+        (source / f"file-{index}.txt").write_text("data", encoding="utf-8")
+    runtime_home = tmp_path / "humanize-home"
+    monkeypatch.chdir(source)
+    monkeypatch.setattr(runtime_state, "home", lambda: runtime_home)
+    chosen = agents(human_answer="Stop")
+    runtime = ParallelRuntime(
+        chosen,
+        "Improve the implementation.",
+        SimpleNamespace(
+            resume_mode="auto",
+            rest_seconds=0.001,
+            workspace_file_warning_threshold=2,
+        ),
+        {},
+    )
+    try:
+        with pytest.raises(Stopped, match="large workspace startup"):
+            runtime.prepare()
+    finally:
+        runtime.executor.shutdown(wait=False, cancel_futures=True)
+
+    output = capsys.readouterr().out
+    assert "WARNING" in output
+    assert "3 regular files" in output
+    assert "three workspace snapshots" in output
+    assert chosen.human.questions[0].options == ("Start anyway", "Stop")
+    assert not runtime_home.exists()
+
+
+def test_large_workspace_confirmation_allows_snapshot_creation(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(3):
+        (source / f"file-{index}.txt").write_text("data", encoding="utf-8")
+    runtime_home = tmp_path / "humanize-home"
+    monkeypatch.chdir(source)
+    monkeypatch.setattr(runtime_state, "home", lambda: runtime_home)
+    chosen = agents(human_answer="A. Start anyway")
+    runtime = ParallelRuntime(
+        chosen,
+        "Improve the implementation.",
+        SimpleNamespace(
+            resume_mode="auto",
+            rest_seconds=0.001,
+            workspace_file_warning_threshold=2,
+        ),
+        {},
+    )
+    try:
+        runtime.prepare()
+        root = runtime.paths.root
+        assert root.is_dir()
+        assert (root / "shared" / "planning-workspace").is_dir()
+        assert (root / "private" / "lane-2").is_dir()
+        assert (root / "private" / "lane-3").is_dir()
+        assert (root / "shared" / "planning-workspace" / "file-0.txt").is_file()
+        assert (root / "private" / "lane-2" / "file-1.txt").is_file()
+        assert (root / "private" / "lane-3" / "file-2.txt").is_file()
+        assert chosen.human.questions
+    finally:
+        runtime.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_large_workspace_without_interactive_person_stops_safely(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(3):
+        (source / f"file-{index}.txt").write_text("data", encoding="utf-8")
+    runtime_home = tmp_path / "humanize-home"
+    monkeypatch.chdir(source)
+    monkeypatch.setattr(runtime_state, "home", lambda: runtime_home)
+    runtime = ParallelRuntime(
+        SimpleNamespace(coordinator=FakeAgent("coordinator")),
+        "Improve the implementation.",
+        SimpleNamespace(
+            resume_mode="auto",
+            rest_seconds=0.001,
+            workspace_file_warning_threshold=2,
+        ),
+        {},
+    )
+    try:
+        with pytest.raises(Stopped, match="requires confirmation"):
+            runtime.prepare()
+    finally:
+        runtime.executor.shutdown(wait=False, cancel_futures=True)
+
+    assert "No interactive confirmation is available" in capsys.readouterr().out
+    assert not runtime_home.exists()
 
 
 def test_initial_plan_failure_preserves_backend_diagnostics(

@@ -28,6 +28,7 @@ def test_mission_flow_is_a_separate_fixed_seven_agent_entry() -> None:
     assert set(config.model_fields) == {
         "rest_seconds",
         "resume_mode",
+        "workspace_file_warning_threshold",
         "global_audit_hours",
         "mission_deadline_hours",
         "max_turns_without_outcome",
