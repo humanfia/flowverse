@@ -110,3 +110,15 @@ Answering no -- or nothing -- stops the compile and keeps nothing."""
 RENAME = """There is already a flow called {name!r} where this one is to land, and a \
 compiler does not write over what somebody keeps. Give another name for the compiled \
 flow, or answer nothing to stop the compile."""
+
+#: The writer's own round on an ask nothing serves, before the person is troubled with it.
+RESAID = """Some of the spec's `needs` name nothing the briefing serves:
+
+{unserved}
+
+A need is one of the briefing's capability names, spelled exactly as the briefing spells \
+it, and nothing else belongs in `needs`. An ordinary ability -- writing files, reading the \
+repository, taking turns, printing -- is not a capability to declare: every agent has it, \
+so drop it from `needs`. Only if the description truly requires something the briefing \
+does not serve should you keep it listed, exactly as the description asks, and the compile \
+will stop honestly. Answer with the whole corrected spec, in the shape."""
