@@ -115,25 +115,47 @@ def _input_too_large(error: str) -> bool:
     )
 
 
-def _compact_retry(packet: dict[str, object]) -> tuple[dict[str, object], str]:
+def _compact_retry(
+    packet: dict[str, object],
+    *,
+    skill: str,
+    role_name: str,
+) -> tuple[dict[str, object], str]:
     compact = compact_audit_packet(
         packet,
         max_prompt_chars=AUDIT_PROMPT_RETRY_MAX_CHARS,
+        skill=skill,
+        role_name=role_name,
     )
-    return compact, audit_prompt(compact, max_chars=AUDIT_PROMPT_RETRY_MAX_CHARS)
+    return compact, audit_prompt(
+        compact,
+        max_chars=AUDIT_PROMPT_RETRY_MAX_CHARS,
+        skill=skill,
+        role_name=role_name,
+    )
 
 
 def run_audit_session(
     session: Session,
     packet: dict[str, object],
+    *,
+    skill: str = "parallel-flame-chase-mission",
+    role_name: str = "coordinator",
 ) -> tuple[AuditDecision | None, list[dict[str, object]]]:
     """Try one proposal and two same-session repairs before yielding no decision."""
     attempts: list[dict[str, object]] = []
     prompt_packet = compact_audit_packet(
         packet,
         max_prompt_chars=AUDIT_PROMPT_MAX_CHARS,
+        skill=skill,
+        role_name=role_name,
     )
-    prompt = audit_prompt(prompt_packet, max_chars=AUDIT_PROMPT_MAX_CHARS)
+    prompt = audit_prompt(
+        prompt_packet,
+        max_chars=AUDIT_PROMPT_MAX_CHARS,
+        skill=skill,
+        role_name=role_name,
+    )
     for number in range(1, 4):
         try:
             proposed = session(prompt, suppress=False, schema=AuditDecision)
@@ -143,7 +165,11 @@ def run_audit_session(
             error = f"{type(why).__name__}: {why}"[:2000]
             attempts.append({"number": number, "at": now(), "error": error})
             if _input_too_large(error) and number < 3:
-                prompt_packet, prompt = _compact_retry(packet)
+                prompt_packet, prompt = _compact_retry(
+                    packet,
+                    skill=skill,
+                    role_name=role_name,
+                )
             else:
                 prompt = audit_repair_prompt(error, prompt_packet)
             continue
@@ -151,12 +177,16 @@ def run_audit_session(
             error = f"{type(why).__name__}: {why}"[:2000]
             attempts.append({"number": number, "at": now(), "error": error})
             if _input_too_large(error) and number < 3:
-                prompt_packet, prompt = _compact_retry(packet)
+                prompt_packet, prompt = _compact_retry(
+                    packet,
+                    skill=skill,
+                    role_name=role_name,
+                )
                 continue
             return None, attempts
 
         error = (
-            "coordinator returned no structured decision"
+            f"{role_name} returned no structured decision"
             if proposed is None
             else decision_error(
                 prompt_packet.get("audit"),

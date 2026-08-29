@@ -46,15 +46,7 @@ class MissionScheduler(ParallelRuntime):
             raise TypeError("resumable external event state is malformed")
 
     def _prepare_mode(self, objective: str, *, revised: bool) -> None:
-        self.controller = MissionController(
-            cast("dict[str, Any] | None", self.control.get("missions")),
-            run_id=cast("str", self.control["run_id"]),
-            objective=objective,
-            global_audit_hours=getattr(self.config, "global_audit_hours", 6.0),
-            default_deadline_hours=getattr(self.config, "mission_deadline_hours", 6.0),
-            default_max_turns=getattr(self.config, "max_turns_without_outcome", 6),
-            clock=self.clock,
-        )
+        self.controller = self._make_controller(objective)
         if not self.controller.data["missions"]:
             self.controller.bootstrap(InitialPlan.model_validate(self.control["plan"]))
         elif revised:
@@ -66,6 +58,18 @@ class MissionScheduler(ParallelRuntime):
                 prior_hash = cast("str", self.state.get("task_fingerprint", ""))
                 self.controller.revise_objective(prior_hash, current_hash)
         self.control["missions"] = self.controller.snapshot()
+
+    def _make_controller(self, objective: str) -> MissionController:
+        """Construct the mode-owned controller; additive variants may specialize it."""
+        return MissionController(
+            cast("dict[str, Any] | None", self.control.get("missions")),
+            run_id=cast("str", self.control["run_id"]),
+            objective=objective,
+            global_audit_hours=getattr(self.config, "global_audit_hours", 6.0),
+            default_deadline_hours=getattr(self.config, "mission_deadline_hours", 6.0),
+            default_max_turns=getattr(self.config, "max_turns_without_outcome", 6),
+            clock=self.clock,
+        )
 
     def _before_persist(self) -> None:
         if self.controller is not None:
@@ -174,8 +178,14 @@ class MissionScheduler(ParallelRuntime):
         runtime: LaneRuntime,
         record: dict[str, object],
         report: LaneReport,
+        *,
+        candidate_became_best: bool,
     ) -> None:
-        self._controller().observe(runtime.lane, cast("dict[str, Any]", record))
+        self._controller().observe(
+            runtime.lane,
+            cast("dict[str, Any]", record),
+            candidate_became_best=candidate_became_best,
+        )
 
     def _handle_pair_failure(self, runtime: LaneRuntime, error: str) -> None:
         self._controller().trigger(

@@ -57,6 +57,7 @@ class RuntimeState:
         "This is the only coordinator turn; lanes will subsequently self-coordinate "
         "through durable reports."
     )
+    orchestrator_role_name = "coordinator"
     replan_on_objective_revision = True
 
     def __init__(
@@ -274,6 +275,7 @@ class RuntimeState:
             objective=objective,
             workspace_map=self._workspace_map(),
             skill=self.skill_name,
+            role_name=self.orchestrator_role_name,
             cadence=self.planning_cadence,
         )
         failures: list[str] = []

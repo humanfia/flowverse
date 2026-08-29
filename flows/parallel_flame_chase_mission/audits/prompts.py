@@ -87,9 +87,14 @@ def _summarize(packet: dict[str, object]) -> dict[str, object]:
     return projected
 
 
-def _render(packet: dict[str, object]) -> str:
-    return f"""You are a fresh, read-only coordinator deciding one revision of a generic parallel
-Flame Chase audit. Read the mounted `parallel-flame-chase-mission` skill and its mission-audit
+def _render(
+    packet: dict[str, object],
+    *,
+    skill: str = "parallel-flame-chase-mission",
+    role_name: str = "coordinator",
+) -> str:
+    return f"""You are a fresh, read-only {role_name} deciding one revision of a generic parallel
+Flame Chase audit. Read the mounted `{skill}` skill and its mission-audit
 reference.
 Inspect the evidence packet and any snapshot available in the working directory. Do not edit any
 lane workspace, defend with the actors, run remote actions, or assume evidence absent from the
@@ -119,11 +124,16 @@ def compact_audit_packet(
     packet: dict[str, object],
     *,
     max_prompt_chars: int = AUDIT_PROMPT_MAX_CHARS,
+    skill: str = "parallel-flame-chase-mission",
+    role_name: str = "coordinator",
 ) -> dict[str, object]:
     """Build a deterministic coordinator packet that fits the prompt budget."""
     if max_prompt_chars < 20_000:
         raise ValueError("audit prompt budget must be at least 20000 characters")
-    if packet.get("_prompt_projection") and len(_render(packet)) <= max_prompt_chars:
+    if (
+        packet.get("_prompt_projection")
+        and len(_render(packet, skill=skill, role_name=role_name)) <= max_prompt_chars
+    ):
         return deepcopy(packet)
 
     base = _summarize(packet)
@@ -145,16 +155,28 @@ def compact_audit_packet(
                 text_limit=text_limit,
                 list_limit=list_limit,
             )
-        if len(_render(candidate)) <= max_prompt_chars:
+        if (
+            len(_render(candidate, skill=skill, role_name=role_name))
+            <= max_prompt_chars
+        ):
             return candidate
 
-    return _identity_packet(base, packet, max_prompt_chars)
+    return _identity_packet(
+        base,
+        packet,
+        max_prompt_chars,
+        skill=skill,
+        role_name=role_name,
+    )
 
 
 def _identity_packet(
     summarized: dict[str, object],
     original: dict[str, object],
     max_prompt_chars: int,
+    *,
+    skill: str,
+    role_name: str,
 ) -> dict[str, object]:
     """Retain only decision identity and target evidence as a final fallback."""
     raw_audit = summarized.get("audit")
@@ -195,7 +217,7 @@ def _identity_packet(
             "emergency_identity_projection": True,
         },
     }
-    if len(_render(emergency)) > max_prompt_chars:
+    if len(_render(emergency, skill=skill, role_name=role_name)) > max_prompt_chars:
         raise RuntimeError("audit identity packet exceeds the configured prompt budget")
     return emergency
 
@@ -204,9 +226,17 @@ def audit_prompt(
     packet: dict[str, object],
     *,
     max_chars: int = AUDIT_PROMPT_MAX_CHARS,
+    skill: str = "parallel-flame-chase-mission",
+    role_name: str = "coordinator",
 ) -> str:
     """Ask a fresh coordinator to decide one immutable audit revision."""
-    return _render(compact_audit_packet(packet, max_prompt_chars=max_chars))
+    compact = compact_audit_packet(
+        packet,
+        max_prompt_chars=max_chars,
+        skill=skill,
+        role_name=role_name,
+    )
+    return _render(compact, skill=skill, role_name=role_name)
 
 
 def audit_repair_prompt(error: str, packet: dict[str, object]) -> str:

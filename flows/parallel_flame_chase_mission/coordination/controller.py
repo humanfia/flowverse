@@ -437,7 +437,26 @@ class MissionController:
     def auditing(self, lane: LaneName) -> bool:
         return lane in self.targets()
 
-    def observe(self, lane: LaneName, report: dict[str, Any]) -> None:
+    def _outcome_audit_request(
+        self,
+        lane: LaneName,
+        status: object,
+        *,
+        candidate_became_best: bool,
+    ) -> tuple[str, list[LaneName]]:
+        """Return the original Mission scope for one terminal lane outcome."""
+        del candidate_became_best
+        if status == "deliverable_ready" and lane == "lane-1":
+            return "global", []
+        return "targeted", [lane]
+
+    def observe(
+        self,
+        lane: LaneName,
+        report: dict[str, Any],
+        *,
+        candidate_became_best: bool = False,
+    ) -> None:
         """Advance one active mission from a validated actor report."""
         mission = self.current_mission(lane)
         if report.get("mission_id") != mission["id"] or report.get(
@@ -480,6 +499,7 @@ class MissionController:
             "evidence": report.get("evidence", []),
             "deliverable": report.get("deliverable"),
             "artifacts": report.get("artifacts", []),
+            "candidate_became_best": candidate_became_best,
         }
         mission["outcome"] = json_copy(event)
         cast("list[dict[str, object]]", self.data["outcomes"]).append(json_copy(event))
@@ -488,16 +508,12 @@ class MissionController:
             "blocked" if status == "blocked" else "completed",
             f"lane reported {status}",
         )
-        self.trigger(
-            "mission_outcome",
-            event,
-            scope="global"
-            if status == "deliverable_ready" and lane == "lane-1"
-            else "targeted",
-            targets=[]
-            if status == "deliverable_ready" and lane == "lane-1"
-            else [lane],
+        scope, targets = self._outcome_audit_request(
+            lane,
+            status,
+            candidate_became_best=candidate_became_best,
         )
+        self.trigger("mission_outcome", event, scope=scope, targets=targets)
 
     def observe_external(self, event: ExternalEventV1) -> None:
         """Attach a validated adapter event without granting it decision authority."""
@@ -517,12 +533,12 @@ class MissionController:
         lane = event.lane
         if lane is None:  # Model validation normally makes this unreachable.
             raise ValueError(f"{kind} requires lane")
-        scope = (
-            "global" if kind == "deliverable_ready" and lane == "lane-1" else "targeted"
+        scope, targets = self._outcome_audit_request(
+            lane,
+            kind,
+            candidate_became_best=False,
         )
-        self.trigger(
-            kind, document, scope=scope, targets=[] if scope == "global" else [lane]
-        )
+        self.trigger(kind, document, scope=scope, targets=targets)
 
     def revise_objective(self, prior_hash: str, current_hash: str) -> None:
         """Preserve compatible work but force a fleet-wide replan on TASK revision."""
