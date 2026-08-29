@@ -9,7 +9,7 @@ _parallel_flame_chase/
 ├── core/               # public flow types, durable models, generic utilities
 ├── orchestration/      # run creation, resume validation, planning, persistence
 ├── lanes/              # lane prompts, session handles, scheduling and reports
-└── persistence/        # workspaces, locks, artifacts, JSONL events and checkpoints
+└── persistence/        # workspaces, locks, artifacts, reports, checkpoints, leaderboard
 ```
 
 `runtime.py` composes the scheduler layers; leaf modules under `core` and `persistence` do not

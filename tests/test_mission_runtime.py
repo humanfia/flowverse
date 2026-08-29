@@ -8,6 +8,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from _parallel_flame_chase.core.models import (
+    ArtifactRef,
+    CandidateSubmission,
+    Deliverable,
     InitialPlan,
     LaneBrief,
     LaneReport,
@@ -187,6 +190,71 @@ def test_mission_runtime_audits_terminal_lane_without_stopping_other_lanes(
     assert state["lanes"]["lane-1"]["turns"] >= 2
     assert state["lanes"]["lane-3"]["turns"] >= 2
     assert len(chosen.coordinator.sessions) >= 2
+
+
+def test_mission_audit_packet_exposes_shared_candidate_best(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    runtime_home = tmp_path / "humanize-home"
+    monkeypatch.chdir(source)
+    monkeypatch.setattr(runtime_state, "home", lambda: runtime_home)
+    state: dict[str, Any] = {}
+    runtime = MissionRuntime(
+        agents(),
+        "Find the fastest correct local candidate.",
+        mission_config(),
+        state,
+        sleeper=lambda _: None,
+    )
+    try:
+        runtime.prepare()
+        lane = runtime.lanes["lane-2"]
+        lane.identity = runtime._identity("lane-2")
+        artifact_root = runtime.paths.artifact_root("lane-2")
+        (artifact_root / "candidate.py").write_text(
+            "# evaluator-accepted lane-2 candidate\n", encoding="utf-8"
+        )
+        runtime._record_report(
+            lane,
+            LaneReport(
+                status="deliverable_ready",
+                summary="Lane 2 produced the current best local candidate.",
+                evidence=["task-provided evaluator accepted 875 cycles"],
+                deliverable=Deliverable(
+                    title="lane-2 candidate",
+                    approach_class="algorithm",
+                    artifacts=[
+                        ArtifactRef(
+                            path="candidate.py", description="complete candidate"
+                        )
+                    ],
+                    integration_notes="Reconstruct and compare this candidate.",
+                ),
+                submission=CandidateSubmission(
+                    title="lane-2 candidate",
+                    metric="cycles",
+                    value=875,
+                    direction="minimize",
+                    evaluator="task-provided local evaluator, exit 0",
+                ),
+            ),
+            recovered=False,
+        )
+        runtime._persist()
+
+        assert runtime.controller is not None
+        packet = runtime.controller.decision_packet(
+            runtime.control["latest_reports"], runtime._manifest()
+        )
+        candidate = packet["manifest"]["candidate_board"]["best"]
+        assert candidate["lane"] == "lane-2"
+        assert candidate["value"] == 875.0
+        leaderboard = runtime.paths.leaderboard
+        assert json.loads(leaderboard.read_text(encoding="utf-8"))["best"] == candidate
+    finally:
+        runtime.executor.shutdown(wait=False, cancel_futures=True)
 
 
 class ProbeSession:

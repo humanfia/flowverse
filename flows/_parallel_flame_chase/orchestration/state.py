@@ -25,6 +25,7 @@ from ..core.utils import (
 from ..lanes.prompts import planning_prompt
 from ..lanes.runtime import LaneRuntime
 from ..persistence.events import ReportBus
+from ..persistence.leaderboard import empty_leaderboard, validate_leaderboard
 from ..persistence.workspace import (
     RunPaths,
     SourceLock,
@@ -193,6 +194,9 @@ class RuntimeState:
                 raise TypeError(f"resumable state field {name!r} is malformed")
         if not isinstance(self.control.get("events"), list):
             raise TypeError("resumable state events are malformed")
+        validate_leaderboard(
+            self.control.get("candidate_board"), cast("str", self.control["run_id"])
+        )
         self._validate_mode_control()
 
     def _new_control(self, objective: str) -> dict[str, Any]:
@@ -224,6 +228,7 @@ class RuntimeState:
             },
             "bus_cursors": {},
             "latest_reports": {},
+            "candidate_board": empty_leaderboard(run_id),
             "events": [],
         }
         control.update(self._new_mode_control())
@@ -253,6 +258,14 @@ class RuntimeState:
                 lane: str(self.paths.artifact_root(lane)) for lane in LANES
             },
             "checkpoints": {lane: str(self.paths.checkpoint(lane)) for lane in LANES},
+            "candidate_submissions": {
+                "all_lanes_may_submit": True,
+                "local_evaluator_only": True,
+                "report_field": "submission",
+                "requires_reconstructable_deliverable": True,
+                "leaderboard": str(self.paths.leaderboard),
+                "current": json_copy(self.control["candidate_board"]),
+            },
             "remote_actions": "not-authorized-by-this-flow",
         }
 
@@ -290,6 +303,11 @@ class RuntimeState:
     def _resume_run(self, objective: str) -> None:
         """Load one complete compatible run without recreating missing durable state."""
         self.control = json_copy(self.state)
+        if "candidate_board" not in self.control:
+            run_id = self.control.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                raise ValueError("resumable state has no run_id")
+            self.control["candidate_board"] = empty_leaderboard(run_id)
         self._validate_resumable_control()
         self.control.update(
             objective=objective,
@@ -427,6 +445,7 @@ class RuntimeState:
             "objective_fingerprint": self.control.get("task_fingerprint"),
             "updated_at": now(),
             "lanes": json_copy(self.control.get("lanes", {})),
+            "candidate_board": json_copy(self.control.get("candidate_board", {})),
             "remote_actions": "disabled",
         }
         manifest.update(self._manifest_fields())
@@ -440,3 +459,4 @@ class RuntimeState:
         self.state.update(json_copy(self.control))
         atomic_json(self.paths.state_mirror, self.control)
         atomic_json(self.paths.manifest, self._manifest())
+        atomic_json(self.paths.leaderboard, self.control["candidate_board"])

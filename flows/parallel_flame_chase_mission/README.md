@@ -30,6 +30,11 @@ Lane 1 is the sole writer and integration owner for the original source. Lanes 2
 private snapshots and publish hashed, reconstructable artifact packages. All actor turns are fresh
 sessions and A/B alternation is durable across restarts.
 
+All three lanes may use task-provided local evaluators and attach accepted candidates to their
+hashed packages. A runtime-owned `shared/leaderboard.json` exposes the primary cross-lane best to
+every lane prompt and to Mission audit manifests. This does not change Lane 1's exclusive source
+integration ownership or authorize remote submissions.
+
 ## Package layout
 
 Mission-only code is grouped by responsibility, leaving the package root as the public flow

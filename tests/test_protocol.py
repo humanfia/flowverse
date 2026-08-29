@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from _parallel_flame_chase.core.models import (
     ArtifactRef,
+    CandidateSubmission,
     CheckpointIdentity,
     Deliverable,
     InitialPlan,
@@ -17,6 +18,10 @@ from _parallel_flame_chase.lanes.prompts import lane_prompt, planning_prompt
 from _parallel_flame_chase.lanes.runtime import run_lane_session
 from _parallel_flame_chase.persistence.checkpoints import checkpoint_report
 from _parallel_flame_chase.persistence.events import ReportBus
+from _parallel_flame_chase.persistence.leaderboard import (
+    empty_leaderboard,
+    with_submission,
+)
 from _parallel_flame_chase.persistence.workspace import (
     RunPaths,
     SourceLock,
@@ -70,6 +75,78 @@ def test_agent_output_schemas_require_every_object_property() -> None:
 
     for output in (InitialPlan, LaneReport):
         inspect(output.model_json_schema(), output.__name__)
+
+
+def candidate_report(
+    lane: str, value: float, *, metric: str = "cycles"
+) -> dict[str, object]:
+    return {
+        "version": 1,
+        "report_id": f"report-{lane}-{metric}-{value}",
+        "at": "2026-08-27T00:00:00.000Z",
+        "run_id": "run-1",
+        "lane": lane,
+        "actor": "a",
+        "turn": 1,
+        "mission_id": None,
+        "generation": 0,
+        "submission": CandidateSubmission(
+            title=f"{lane} candidate",
+            metric=metric,
+            value=value,
+            direction="minimize",
+            evaluator="local evaluator exit 0",
+            evidence=["accepted by the task-provided evaluator"],
+        ).model_dump(mode="json"),
+        "artifacts": [
+            {
+                "path": "candidate.py",
+                "description": "reconstructable candidate",
+                "size": 10,
+                "sha256": "a" * 64,
+            }
+        ],
+    }
+
+
+def test_all_three_lanes_submit_to_one_shared_best_board() -> None:
+    board = empty_leaderboard("run-1")
+    became_best: list[bool] = []
+    for lane, value in (("lane-1", 1100), ("lane-2", 900), ("lane-3", 1000)):
+        board, candidate, changed = with_submission(
+            board, candidate_report(lane, value)
+        )
+        assert candidate["lane"] == lane
+        assert candidate["artifacts"][0]["sha256"] == "a" * 64
+        became_best.append(changed)
+
+    assert became_best == [True, True, False]
+    assert board["submission_count"] == 3
+    assert board["best"]["lane"] == "lane-2"
+    assert board["best"]["value"] == 900.0
+    assert len(board["leaders"]) == 1
+
+    alternate = candidate_report("lane-3", 0.99, metric="accuracy")
+    alternate["submission"]["direction"] = "maximize"
+    board, _, changed = with_submission(board, alternate)
+    assert changed is False
+    assert board["best"]["value"] == 900.0
+    assert len(board["leaders"]) == 2
+
+
+def test_candidate_submission_requires_a_reconstructable_deliverable() -> None:
+    with pytest.raises(ValueError, match="reconstructable deliverable"):
+        LaneReport(
+            status="progress",
+            summary="Measured a candidate without publishing its files.",
+            submission=CandidateSubmission(
+                title="candidate",
+                metric="cycles",
+                value=1000,
+                direction="minimize",
+                evaluator="local evaluator",
+            ),
+        )
 
 
 def test_report_bus_redelivers_until_acknowledged(tmp_path: Path) -> None:

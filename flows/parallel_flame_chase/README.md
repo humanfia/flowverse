@@ -35,6 +35,11 @@ and publish reconstructable files into runtime-owned artifact roots. Reports are
 the receiving lane completes a valid turn and acknowledges them. The coordinator does not return
 after planning, and the runtime never pauses a healthy lane for portfolio review.
 
+All three lanes may use task-provided local evaluators and attach an accepted candidate to a
+`deliverable_ready` report. The runtime binds every candidate to hashed artifacts and maintains a
+single-writer cross-lane board at `shared/leaderboard.json`; its primary best is included in every
+fresh lane prompt. Candidate submission does not grant source-integration or remote-action rights.
+
 ## Resume and safety
 
 The flow is resumable. The same substantive task resumes compatible state and preserves A/B

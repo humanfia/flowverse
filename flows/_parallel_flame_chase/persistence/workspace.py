@@ -62,6 +62,10 @@ class RunPaths:
     def workspace_map(self) -> Path:
         return self.shared / "workspace-map.json"
 
+    @property
+    def leaderboard(self) -> Path:
+        return self.shared / "leaderboard.json"
+
     def workspace(self, lane: LaneName) -> Path:
         return self.source if lane == "lane-1" else self.private / lane
 
@@ -220,6 +224,7 @@ def validate_runtime_layout(paths: RunPaths) -> None:
         paths.manifest,
         paths.state_mirror,
         paths.workspace_map,
+        paths.leaderboard,
         paths.root / "objective.md",
     ]
     for path in files:

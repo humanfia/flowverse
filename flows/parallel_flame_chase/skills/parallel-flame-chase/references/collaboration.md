@@ -7,6 +7,7 @@ and B alternating in fresh sessions.
 
 - Lane 1 alone edits and integrates the original source.
 - Lanes 2 and 3 edit only their private snapshots.
+- All three lanes may run task-provided local evaluators and submit reconstructable candidates.
 - A private snapshot is not a shared branch and is never merged implicitly.
 
 Read the repository at the start of every turn. Conversational memory does not cross actors or
@@ -35,6 +36,21 @@ steps, validation performed, known failure modes, and what Lane 1 should compare
 
 Lane 1 consumes only runtime-validated packages. Recheck their assumptions in the original source;
 integration is new work, not blind copying. Keep unrelated source work intact.
+
+## Candidate submissions and shared best
+
+Every lane may attach one evaluator-accepted local candidate to a terminal `deliverable_ready`
+report. Set the structured `submission` field and publish the complete candidate under that lane's
+artifact root. The runtime hashes the declared files, binds the score to the report identity, and
+updates `shared/leaderboard.json` through its single writer. Do not submit a rejected candidate,
+self-estimated value, or result without a reconstructable package. Use new artifact paths for each
+candidate and never alter a previously published candidate file.
+
+The first valid candidate establishes the primary metric and direction. Later comparable results
+use the same metric and direction; unrelated metrics remain separate leaders and cannot silently
+replace the primary best. Every lane receives the current board in its next prompt and may read the
+live file during a turn. This local evaluator protocol does not authorize a remote competition
+submission, release, deployment, purchase, or message. Lane 1 remains the only source integrator.
 
 ## Checkpoints
 
