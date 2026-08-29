@@ -1,3 +1,4 @@
 # Generic report-driven defaults.
 rest_seconds: 1.0
 resume_mode: auto
+workspace_file_warning_threshold: 5000

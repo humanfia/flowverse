@@ -23,7 +23,11 @@ def test_public_flow_declares_fixed_seven_agent_topology() -> None:
     config = configures(base)
     assert config is not None
     assert config.__name__ == "Config"
-    assert set(config.model_fields) == {"rest_seconds", "resume_mode"}
+    assert set(config.model_fields) == {
+        "rest_seconds",
+        "resume_mode",
+        "workspace_file_warning_threshold",
+    }
     assert [flow.name for flow in held(base)] == [""]
     assert [skill.name for skill in brought(base.parent)] == ["parallel-flame-chase"]
     offered_names = offered(flows)

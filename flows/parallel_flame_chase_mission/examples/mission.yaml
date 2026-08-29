@@ -2,6 +2,7 @@
 # optional external event stream, which may be absolute.
 rest_seconds: 1.0
 resume_mode: auto
+workspace_file_warning_threshold: 5000
 global_audit_hours: 6.0
 mission_deadline_hours: 6.0
 max_turns_without_outcome: 6

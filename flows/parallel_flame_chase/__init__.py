@@ -6,7 +6,8 @@
 
 The coordinator plans once and does not return. Lane 1 alone owns the original source while
 Lanes 2 and 3 work in private snapshots; the six lane actors alternate in fresh sessions and
-coordinate through durable reports and reconstructable artifacts.
+coordinate through durable reports and reconstructable artifacts. Before a run that needs
+snapshots, an oversized source workspace is shown to the person at the prompt for confirmation.
 
 This ordinary flow has no mission audits or coordinator-driven interruptions. Use the separate
 ``parallel_flame_chase_mission`` flow when scoped review and redirection are required.

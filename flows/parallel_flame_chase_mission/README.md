@@ -16,6 +16,9 @@ Pass exactly seven agents in this order:
 6. Lane 3 actor A
 7. Lane 3 actor B
 
+The person at the prompt is injected automatically for the startup safety check and does not
+require an eighth `-a`.
+
 ```console
 hmz exec -f ./flows/parallel_flame_chase_mission \
   -a codex/gpt-5.6-sol:max \
@@ -29,6 +32,12 @@ hmz exec -f ./flows/parallel_flame_chase_mission \
 Lane 1 is the sole writer and integration owner for the original source. Lanes 2 and 3 work in
 private snapshots and publish hashed, reconstructable artifact packages. All actor turns are fresh
 sessions and A/B alternation is durable across restarts.
+
+Before a fresh run, the source is counted. If it contains more than
+`workspace_file_warning_threshold` regular files (5,000 by default), the flow warns that it
+will create three workspace snapshots and asks the person at the prompt to confirm. Declining or
+running without an interactive person stops before any runtime directory or snapshot is created.
+Adjust the threshold in the flow config when a known large workspace is intentional.
 
 All three lanes may use task-provided local evaluators and attach accepted candidates to their
 hashed packages. A runtime-owned `shared/leaderboard.json` exposes the primary cross-lane best to
