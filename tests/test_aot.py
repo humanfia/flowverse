@@ -163,7 +163,12 @@ class WriterSession(SessionBase):
         if self._id is None:
             self._adopt(f"writer-{id(self)}")
         if schema is not None and schema.__name__ == "Spec":
-            yield Event(kind="result", text=json.dumps(agent.blueprint))
+            held = (
+                agent.blueprints.pop(0)
+                if len(agent.blueprints) > 1
+                else agent.blueprints[0]
+            )
+            yield Event(kind="result", text=json.dumps(held))
             return
         agent.asked.append(prompt)
         if agent.trees:
@@ -177,10 +182,13 @@ class WriterSession(SessionBase):
 
 class WriterAgent(AgentBase):
     def __init__(
-        self, spec_: dict[str, object], trees: list[Mapping[str, str]]
+        self,
+        spec_: dict[str, object] | list[dict[str, object]],
+        trees: list[Mapping[str, str]],
     ) -> None:
         super().__init__(CONFIG, name="writer")
-        self.blueprint = spec_
+        #: The spec answers, in order; the last is answered again where more are asked.
+        self.blueprints = list(spec_) if isinstance(spec_, list) else [spec_]
         self.trees = list(trees)
         #: Every write or repair prompt, in order -- what the gates handed back.
         self.asked: list[str] = []
@@ -223,7 +231,7 @@ def compiled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    spec_: dict[str, object] | None = None,
+    spec_: dict[str, object] | list[dict[str, object]] | None = None,
     trees: list[Mapping[str, str]] | None = None,
     reviews: list[dict[str, object]] | None = None,
     human: HumanAgent | None = None,
@@ -312,6 +320,23 @@ def test_an_ask_nothing_serves_is_refused_before_anything_is_written(
         "cannot compile -- asks for interrupting a turn mid-stream, which nothing "
         "here serves" in out
     )
+
+
+def test_a_mis_worded_need_is_the_writers_to_restate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The first spec claims an ordinary ability as a need; the writer's own round -- not
+    # the person's -- restates it, and the compile goes on to land.
+    writer = compiled(
+        tmp_path,
+        monkeypatch,
+        spec_=[spec(needs=("plan file",)), spec()],
+    )
+    assert (tmp_path / ".humanize" / "flows" / "pair_loop" / "__init__.py").is_file()
+    assert len(writer.asked) == 1
+    assert "cannot compile" not in capsys.readouterr().out
 
 
 def test_a_name_already_taken_is_not_written_over(

@@ -232,11 +232,26 @@ def _compiled(agents: Compiling, task: str, held: Config, scratch: Path) -> None
         print("hmz: aot: the writer could not draw a spec from the description; nothing "
               "was written")
         return
-    name = _named(held.name or spec.name)
     unserved, limited = _unserved(spec)
+    if unserved:
+        # The writer's own round first: an unserved ask is more often the description's
+        # words taken for a capability -- writing a file, reading the repository -- than
+        # a real hole, and the writer can restate the spec in the catalogue's vocabulary
+        # before anybody is asked to build less.
+        resaid = writing(
+            prompts.RESAID.format(
+                unserved="\n".join(f"- {one}" for one in unserved)
+            ),
+            suppress=True,
+            schema=Spec,
+        )
+        if resaid is not None:
+            spec = resaid
+            unserved, limited = _unserved(spec)
     if unserved and not _narrowed(agents.human, unserved):
         print("hmz: aot: cannot compile -- nothing was written")
         return
+    name = _named(held.name or spec.name)
     draft = scratch / name
     feedback = ""
     landed = False
