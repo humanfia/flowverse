@@ -1,6 +1,7 @@
 """Two agents flame-chase a repository task while a cleaner distills the workspace and erases its history.
 
-    hmz exec -f flame_chase_agent_cleanup -a claude -a codex -a claude 'improve the project under solution/'
+    hmz exec -f flame_chase_agent_cleanup -a claude -a codex -a claude \\
+        -c cleanup.yaml 'improve the project'
 
 Two coding agents take turns on the task, each turn a fresh session opened on the
 working directory and handed the task verbatim, so every turn reads the repository
@@ -116,10 +117,9 @@ class Config(BaseModel):
         description="completed coding-agent turns between cleaning epochs; 0 never cleans",
     )
     work_paths: tuple[str, ...] = Field(
-        default=("solution",),
         min_length=1,
-        description="relative, non-overlapping files or directories where agents may "
-        "create or revise task work",
+        description="required relative, non-overlapping files or directories where "
+        "agents may create or revise task work",
     )
     next_lines: int = Field(
         default=10,

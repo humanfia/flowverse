@@ -1,7 +1,7 @@
 """Two agents alternate fresh-session turns in a repository periodically reset to its pristine snapshot.
 
     hmz exec -f flame_chase_rule_cleanup -a claude/MODEL:EFFORT -a codex/MODEL:EFFORT \\
-        "improve the project under solution/"
+        -c cleanup.yaml "improve the project"
 
 A rule-cleaned flame chase for repository work. The flame and the chaser take
 turns on the task in the working repository; every turn is a fresh session
@@ -102,10 +102,9 @@ class Config(BaseModel):
         "repository; 0 never cleans",
     )
     work_paths: tuple[str, ...] = Field(
-        default=("solution",),
         min_length=1,
-        description="relative, non-overlapping files or directories whose current "
-        "contents survive each cleanup",
+        description="required relative, non-overlapping files or directories whose "
+        "current contents survive each cleanup",
     )
 
     @field_validator("work_paths")

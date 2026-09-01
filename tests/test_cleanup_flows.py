@@ -74,7 +74,7 @@ def test_rule_cleanup_runs_after_five_completed_agent_turns(
     )
     monkeypatch.setattr(rule_cleanup.time, "sleep", lambda _seconds: None)
 
-    assert rule_cleanup.Config().cleanup_turns == 5
+    assert rule_cleanup.Config(work_paths=("src",)).cleanup_turns == 5
     assert rule_cleanup.Config(cleanup_turns=4, work_paths=("src",)).cleanup_turns == 4
     rule_cleanup.run(
         rule_cleanup.Agents(first, second),
@@ -110,7 +110,7 @@ def test_agent_cleanup_cleans_after_five_completed_chaser_turns(
     )
     monkeypatch.setattr(agent_cleanup.time, "sleep", lambda _seconds: None)
 
-    assert agent_cleanup.Config().cleanup_turns == 5
+    assert agent_cleanup.Config(work_paths=("src",)).cleanup_turns == 5
     assert agent_cleanup.Config(cleanup_turns=4, work_paths=("src",)).cleanup_turns == 4
     agent_cleanup.run(
         agent_cleanup.Agents(first, second, cleaner),
@@ -188,6 +188,8 @@ def test_agent_cleanup_measures_configured_generic_work_paths(tmp_path: Path) ->
 
 @pytest.mark.parametrize("flow", [rule_cleanup, agent_cleanup], ids=["rule", "agent"])
 def test_work_paths_must_be_safe_and_non_overlapping(flow) -> None:
+    with pytest.raises(ValueError):
+        flow.Config()
     with pytest.raises(ValueError):
         flow.Config(work_paths=("../outside",))
     with pytest.raises(ValueError):
