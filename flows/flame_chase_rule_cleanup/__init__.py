@@ -12,7 +12,7 @@ retried without advancing the turn count.
 
 Before the first turn ever runs, the working tree minus .git is stored as the
 pristine task tree under ~/.flame_chase_rule_cleanup/<sha256 of the working
-directory's absolute path>/pristine -- outside the tree, where a wipe cannot
+directory's absolute path>/pristine -- outside the tree, where cleanup cannot
 touch it and a resumed run finds it; a snapshot already there is kept, not
 remade. Every cleanup_turns completed coding-agent turns (default 5; 0 never
 cleans), between turns, plain deterministic code erases the repository's
@@ -33,7 +33,7 @@ erased is archived; only git runs as a subprocess.
 One thing ends the run: budget_millions million output tokens (default 10)
 spent between the two agents across every run in this workspace, measured as a
 before/after delta around every turn and added to resumable state the moment
-the turn ends. Completed turns, tokens spent and the wipe epoch live in that
+the turn ends. Completed turns, tokens spent and the cleanup epoch live in that
 state, cleared when the budget ends the run. Each turn prints its number, the
 agent, the epoch and the spend; each cleanup prints which epoch begins, how many
 files were removed and which configured paths were carried over.
@@ -129,7 +129,7 @@ def run(
     keep_dir = (Path.home() / ".flame_chase_rule_cleanup" / key).resolve()
     if keep_dir.is_relative_to(workdir):
         raise RuntimeError(
-            f"{keep_dir} sits inside the working tree {workdir}; a wipe would "
+            f"{keep_dir} sits inside the working tree {workdir}; cleanup would "
             "eat its own snapshot -- run the chase inside a repository"
         )
 
@@ -166,7 +166,7 @@ def run(
             return
 
         # A cleanup is due after each configured number of completed turns once
-        # those turns have outrun the wipes already taken (epoch - 1 of them).
+        # those turns have outrun the cleanups already taken (epoch - 1 of them).
         if (
             held.cleanup_turns > 0
             and turns > 0
@@ -366,7 +366,7 @@ def _count_files(root: Path) -> int:
 
 def _reinit_git(workdir: Path) -> None:
     """git init, add everything, one neutral-identity commit; raises rather
-    than leave a wipe without its single-commit repository."""
+    than leave a cleanup without its single-commit repository."""
     for argv in (
         ("git", "-c", "init.defaultBranch=main", "init", "--quiet"),
         ("git", "add", "-A"),
