@@ -60,12 +60,14 @@ def test_cleanup_flows_are_public_resumable_and_configurable() -> None:
 
 
 def test_rule_cleanup_runs_after_five_completed_agent_turns(
+    tmp_path: Path,
     monkeypatch,
 ) -> None:
     events: list[str] = []
     first = FakeAgent("first", events)
     second = FakeAgent("second", events)
 
+    monkeypatch.setattr(rule_cleanup, "home", lambda: tmp_path / "humanize")
     monkeypatch.setattr(rule_cleanup, "ensure_snapshot", lambda *_args: False)
     monkeypatch.setattr(
         rule_cleanup,
@@ -95,6 +97,7 @@ def test_rule_cleanup_runs_after_five_completed_agent_turns(
 
 
 def test_agent_cleanup_cleans_after_five_completed_chaser_turns(
+    tmp_path: Path,
     monkeypatch,
 ) -> None:
     events: list[str] = []
@@ -102,7 +105,8 @@ def test_agent_cleanup_cleans_after_five_completed_chaser_turns(
     second = FakeAgent("second", events)
     cleaner = FakeAgent("cleaner", events)
 
-    monkeypatch.setattr(agent_cleanup, "_ensure_manifest", lambda _root: set())
+    monkeypatch.setattr(agent_cleanup, "home", lambda: tmp_path / "humanize")
+    monkeypatch.setattr(agent_cleanup, "_ensure_manifest", lambda *_args: set())
     monkeypatch.setattr(
         agent_cleanup,
         "_clean_epoch",
@@ -186,6 +190,24 @@ def test_agent_cleanup_measures_configured_generic_work_paths(tmp_path: Path) ->
     assert measured.comment_count == 1
 
 
+def test_agent_revert_point_recovers_an_interrupted_cleanup(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    store = tmp_path / "managed-run"
+    root.mkdir()
+    store.mkdir()
+    (root / "kept.txt").write_text("before\n")
+
+    saved = agent_cleanup._save_tree(root, store)
+    (root / "kept.txt").write_text("partly cleaned\n")
+    (root / "stray.txt").write_text("partial\n")
+
+    assert agent_cleanup._save_tree(root, store) == saved
+    assert (root / "kept.txt").read_text() == "before\n"
+    assert not (root / "stray.txt").exists()
+    agent_cleanup._drop_saved(saved)
+    assert not saved.exists()
+
+
 @pytest.mark.parametrize("flow", [rule_cleanup, agent_cleanup], ids=["rule", "agent"])
 def test_work_paths_must_be_safe_and_non_overlapping(flow) -> None:
     with pytest.raises(ValueError):
@@ -194,3 +216,35 @@ def test_work_paths_must_be_safe_and_non_overlapping(flow) -> None:
         flow.Config(work_paths=("../outside",))
     with pytest.raises(ValueError):
         flow.Config(work_paths=("src", "src/generated"))
+
+
+@pytest.mark.parametrize("flow", [rule_cleanup, agent_cleanup], ids=["rule", "agent"])
+def test_run_storage_uses_humanize_home_and_validates_resume(
+    flow, tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "repo"
+    source.mkdir()
+    humanize_home = tmp_path / "managed"
+    monkeypatch.setattr(flow, "home", lambda: humanize_home)
+    state: dict[str, object] = {}
+
+    root, resumed = flow._open_store(source, state)
+
+    assert not resumed
+    assert root.is_relative_to(humanize_home / flow.FLOW_NAME)
+    assert state["run_root"] == str(root)
+    assert state["run_id"] == root.name
+    assert flow._open_store(source, state) == (root, True)
+    flow._remove_store(root)
+
+
+@pytest.mark.parametrize("flow", [rule_cleanup, agent_cleanup], ids=["rule", "agent"])
+def test_run_storage_refuses_humanize_home_inside_cleaned_repository(
+    flow, tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "repo"
+    source.mkdir()
+    monkeypatch.setattr(flow, "home", lambda: source / ".humanize")
+
+    with pytest.raises(RuntimeError):
+        flow._open_store(source, {})

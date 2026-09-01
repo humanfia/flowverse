@@ -6,10 +6,10 @@
 Two coding agents take turns on the task, each turn a fresh session opened on the
 working directory and handed the task verbatim, so every turn reads the repository
 rather than any history. On the first run the flow records a manifest of the task's
-own files under ~/.flame_chase_agent_cleanup/, keyed by a hash of the working directory's
-absolute path; a manifest already there is kept, not remade. Every cleanup_turns
-completed coding-agent turns (default 5) a cleaning epoch runs between turns: the
-whole tree is saved aside as a revert point, a fresh cleaner session shrinks
+own files under the Humanize-managed run root below
+``$HUMANIZE_HOME/flame_chase_agent_cleanup/``. Every cleanup_turns completed
+coding-agent turns (default 5) a cleaning epoch runs between turns: the whole tree
+is saved there as a revert point, a fresh cleaner session shrinks
 the configured work_paths to their essence and distills NEXT.md, and the flow
 measures what survived -- every entry not in the manifest counts stray unless it
 sits under a configured work path, whose contents are the cleaner's judgment alone
@@ -37,18 +37,19 @@ tokens spent and epochs run, and clears when the budget ends the run.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import os
 import shutil
 import signal
 import subprocess
-import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hmz.flows import Agent, flow
+from hmz.flows import Agent, flow, home
 from pydantic import BaseModel, Field, field_validator
 
 NOTES = "NEXT.md"
@@ -68,6 +69,7 @@ C_SUFFIXES = {
 AUTHOR_NAME = "cleaner"
 AUTHOR_EMAIL = "cleaner@flame.chase"
 DELIVERY_TRIES = 3
+FLOW_NAME = "flame_chase_agent_cleanup"
 
 
 def _validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
@@ -88,6 +90,55 @@ def _validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
             if path.is_relative_to(other) or other.is_relative_to(path):
                 raise ValueError("work_paths must not overlap")
     return tuple(path.as_posix() for path in paths)
+
+
+def _workspace_key(source: Path) -> str:
+    plain = "".join(
+        character if character.isalnum() else "-" for character in str(source)
+    )
+    readable = "-".join(part for part in plain.split("-") if part)[-80:] or "root"
+    digest = hashlib.sha256(os.fsencode(source)).hexdigest()[:12]
+    return f"{readable}-{digest}"
+
+
+def _managed_parent(source: Path) -> Path:
+    parent = (home() / FLOW_NAME / _workspace_key(source)).resolve()
+    if parent.is_relative_to(source):
+        raise RuntimeError("HUMANIZE_HOME must sit outside the cleaned repository")
+    return parent
+
+
+def _open_store(source: Path, state: dict[str, Any]) -> tuple[Path, bool]:
+    parent = _managed_parent(source)
+    run_id = state.get("run_id")
+    run_root = state.get("run_root")
+    if run_id is not None or run_root is not None:
+        if not isinstance(run_id, str) or not run_id or not isinstance(run_root, str):
+            raise ValueError("resumable cleanup state has incomplete run storage")
+        raw = Path(run_root)
+        root = raw.resolve()
+        if root.parent != parent or root.name != run_id:
+            raise ValueError("resumable cleanup storage is outside HUMANIZE_HOME")
+        if raw.is_symlink() or not root.is_dir():
+            raise RuntimeError("resumable cleanup storage is missing or linked")
+        return root, True
+    if state:
+        raise ValueError("resumable cleanup state predates managed run storage")
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_id = f"{stamp}-{uuid.uuid4().hex[:10]}"
+    parent.mkdir(parents=True, exist_ok=True)
+    root = parent / run_id
+    root.mkdir(exist_ok=False)
+    state["run_id"] = run_id
+    state["run_root"] = str(root)
+    state["manifest_ready"] = False
+    return root, False
+
+
+def _remove_store(root: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError(f"cleanup storage was replaced or linked: {root}")
+    shutil.rmtree(root)
 
 
 class Agents(NamedTuple):
@@ -196,17 +247,17 @@ def _tree_files(root: Path) -> list[str]:
     return sorted(found)
 
 
-def _manifest_path(root: Path) -> Path:
-    """The manifest's place under home, keyed by a hash of root's absolute path."""
-    key = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()
-    return Path.home() / ".flame_chase_agent_cleanup" / key / "manifest.txt"
+def _manifest_path(store: Path) -> Path:
+    """The task-file manifest inside this Humanize-managed run root."""
+    return store / "manifest.txt"
 
 
-def _ensure_manifest(root: Path) -> set[str]:
-    """Record the task-provided files on the first run; keep a manifest already there."""
-    path = _manifest_path(root)
+def _ensure_manifest(root: Path, store: Path) -> set[str]:
+    """Record the task-provided files once inside the managed run root."""
+    path = _manifest_path(store)
+    if path.is_symlink():
+        raise RuntimeError(f"manifest was replaced by a symlink: {path}")
     if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(_tree_files(root)) + "\n", encoding="utf-8")
     kept = path.read_text(encoding="utf-8").splitlines()
     return {line.strip() for line in kept if line.strip()}
@@ -439,11 +490,21 @@ def _delete_strays(root: Path, strays: list[str]) -> None:
             print(f"could not delete stray {rel}")
 
 
-def _save_tree(root: Path) -> Path:
-    """Copy the whole working tree aside, outside itself, as the revert point."""
-    keep = Path(tempfile.mkdtemp(prefix="flame_chase_agent_cleanup_revert_"))
-    saved = keep / "tree"
-    shutil.copytree(root, saved, symlinks=True, ignore_dangling_symlinks=True)
+def _save_tree(root: Path, store: Path) -> Path:
+    """Create or recover the cleanup transaction's managed revert point."""
+    saved = store / "revert"
+    if saved.is_symlink():
+        raise RuntimeError(f"revert point was replaced by a symlink: {saved}")
+    if saved.is_dir():
+        _restore_tree(root, saved)
+        return saved
+    partial = store / "revert.partial"
+    if partial.is_symlink():
+        raise RuntimeError(f"partial revert was replaced by a symlink: {partial}")
+    if partial.exists():
+        shutil.rmtree(partial)
+    shutil.copytree(root, partial, symlinks=True, ignore_dangling_symlinks=True)
+    partial.rename(saved)
     return saved
 
 
@@ -464,7 +525,7 @@ def _restore_tree(root: Path, saved: Path) -> None:
 
 def _drop_saved(saved: Path) -> None:
     """Delete the revert point; nothing a successful epoch deletes is archived."""
-    shutil.rmtree(saved.parent, ignore_errors=True)
+    shutil.rmtree(saved, ignore_errors=True)
 
 
 def _kill_check_group(proc: subprocess.Popen) -> None:
@@ -635,6 +696,7 @@ def _clean_epoch(
     held: Config,
     root: Path,
     manifest: set[str],
+    store: Path,
     epoch: int,
     over_budget: Callable[[], bool],
 ) -> None:
@@ -642,7 +704,7 @@ def _clean_epoch(
     history. over_budget() persists spending and, once true, no further agent turn
     is issued -- the epoch finishes deterministically."""
     print(f"epoch {epoch}: saving the whole tree aside as the revert point")
-    saved = _save_tree(root)
+    saved = _save_tree(root, store)
     try:
         session = cleaner.new(cwd=str(root))
         report = session(_cleaning_prompt(held), suppress=True, schema=Cleaned)
@@ -761,12 +823,24 @@ def run(
 ) -> None:
     held = config or Config()
     kept: dict[str, Any] = state if state is not None else {}
+    root = Path.cwd().resolve()
+    turns = int(kept.get("turns", 0))
+    store, resumed = _open_store(root, kept)
+    if kept.get("manifest_ready") is True:
+        manifest_path = _manifest_path(store)
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise RuntimeError(f"task manifest is missing or linked: {manifest_path}")
+    else:
+        if resumed and turns:
+            raise RuntimeError("resumable cleanup state lost its task manifest")
+        _ensure_manifest(root, store)
+        kept["manifest_ready"] = True
+
     kept.setdefault("turns", 0)
     kept.setdefault("epoch", 0)
     before = int(kept.get("spent", 0))
 
-    root = Path.cwd()
-    manifest = _ensure_manifest(root)
+    manifest = _ensure_manifest(root, store)
     next_chaser = kept["turns"] % 2
     print(
         f"chasing in {root}: {len(manifest)} task file(s) in the manifest, starting at"
@@ -799,12 +873,19 @@ def run(
                 f"budget ends the run: {spent / 1e6:.2f}M of {held.budget:g}M output"
                 f" tokens after {kept['turns']} turn(s) and {kept['epoch']} epoch(s)"
             )
+            _remove_store(store)
             kept.clear()
             return
 
         if held.cleanup_turns and kept["turns"] // held.cleanup_turns > kept["epoch"]:
             _clean_epoch(
-                agents.cleaner, held, root, manifest, kept["epoch"] + 1, over_budget
+                agents.cleaner,
+                held,
+                root,
+                manifest,
+                store,
+                kept["epoch"] + 1,
+                over_budget,
             )
             kept["epoch"] += 1
             continue

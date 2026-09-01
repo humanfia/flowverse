@@ -11,10 +11,10 @@ session that answers, whether or not it submitted anything; a failed session is
 retried without advancing the turn count.
 
 Before the first turn ever runs, the working tree minus .git is stored as the
-pristine task tree under ~/.flame_chase_rule_cleanup/<sha256 of the working
-directory's absolute path>/pristine -- outside the tree, where cleanup cannot
-touch it and a resumed run finds it; a snapshot already there is kept, not
-remade. Every cleanup_turns completed coding-agent turns (default 5; 0 never
+pristine task tree under the Humanize-managed run root below
+``$HUMANIZE_HOME/flame_chase_rule_cleanup/`` -- outside the tree, where cleanup
+cannot touch it and a resumed run finds it. Every cleanup_turns completed
+coding-agent turns (default 5; 0 never
 cleans), between turns, plain deterministic code erases the repository's
 memory: each configured work_paths entry is saved aside outside the tree,
 everything inside the working directory is deleted (.git included), the
@@ -42,6 +42,7 @@ files were removed and which configured paths were carried over.
 from __future__ import annotations
 
 import codecs
+import datetime as dt
 import hashlib
 import io
 import os
@@ -51,14 +52,16 @@ import subprocess
 import tempfile
 import time
 import tokenize
+import uuid
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hmz.flows import Agent, flow
+from hmz.flows import Agent, flow, home
 from pydantic import BaseModel, Field, field_validator
 
 FLAME = "flame"
 CHASER = "chaser"
+FLOW_NAME = "flame_chase_rule_cleanup"
 
 
 def _validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
@@ -79,6 +82,55 @@ def _validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
             if path.is_relative_to(other) or other.is_relative_to(path):
                 raise ValueError("work_paths must not overlap")
     return tuple(path.as_posix() for path in paths)
+
+
+def _workspace_key(source: Path) -> str:
+    plain = "".join(
+        character if character.isalnum() else "-" for character in str(source)
+    )
+    readable = "-".join(part for part in plain.split("-") if part)[-80:] or "root"
+    digest = hashlib.sha256(os.fsencode(source)).hexdigest()[:12]
+    return f"{readable}-{digest}"
+
+
+def _managed_parent(source: Path) -> Path:
+    parent = (home() / FLOW_NAME / _workspace_key(source)).resolve()
+    if parent.is_relative_to(source):
+        raise RuntimeError("HUMANIZE_HOME must sit outside the cleaned repository")
+    return parent
+
+
+def _open_store(source: Path, state: dict[str, Any]) -> tuple[Path, bool]:
+    parent = _managed_parent(source)
+    run_id = state.get("run_id")
+    run_root = state.get("run_root")
+    if run_id is not None or run_root is not None:
+        if not isinstance(run_id, str) or not run_id or not isinstance(run_root, str):
+            raise ValueError("resumable cleanup state has incomplete run storage")
+        raw = Path(run_root)
+        root = raw.resolve()
+        if root.parent != parent or root.name != run_id:
+            raise ValueError("resumable cleanup storage is outside HUMANIZE_HOME")
+        if raw.is_symlink() or not root.is_dir():
+            raise RuntimeError("resumable cleanup storage is missing or linked")
+        return root, True
+    if state:
+        raise ValueError("resumable cleanup state predates managed run storage")
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_id = f"{stamp}-{uuid.uuid4().hex[:10]}"
+    parent.mkdir(parents=True, exist_ok=True)
+    root = parent / run_id
+    root.mkdir(exist_ok=False)
+    state["run_id"] = run_id
+    state["run_root"] = str(root)
+    state["snapshot_ready"] = False
+    return root, False
+
+
+def _remove_store(root: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError(f"cleanup storage was replaced or linked: {root}")
+    shutil.rmtree(root)
 
 
 class Agents(NamedTuple):
@@ -124,24 +176,25 @@ def run(
     kept: dict[str, Any] = {} if state is None else state
 
     workdir = Path.cwd().resolve()
-    key = hashlib.sha256(str(workdir).encode()).hexdigest()[:16]
-    keep_dir = (Path.home() / ".flame_chase_rule_cleanup" / key).resolve()
-    if keep_dir.is_relative_to(workdir):
-        raise RuntimeError(
-            f"{keep_dir} sits inside the working tree {workdir}; cleanup would "
-            "eat its own snapshot -- run the chase inside a repository"
-        )
-
-    if ensure_snapshot(workdir, keep_dir):
-        print(f"pristine task tree stored at {keep_dir / 'pristine'}")
-
     spent = int(kept.get("spent", 0))
     turns = int(kept.get("turns", 0))
     epoch = int(kept.get("epoch", 1))
+    store, resumed = _open_store(workdir, kept)
+    if kept.get("snapshot_ready") is True:
+        pristine = store / _PRISTINE
+        if pristine.is_symlink() or not pristine.is_dir():
+            raise RuntimeError(f"pristine task tree missing or linked at {pristine}")
+    else:
+        if resumed and turns:
+            raise RuntimeError("resumable cleanup state lost its pristine snapshot")
+        ensure_snapshot(workdir, store)
+        kept["snapshot_ready"] = True
+        print(f"pristine task tree stored at {store / _PRISTINE}")
+
     next_seat = FLAME if turns % 2 == 0 else CHASER
     limit = held.budget_millions * 1_000_000
 
-    if kept:
+    if resumed:
         print(
             f"resuming: {turns} turns done, epoch {epoch}, "
             f"{spent / 1e6:.2f}M output tokens spent, {next_seat} next"
@@ -161,6 +214,7 @@ def run(
                 f"{held.budget_millions:g}M output tokens after {turns} turns, "
                 f"epoch {epoch}"
             )
+            _remove_store(store)
             kept.clear()
             return
 
@@ -173,7 +227,7 @@ def run(
             and epoch <= turns // held.cleanup_turns
         ):
             removed, carried, stripped = cleanup(
-                workdir, keep_dir, tuple(Path(path) for path in held.work_paths)
+                workdir, store, tuple(Path(path) for path in held.work_paths)
             )
             epoch += 1
             kept["epoch"] = epoch
