@@ -1,19 +1,20 @@
-"""Two agents flame-chase a kernel task while a cleaner distills the repository and erases its history.
+"""Two agents flame-chase a repository task while a cleaner distills the workspace and erases its history.
 
-    hmz exec -f flame_chase_agent_cleanup -a claude -a codex -a claude 'make the kernels under solution/ faster'
+    hmz exec -f flame_chase_agent_cleanup -a claude -a codex -a claude 'improve the project under solution/'
 
 Two coding agents take turns on the task, each turn a fresh session opened on the
 working directory and handed the task verbatim, so every turn reads the repository
 rather than any history. On the first run the flow records a manifest of the task's
 own files under ~/.flame_chase_agent_cleanup/, keyed by a hash of the working directory's
-absolute path; a manifest already there is kept, not remade. Every clean_turns
+absolute path; a manifest already there is kept, not remade. Every cleanup_turns
 completed coding-agent turns (default 5) a cleaning epoch runs between turns: the
 whole tree is saved aside as a revert point, a fresh cleaner session shrinks
-solution/ to its essence and distills NEXT.md, and the flow measures what survived
--- every entry not in the manifest counts stray unless it sits under solution/,
-whose contents are the cleaner's judgment alone (no rule can tell new kernel source
-from junk), with a real NEXT.md at the root the one sanctioned flow output, NEXT.md
-against next_lines, comment lines in solution/
+the configured work_paths to their essence and distills NEXT.md, and the flow
+measures what survived -- every entry not in the manifest counts stray unless it
+sits under a configured work path, whose contents are the cleaner's judgment alone
+(no rule can tell new task work from junk), with a real NEXT.md at the root the one
+sanctioned flow output, NEXT.md against next_lines, comment lines in supported
+sources under work_paths
 against comment_lines -- handing what is over back to the same session up to repairs
 times before truncating NEXT.md and deleting strays itself (a comment overage is
 only printed, never mechanically stripped). A repair turn that never lands is
@@ -47,9 +48,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hmz.flows import Agent, flow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-SOLUTION = "solution"
 NOTES = "NEXT.md"
 C_SUFFIXES = {
     ".cu",
@@ -67,6 +67,26 @@ C_SUFFIXES = {
 AUTHOR_NAME = "cleaner"
 AUTHOR_EMAIL = "cleaner@flame.chase"
 DELIVERY_TRIES = 3
+
+
+def _validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
+    paths = tuple(Path(raw) for raw in value)
+    for path in paths:
+        if (
+            not path.parts
+            or path.is_absolute()
+            or path == Path(".")
+            or ".." in path.parts
+            or ".git" in path.parts
+        ):
+            raise ValueError("work_paths must be relative paths below the repository")
+    if len(set(paths)) != len(paths):
+        raise ValueError("work_paths must not contain duplicates")
+    for index, path in enumerate(paths):
+        for other in paths[index + 1 :]:
+            if path.is_relative_to(other) or other.is_relative_to(path):
+                raise ValueError("work_paths must not overlap")
+    return tuple(path.as_posix() for path in paths)
 
 
 class Agents(NamedTuple):
@@ -90,10 +110,16 @@ class Config(BaseModel):
             " that end the run"
         ),
     )
-    clean_turns: int = Field(
+    cleanup_turns: int = Field(
         default=5,
         ge=0,
         description="completed coding-agent turns between cleaning epochs; 0 never cleans",
+    )
+    work_paths: tuple[str, ...] = Field(
+        default=("solution",),
+        min_length=1,
+        description="relative, non-overlapping files or directories where agents may "
+        "create or revise task work",
     )
     next_lines: int = Field(
         default=10,
@@ -104,8 +130,8 @@ class Config(BaseModel):
         default=30,
         ge=0,
         description=(
-            "cap on total comment lines across solution/ sources; an overage is"
-            " printed, never mechanically stripped"
+            "cap on total comment lines across supported sources under work_paths;"
+            " an overage is printed, never mechanically stripped"
         ),
     )
     repairs: int = Field(
@@ -123,6 +149,11 @@ class Config(BaseModel):
             " an hour; empty skips the check and the revert"
         ),
     )
+
+    @field_validator("work_paths")
+    @classmethod
+    def validate_work_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_work_paths(value)
 
 
 class Cleaned(BaseModel):
@@ -279,11 +310,21 @@ def _c_comment_lines(text: str) -> int:
     return count
 
 
-def _solution_comment_lines(root: Path) -> int:
-    """Total comment lines across solution/ sources, by a small lexical scan; every
-    supported source type is routed to its scanner, symlinks are never followed."""
-    base = root / SOLUTION
+def _path_comment_lines(base: Path) -> int:
+    """Comment lines under one work path; symlinks are never followed."""
     if base.is_symlink() or not base.is_dir():
+        if base.is_file() and not base.is_symlink():
+            suffix = base.suffix.lower()
+            if suffix == ".py" or suffix in C_SUFFIXES:
+                try:
+                    text = base.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return 0
+                return (
+                    _py_comment_lines(text)
+                    if suffix == ".py"
+                    else _c_comment_lines(text)
+                )
         return 0
     total = 0
     for dirpath, dirnames, filenames in os.walk(base):
@@ -309,12 +350,36 @@ def _solution_comment_lines(root: Path) -> int:
     return total
 
 
-def _stray_files(root: Path, manifest: set[str]) -> list[str]:
-    """Entries not in the manifest, everywhere but under solution/ -- a kernel
-    legitimately grows new source files there, and no rule can tell those from
-    junk, so what sits under solution/ is the cleaner's judgment alone. The other
-    exemption is the sanctioned flow output: a NEXT.md at the root that is a real
-    file, since a symlinked NEXT.md is not a real NEXT.md and counts stray."""
+def _work_comment_lines(root: Path, work_paths: tuple[str, ...]) -> int:
+    """Total comment lines in supported sources under configured work paths."""
+    return sum(_path_comment_lines(_safe_work_path(root, path)) for path in work_paths)
+
+
+def _safe_work_path(root: Path, relative: str) -> Path:
+    path = Path(relative)
+    current = root
+    for part in path.parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise RuntimeError(f"work path {relative} crosses symlink {current}")
+    return root / path
+
+
+def _under_work_path(relative: str, work_paths: tuple[str, ...]) -> bool:
+    return any(
+        relative == path or relative.startswith(path + "/") for path in work_paths
+    )
+
+
+def _stray_files(
+    root: Path, manifest: set[str], work_paths: tuple[str, ...]
+) -> list[str]:
+    """Entries not in the manifest or configured work paths.
+
+    A task may legitimately add files under its work paths, and no rule can tell
+    those from junk, so their contents remain the cleaner's judgment alone. A real
+    root NEXT.md is the other sanctioned flow output; a symlink counts as stray.
+    """
     notes_is_link = (root / NOTES).is_symlink()
     strays = []
     for rel in _tree_files(root):
@@ -322,7 +387,7 @@ def _stray_files(root: Path, manifest: set[str]) -> list[str]:
             continue
         if rel == NOTES and not notes_is_link:
             continue
-        if rel == SOLUTION or rel.startswith(SOLUTION + "/"):
+        if _under_work_path(rel, work_paths):
             continue
         strays.append(rel)
     return strays
@@ -339,10 +404,12 @@ def _notes_lines(root: Path) -> int:
         return 0
 
 
-def _measure(root: Path, manifest: set[str]) -> Measure:
+def _measure(root: Path, manifest: set[str], work_paths: tuple[str, ...]) -> Measure:
     """Everything the flow measures deterministically after a cleaning."""
     return Measure(
-        _stray_files(root, manifest), _notes_lines(root), _solution_comment_lines(root)
+        _stray_files(root, manifest, work_paths),
+        _notes_lines(root),
+        _work_comment_lines(root, work_paths),
     )
 
 
@@ -499,6 +566,7 @@ def _erase_history(root: Path) -> bool:
 
 def _cleaning_prompt(held: Config) -> str:
     """The epoch's opening prompt; a check is spoken of only when one is configured."""
+    work_paths = ", ".join(f"`{path}`" for path in held.work_paths)
     parts = [
         (
             "You are this repository's cleaner, arriving with fresh eyes. Shrink it to"
@@ -506,20 +574,20 @@ def _cleaning_prompt(held: Config) -> str:
             " anything."
         ),
         (
-            "In the kernel sources under solution/: delete dead code -- code paths"
+            f"In the task work under {work_paths}: delete dead code -- code paths"
             " disabled by constant flags, commented-out code blocks, unused imports,"
-            " functions and variables, abandoned alternative implementations; delete from"
-            " the comments every experiment record -- what was tried, what ran faster or"
-            " slower, benchmark numbers, attempt histories; keep only comments that"
-            " explain design intent, each cut to a single line. Never change what the"
-            " code computes; if unsure whether something is dead, leave it."
+            " functions and variables, and abandoned alternatives; delete from comments"
+            " every experiment record -- what was tried, comparative results, benchmark"
+            " numbers, and attempt histories; keep only comments that explain design"
+            " intent, each cut to a single line. Never change externally visible behavior;"
+            " if unsure whether something is dead, leave it."
         ),
         (
-            "In the rest of the tree: delete every file past agents left behind; leave"
-            " the task's own files untouched; write exactly one file, NEXT.md at the"
+            "In the rest of the repository: delete every file past agents left behind;"
+            " leave the task's own files untouched; write exactly one file, NEXT.md at the"
             f" tree's root, of at most {held.next_lines} lines, each line one direction"
             " worth exploring next, distilled from what you read -- no narratives, no"
-            " history."
+            " history. Never follow symlinks."
         ),
     ]
     if held.check_command:
@@ -543,7 +611,7 @@ def _overages(found: Measure, held: Config) -> list[str]:
         )
     if found.comment_count > held.comment_lines:
         overs.append(
-            f"comment lines across solution/ sources: {found.comment_count}; the cap"
+            f"comment lines across configured work paths: {found.comment_count}; the cap"
             f" is {held.comment_lines}"
         )
     return overs
@@ -551,13 +619,14 @@ def _overages(found: Measure, held: Config) -> list[str]:
 
 def _repair_prompt(overs: list[str], held: Config) -> str:
     listed = "\n".join(f"- {over}" for over in overs)
+    work_paths = ", ".join(f"`{path}`" for path in held.work_paths)
     return (
         "You are still this repository's cleaner, held to the same rules. What"
         " survived your cleaning measures over; named exactly:\n"
         f"{listed}\n"
         "Cut again: delete stray files past agents left behind, hold NEXT.md to at"
-        f" most {held.next_lines} lines, thin solution/ comments to single-line design"
-        " intent. Never change what the code computes."
+        f" most {held.next_lines} lines, and thin comments under {work_paths} to"
+        " single-line design intent. Never change externally visible behavior."
     )
 
 
@@ -598,12 +667,12 @@ def _clean_epoch(
             )
             print(f"epoch {epoch}: cleaner says its check {said_check}")
 
-        found = _measure(root, manifest)
+        found = _measure(root, manifest, held.work_paths)
         overs = _overages(found, held)
         print(
             f"epoch {epoch}: measured {len(found.strays)} stray file(s), NEXT.md at"
             f" {found.notes_lines} line(s), {found.comment_count} comment line(s) in"
-            f" solution/ -- {len(overs)} over"
+            f" configured work paths -- {len(overs)} over"
         )
         used = 0
         while overs and used < held.repairs and not ended:
@@ -630,7 +699,7 @@ def _clean_epoch(
                 )
                 break
             used += 1
-            found = _measure(root, manifest)
+            found = _measure(root, manifest, held.work_paths)
             overs = _overages(found, held)
         if overs:
             print(f"epoch {epoch}: the flow cuts mechanically")
@@ -733,7 +802,7 @@ def run(
             kept.clear()
             return
 
-        if held.clean_turns and kept["turns"] // held.clean_turns > kept["epoch"]:
+        if held.cleanup_turns and kept["turns"] // held.cleanup_turns > kept["epoch"]:
             _clean_epoch(
                 agents.cleaner, held, root, manifest, kept["epoch"] + 1, over_budget
             )

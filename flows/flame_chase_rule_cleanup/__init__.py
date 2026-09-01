@@ -1,43 +1,42 @@
-"""Two agents alternate fresh-session turns on a kernel repo that is periodically wiped back to its pristine snapshot.
+"""Two agents alternate fresh-session turns in a repository periodically reset to its pristine snapshot.
 
     hmz exec -f flame_chase_rule_cleanup -a claude/MODEL:EFFORT -a codex/MODEL:EFFORT \\
-        "make the kernel under solution/ faster"
+        "improve the project under solution/"
 
-A rule-cleaned flame chase for kernel-optimization work. The flame and the
-chaser take turns on the task in the working repository; every turn is a fresh
-session handed the task verbatim and dropped afterwards, so each agent reads
-the repository, never a history. A completed turn is one coding agent session
-that answers; a session that does not land is retried without advancing the
-turn count.
+A rule-cleaned flame chase for repository work. The flame and the chaser take
+turns on the task in the working repository; every turn is a fresh session
+handed the task verbatim and dropped afterwards, so each agent reads the
+repository, never a conversation history. A completed turn is one coding agent
+session that answers, whether or not it submitted anything; a failed session is
+retried without advancing the turn count.
 
 Before the first turn ever runs, the working tree minus .git is stored as the
 pristine task tree under ~/.flame_chase_rule_cleanup/<sha256 of the working
 directory's absolute path>/pristine -- outside the tree, where a wipe cannot
 touch it and a resumed run finds it; a snapshot already there is kept, not
-remade. Every wipe_turns completed coding-agent turns (default 5; 0 never
-wipes), between turns, plain deterministic code erases the repository's
-memory: solution/ is saved aside outside the tree, everything inside the working
-directory is deleted
-(.git included), the pristine tree is restored, the saved solution/ replaces
-the pristine one, every '#', '//' and '/* */' comment is mechanically stripped
-from its Python and .cu/.cuh/.c/.h/.cpp/.hpp sources (a file that cannot be
-processed cleanly -- or whose declared encoding would not survive losing its
-coding line -- is kept unmodified; string literals and docstrings are never
-altered), and git is re-initialized with a single commit under a neutral
-identity passed on the command line. The wipe is a transaction: the saved
-solution/ is kept outside the tree until restore, stripping and the git commit
-have all succeeded, so an interrupted wipe resumes whole, and a wipe that
-cannot finish stops the run with its error rather than record an epoch that
-did not happen. Nothing erased is archived; only git runs as a subprocess. A
-tree with no solution/ is still reset to the pristine tree, and the run says so.
+remade. Every cleanup_turns completed coding-agent turns (default 5; 0 never
+cleans), between turns, plain deterministic code erases the repository's
+memory: each configured work_paths entry is saved aside outside the tree,
+everything inside the working directory is deleted (.git included), the
+pristine tree is restored, and the saved work replaces its pristine version.
+Every '#', '//' and '/* */' comment is mechanically stripped from supported
+Python and C-family sources under those paths (a file that cannot be processed
+cleanly -- or whose declared encoding would not survive losing its coding line
+-- is kept unmodified; string literals and docstrings are never altered), and
+git is re-initialized with a single commit under a neutral identity passed on
+the command line. The cleanup is a transaction: saved work is kept outside the
+tree until restore, stripping and the git commit have all succeeded, so an
+interrupted cleanup resumes whole, and a cleanup that cannot finish stops the
+run with its error rather than record an epoch that did not happen. Nothing
+erased is archived; only git runs as a subprocess.
 
 One thing ends the run: budget_millions million output tokens (default 10)
 spent between the two agents across every run in this workspace, measured as a
 before/after delta around every turn and added to resumable state the moment
 the turn ends. Completed turns, tokens spent and the wipe epoch live in that
 state, cleared when the budget ends the run. Each turn prints its number, the
-agent, the epoch and the spend; each wipe prints which epoch begins, how many
-files were removed and whether solution/ was carried over.
+agent, the epoch and the spend; each cleanup prints which epoch begins, how many
+files were removed and which configured paths were carried over.
 """
 
 from __future__ import annotations
@@ -56,10 +55,30 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hmz.flows import Agent, flow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 FLAME = "flame"
 CHASER = "chaser"
+
+
+def _validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
+    paths = tuple(Path(raw) for raw in value)
+    for path in paths:
+        if (
+            not path.parts
+            or path.is_absolute()
+            or path == Path(".")
+            or ".." in path.parts
+            or ".git" in path.parts
+        ):
+            raise ValueError("work_paths must be relative paths below the repository")
+    if len(set(paths)) != len(paths):
+        raise ValueError("work_paths must not contain duplicates")
+    for index, path in enumerate(paths):
+        for other in paths[index + 1 :]:
+            if path.is_relative_to(other) or other.is_relative_to(path):
+                raise ValueError("work_paths must not overlap")
+    return tuple(path.as_posix() for path in paths)
 
 
 class Agents(NamedTuple):
@@ -76,12 +95,23 @@ class Config(BaseModel):
         description="millions of output tokens the pair may spend between them "
         "across every run in this workspace before the flow stops",
     )
-    wipe_turns: int = Field(
+    cleanup_turns: int = Field(
         default=5,
         ge=0,
-        description="completed coding-agent turns between memory wipes of the working "
-        "repository; 0 never wipes",
+        description="completed coding-agent turns between cleanups of the working "
+        "repository; 0 never cleans",
     )
+    work_paths: tuple[str, ...] = Field(
+        default=("solution",),
+        min_length=1,
+        description="relative, non-overlapping files or directories whose current "
+        "contents survive each cleanup",
+    )
+
+    @field_validator("work_paths")
+    @classmethod
+    def validate_work_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_work_paths(value)
 
 
 @flow(resumable=True)
@@ -117,10 +147,12 @@ def run(
             f"resuming: {turns} turns done, epoch {epoch}, "
             f"{spent / 1e6:.2f}M output tokens spent, {next_seat} next"
         )
-    wiping = (
-        f"wiping every {held.wipe_turns} turns" if held.wipe_turns else "never wiping"
+    cleaning = (
+        f"cleaning every {held.cleanup_turns} turns"
+        if held.cleanup_turns
+        else "never cleaning"
     )
-    print(f"flame chase: budget {held.budget_millions:g}M output tokens, {wiping}")
+    print(f"flame chase: budget {held.budget_millions:g}M output tokens, {cleaning}")
 
     while True:
         kept["spent"] = spent
@@ -133,26 +165,29 @@ def run(
             kept.clear()
             return
 
-        # A wipe is due after each configured number of completed turns once
+        # A cleanup is due after each configured number of completed turns once
         # those turns have outrun the wipes already taken (epoch - 1 of them).
         if (
-            held.wipe_turns > 0
+            held.cleanup_turns > 0
             and turns > 0
-            and turns % held.wipe_turns == 0
-            and epoch <= turns // held.wipe_turns
+            and turns % held.cleanup_turns == 0
+            and epoch <= turns // held.cleanup_turns
         ):
-            removed, carried, stripped = wipe(workdir, keep_dir)
+            removed, carried, stripped = cleanup(
+                workdir, keep_dir, tuple(Path(path) for path in held.work_paths)
+            )
             epoch += 1
             kept["epoch"] = epoch
             if carried:
                 print(
-                    f"wipe: epoch {epoch} begins -- {removed} files removed, "
-                    f"solution/ carried over ({stripped} stripped of comments)"
+                    f"cleanup: epoch {epoch} begins -- {removed} files removed, "
+                    f"{', '.join(carried)} carried over "
+                    f"({stripped} stripped of comments)"
                 )
             else:
                 print(
-                    f"wipe: epoch {epoch} begins -- {removed} files removed, "
-                    "no solution/ to carry; the tree is the pristine task tree again"
+                    f"cleanup: epoch {epoch} begins -- {removed} files removed, "
+                    "no configured work path to carry; restored the pristine tree"
                 )
 
         seat = agents.flame if next_seat == FLAME else agents.chaser
@@ -177,14 +212,14 @@ def run(
 
 
 # --------------------------------------------------------------------------
-# The deterministic half: the pristine snapshot, the wipe transaction, and
+# The deterministic half: the pristine snapshot, the cleanup transaction, and
 # the comment strippers. Standard library throughout; git is the only
 # subprocess anything here runs, and nothing erased is archived anywhere.
 # --------------------------------------------------------------------------
 
 _PRISTINE = "pristine"
 _CARRY = "carry"
-_WIPING = "wiping"
+_CLEANING = "cleaning"
 _C_SUFFIXES = {".cu", ".cuh", ".c", ".h", ".cpp", ".hpp"}
 # -c sets author and committer both, so the commit lands whatever git
 # configuration the machine has
@@ -213,44 +248,47 @@ def ensure_snapshot(workdir: Path, keep_dir: Path) -> bool:
     return True
 
 
-def wipe(workdir: Path, keep_dir: Path) -> tuple[int, bool, int]:
+def cleanup(
+    workdir: Path, keep_dir: Path, work_paths: tuple[Path, ...]
+) -> tuple[int, tuple[str, ...], int]:
     """Erase the repository's memory, as a transaction.
 
-    Saves solution/ aside outside the tree, writes a marker, deletes
+    Saves the configured work paths outside the tree, writes a marker, deletes
     everything inside workdir (.git included), restores the pristine tree,
-    copies the saved solution/ back over it, strips comments from its sources,
+    copies the saved work back over it, strips comments from supported sources,
     and re-initializes git with one neutral commit. The carry is retained and
-    the marker stands until every step has succeeded, so a wipe that dies --
-    or whose git step fails and raises -- is redone whole from the carry on
-    the next attempt instead of mistaking a half-restored tree for the real
-    solution. Answers (files removed, whether solution/ was carried, sources
-    comment-stripped).
+    the marker stands until every step has succeeded, so a cleanup that dies --
+    or whose git step fails and raises -- is redone whole from the carry on the
+    next attempt instead of mistaking a half-restored tree for the real work.
+    Answers (files removed, paths carried, sources comment-stripped).
     """
     pristine = keep_dir / _PRISTINE
     if not pristine.is_dir():
-        raise RuntimeError(f"pristine task tree missing at {pristine}; not wiping")
+        raise RuntimeError(f"pristine task tree missing at {pristine}; not cleaning")
 
     carry = keep_dir / _CARRY
-    marker = keep_dir / _WIPING
-    solution = workdir / "solution"
+    marker = keep_dir / _CLEANING
 
-    # 1. solution/ aside. A marker from an interrupted wipe means the carry,
-    #    not the tree, holds the real solution -- never refresh it then.
+    # 1. Work paths aside. A marker from an interrupted cleanup means the
+    #    carry, not the tree, holds the real work -- never refresh it then.
     if not marker.exists():
         partial = keep_dir / (_CARRY + ".partial")
         if partial.exists():
             shutil.rmtree(partial)
-        if solution.is_dir():
-            shutil.copytree(
-                solution, partial, symlinks=True, ignore=shutil.ignore_patterns(".git")
-            )
-            if carry.exists():
-                shutil.rmtree(carry)
-            partial.rename(carry)
-        elif carry.exists():
-            shutil.rmtree(carry)  # stale: the tree is authoritative and has none
-        marker.write_text("wipe in flight; carry/ is authoritative\n")
-    carried = carry.is_dir()
+        partial.mkdir()
+        for relative in work_paths:
+            source = _safe_entry(workdir, relative)
+            if _entry_exists(source):
+                _copy_entry(source, partial / relative)
+        if carry.exists():
+            shutil.rmtree(carry)
+        partial.rename(carry)
+        marker.write_text("cleanup in flight; carry/ is authoritative\n")
+    carried = tuple(
+        relative.as_posix()
+        for relative in work_paths
+        if _entry_exists(carry / relative)
+    )
 
     # 2. everything inside the working directory goes, .git included
     removed = _count_files(workdir)
@@ -263,20 +301,22 @@ def wipe(workdir: Path, keep_dir: Path) -> tuple[int, bool, int]:
     # 3. the pristine task tree comes back
     shutil.copytree(pristine, workdir, symlinks=True, dirs_exist_ok=True)
 
-    # 4. a copy of the carry replaces the pristine solution/; the carry stays
-    if carried:
-        if solution.is_symlink() or solution.is_file():
-            solution.unlink()
-        elif solution.is_dir():
-            shutil.rmtree(solution)
-        shutil.copytree(carry, solution, symlinks=True)
+    # 4. copies of the carry replace the pristine work paths; the carry stays
+    for relative in work_paths:
+        source = carry / relative
+        if not _entry_exists(source):
+            continue
+        target = _safe_entry(workdir, relative)
+        _remove_entry(target)
+        _copy_entry(source, target)
 
-    # 5. comments go from the carried solution/; a tree with none stays
-    #    exactly the pristine task tree
-    stripped = _strip_tree(solution) if carried and solution.is_dir() else 0
+    # 5. Comments go from supported sources under the carried work paths.
+    stripped = sum(
+        _strip_path(_safe_entry(workdir, relative)) for relative in work_paths
+    )
 
     # 6. version control starts over: one commit, no history of past epochs.
-    #    A git failure raises out of the wipe before it is recorded anywhere.
+    #    A git failure raises out before the cleanup is recorded anywhere.
     _reinit_git(workdir)
 
     # all of it succeeded: close the transaction, then let the carry go
@@ -284,6 +324,36 @@ def wipe(workdir: Path, keep_dir: Path) -> tuple[int, bool, int]:
     if carry.exists():
         shutil.rmtree(carry)
     return removed, carried, stripped
+
+
+def _entry_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _safe_entry(root: Path, relative: Path) -> Path:
+    current = root
+    for part in relative.parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise RuntimeError(f"work path {relative} crosses symlink {current}")
+    return root / relative
+
+
+def _remove_entry(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _copy_entry(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_symlink() or source.is_file():
+        shutil.copy2(source, target, follow_symlinks=False)
+    elif source.is_dir():
+        shutil.copytree(
+            source, target, symlinks=True, ignore=shutil.ignore_patterns(".git")
+        )
 
 
 def _count_files(root: Path) -> int:
@@ -326,19 +396,33 @@ def _git_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
-def _strip_tree(solution: Path) -> int:
-    """Strip comments from source files under solution/; answers how many changed."""
+def _strip_path(root: Path) -> int:
+    """Strip comments from supported source files below one carried path."""
+    if root.is_symlink():
+        return 0
+    if root.is_file():
+        return _strip_source(root)
+    if not root.is_dir():
+        return 0
     changed = 0
-    for dirpath, _dirnames, filenames in os.walk(solution):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            name for name in dirnames if not (Path(dirpath) / name).is_symlink()
+        ]
         for name in filenames:
             path = Path(dirpath) / name
-            if path.is_symlink():
-                continue
-            if path.suffix == ".py":
-                changed += _strip_file(path, _strip_python)
-            elif path.suffix in _C_SUFFIXES:
-                changed += _strip_file(path, _strip_c)
+            changed += _strip_source(path)
     return changed
+
+
+def _strip_source(path: Path) -> int:
+    if path.is_symlink():
+        return 0
+    if path.suffix == ".py":
+        return _strip_file(path, _strip_python)
+    if path.suffix in _C_SUFFIXES:
+        return _strip_file(path, _strip_c)
+    return 0
 
 
 def _strip_file(path: Path, strip) -> int:
