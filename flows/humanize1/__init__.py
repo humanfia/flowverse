@@ -1857,7 +1857,7 @@ def rlcr(
         else _under(root, PLAN)
     )
     # A run of a flow that is not being written down is handed nothing to write down in --
-    # one called from a test, one called by a flow that opened no cycle -- and is a loop
+    # one called from a test, one called by a flow that opened no epic -- and is a loop
     # that starts fresh and is not picked up, rather than a run that refuses to happen.
     _rlcr(
         agents,
