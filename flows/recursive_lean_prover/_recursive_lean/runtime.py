@@ -2246,9 +2246,8 @@ class Runtime:
         path = self._node_dir(node) / f"rlcr-plan-v{node.attempts}.md"
         content = f"""# Implement Lean DAG node `{node.id}`
 
-## Immutable inputs
+## Authoritative selected-node contract
 
-- Full controller plan: `{accepted_plan}`
 - Accepted natural proof: `{natural_path}`
 - Declaration name: `{node.lean_name}`
 - Frozen child type: `{node.lean_statement or "official root Challenge declarations"}`
@@ -2258,16 +2257,31 @@ Comparator-approved dependencies:
 
 {children}
 
+The current node identity, frozen type, and dependency list above were produced by the
+controller's completed natural-proof and decomposition gates. They are the only operational
+proof boundary for this nested invocation. The one-time scaffold at `{accepted_plan}` may be
+read for mathematical background, but any speculative decomposition, interface inventory,
+source placement, or selected-cone shape in that older artifact is historical. It must not
+override the current DAG, trigger planning, add or replace child nodes, or invalidate an exact
+comparator-approved implementation of this selected node.
+
 ## Nested RLCR tasks
 
-1. Read the full controller plan and accepted natural proof. Implement only this node's exact
-   declaration, using only comparator-approved dependencies.
+1. Read the accepted natural proof and, when useful, the scaffold's mathematical route.
+   Implement only this node's exact declaration, using only the comparator-approved dependencies
+   listed above. Do not revise the scaffold/proof or reopen decomposition.
 2. Run warning-fatal Lean builds and inspect the complete source diff for placeholders,
    weakened statements, new axioms, unsafe mechanisms, or protected-file changes.
 3. Commit the candidate and require a clean worktree at that exact SHA.
 4. Run `{self._review_command(node, [])}` and require exit zero plus
    `{self.config.comparator_success}`.
 5. Return control to the recursive controller immediately.
+
+The implementation reviewer may request another round only for a defect in this exact selected
+node: a frozen-statement mismatch, invalid Lean proof, source-safety or protected-file violation,
+unclean/uncommitted candidate, or failed configured comparator. It must not request a different
+DAG shape, extra certification interface, source-layout refactor, or plan revision solely because
+an older scaffold proposed one.
 
 ## Completion boundary
 

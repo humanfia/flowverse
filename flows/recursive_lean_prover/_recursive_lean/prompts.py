@@ -157,6 +157,10 @@ Comparator-approved child theorem wiki pages:
 
 Requirements:
 - Read the natural proof before editing Lean.
+- Treat this task's node identity, frozen expected type, and comparator-approved child list as
+  the authoritative implementation boundary. The one-time controller scaffold is mathematical
+  background only: do not reopen planning or decomposition, require additional DAG nodes or
+  interfaces, or replace the controller's already audited selected dependency graph.
 - Create or complete a globally named theorem for this node; do not hide it as a local `have`.
 - For a child node, its declaration must have exactly the frozen expected Lean type above.
 - Preserve the exact target, hypotheses, imports, and declarations.
@@ -170,6 +174,10 @@ candidate, and the author's comparator run. Return successfully as soon as those
 Do not wait for, simulate, or mark complete the outer controller's fresh-reviewer comparator
 rerun, wiki publication, or DAG `proved` transition: those gates run only after this nested
 stage returns. Treating those later gates as unfinished RLCR work creates a circular wait.
+An implementation review may request changes only for an error in this exact node, a mismatch
+with its frozen statement, a source-safety violation, a dirty/uncommitted candidate, or a failed
+configured comparator. Architectural preferences copied from an older scaffold are not defects
+after the current decomposition and its child gates have been accepted.
 """
 
 LEAN_AUDIT = """Review the Lean proof for this DAG node. You did not write it, and approval is

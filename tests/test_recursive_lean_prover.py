@@ -20,6 +20,7 @@ FLOW = Path(__file__).parents[1] / "flows" / "recursive_lean_prover"
 sys.path.insert(0, str(FLOW))
 
 from _recursive_lean.models import Decomposition, NodeRecord, SolveResult, Subproblem
+from _recursive_lean.prompts import RLCR_LEAN_TASK
 from _recursive_lean.runtime import Runtime, _WorkspaceAgent
 from _recursive_lean.store import Store
 
@@ -213,6 +214,54 @@ class WorktreeTests(unittest.TestCase):
                 self.assertIn(":worktree-rlcr", command[3])
                 self.assertEqual(command[-1], "prove the node")
                 self.assertTrue(any("web_search=on" in part for part in command))
+            finally:
+                os.chdir(original)
+
+    def test_nested_plan_cannot_reopen_accepted_decomposition(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "selected_node_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    lean_target="Submission.lean",
+                    comparator_success="Your solution is okay!",
+                )
+                runtime = Runtime(None, "selected node fixture", config, {})
+                node = NodeRecord(
+                    id="root.selected-a1",
+                    title="Selected theorem",
+                    statement="True",
+                    lean_name="selected",
+                    lean_statement="True",
+                    attempts=1,
+                )
+                scaffold = project / "one-time-plan.md"
+                scaffold.write_text("# Historical speculative decomposition\n")
+                natural = project / "natural-proof.md"
+                natural.write_text("# Accepted mathematical proof\n")
+                with patch.object(
+                    runtime,
+                    "_review_command",
+                    return_value="bash exact-comparator.sh",
+                ):
+                    implementation = runtime._implementation_plan(
+                        node,
+                        accepted_plan=scaffold,
+                        natural_path=natural,
+                        children="- `Submission.child`: True",
+                    ).read_text()
+
+                self.assertIn("Authoritative selected-node contract", implementation)
+                self.assertIn("override the current DAG", implementation)
+                self.assertIn(
+                    "DAG shape, extra certification interface", implementation
+                )
+                self.assertIn("authoritative implementation boundary", RLCR_LEAN_TASK)
+                self.assertIn("do not reopen planning or decomposition", RLCR_LEAN_TASK)
             finally:
                 os.chdir(original)
 
