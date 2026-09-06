@@ -8,7 +8,7 @@ working directory and handed the task verbatim, so every turn reads the reposito
 rather than any history. On the first run the flow records a manifest of the task's
 own files under the Humanize-managed run root below
 ``$HUMANIZE_HOME/flame_chase_agent_cleanup/``. Every cleanup_turns completed
-coding-agent turns (default 5) a cleaning epoch runs between turns: the whole tree
+coding-agent turns (default 3) a cleaning epoch runs between turns: the whole tree
 is saved there as a revert point, a fresh cleaner session shrinks
 the configured work_paths to their essence and distills NEXT.md, and the flow
 measures what survived -- every entry not in the manifest counts stray unless it
@@ -33,6 +33,9 @@ subprocesses are git and the check, all else standard library. The run ends when
 output tokens summed across the two chasers and the cleaner reach budget million
 (10.0 by default); resumable state keeps completed turns,
 tokens spent and epochs run, and clears when the budget ends the run.
+Every chaser and cleaner turn also has configurable wall-clock and token-idle
+watchdogs: a wall-clock limit injects a short wrap-up request and closes the
+session after its grace period, while an idle limit injects a status reminder.
 """
 
 from __future__ import annotations
@@ -46,9 +49,11 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from _workspace_cleanup_watchdog import run_guarded, was_forced
 from hmz.flows import Agent, flow, home
 from pydantic import BaseModel, Field, field_validator
 
@@ -163,7 +168,7 @@ class Config(BaseModel):
         ),
     )
     cleanup_turns: int = Field(
-        default=5,
+        default=3,
         ge=0,
         description="completed coding-agent turns between cleaning epochs; 0 never cleans",
     )
@@ -199,6 +204,21 @@ class Config(BaseModel):
             "correctness check run in the working directory after a cleaning, held to"
             " an hour; empty skips the check and the revert"
         ),
+    )
+    session_timeout_minutes: float = Field(
+        default=240.0,
+        ge=0,
+        description="minutes per session before a forced wrap-up prompt; 0 disables it",
+    )
+    idle_timeout_minutes: float = Field(
+        default=10.0,
+        ge=0,
+        description="minutes without token usage increasing before a reminder; 0 disables it",
+    )
+    stop_grace_minutes: float = Field(
+        default=10.0,
+        ge=0,
+        description="minutes after the wrap-up prompt before the session is closed",
     )
 
     @field_validator("work_paths")
@@ -707,8 +727,15 @@ def _clean_epoch(
     saved = _save_tree(root, store)
     try:
         session = cleaner.new(cwd=str(root))
-        report = session(_cleaning_prompt(held), suppress=True, schema=Cleaned)
-        ended = over_budget()
+        report = run_guarded(
+            session,
+            partial(session, _cleaning_prompt(held), suppress=True, schema=Cleaned),
+            session_timeout_minutes=held.session_timeout_minutes,
+            idle_timeout_minutes=held.idle_timeout_minutes,
+            stop_grace_minutes=held.stop_grace_minutes,
+            label=f"epoch {epoch} cleaner",
+        )
+        ended = over_budget() or was_forced(session)
         if report is None:
             print(f"epoch {epoch}: the cleaner answered nothing usable")
         else:
@@ -744,8 +771,15 @@ def _clean_epoch(
             )
             landed = False
             for _ in range(DELIVERY_TRIES):
-                said = session(_repair_prompt(overs, held), suppress=True)
-                ended = over_budget()
+                said = run_guarded(
+                    session,
+                    partial(session, _repair_prompt(overs, held), suppress=True),
+                    session_timeout_minutes=held.session_timeout_minutes,
+                    idle_timeout_minutes=held.idle_timeout_minutes,
+                    stop_grace_minutes=held.stop_grace_minutes,
+                    label=f"epoch {epoch} cleaner repair {used + 1}",
+                )
+                ended = over_budget() or was_forced(session)
                 if said:
                     landed = True
                     break
@@ -892,8 +926,16 @@ def run(
 
         turn = kept["turns"] % 2
         session = chasers[turn].new(cwd=str(root))
-        said = session(task, suppress=True)
+        said = run_guarded(
+            session,
+            partial(session, task, suppress=True),
+            session_timeout_minutes=held.session_timeout_minutes,
+            idle_timeout_minutes=held.idle_timeout_minutes,
+            stop_grace_minutes=held.stop_grace_minutes,
+            label=f"chaser {turn + 1} turn {kept['turns'] + 1}",
+        )
         del session  # dropping the session is how the chase forgets
+        kept["spent"] = spent = spent_all()
         if not said:
             print(
                 f"turn {kept['turns'] + 1}: chaser {turn + 1}'s turn never landed;"
@@ -903,7 +945,6 @@ def run(
             continue
 
         kept["turns"] += 1
-        kept["spent"] = spent = spent_all()
         print(
             f"turn {kept['turns']} done by chaser {turn + 1} | epoch {kept['epoch']} |"
             f" {spent / 1e6:.2f}M output tokens spent"

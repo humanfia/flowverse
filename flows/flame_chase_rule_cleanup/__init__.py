@@ -14,7 +14,7 @@ Before the first turn ever runs, the working tree minus .git is stored as the
 pristine task tree under the Humanize-managed run root below
 ``$HUMANIZE_HOME/flame_chase_rule_cleanup/`` -- outside the tree, where cleanup
 cannot touch it and a resumed run finds it. Every cleanup_turns completed
-coding-agent turns (default 5; 0 never
+coding-agent turns (default 3; 0 never
 cleans), between turns, plain deterministic code erases the repository's
 memory: each configured work_paths entry is saved aside outside the tree,
 everything inside the working directory is deleted (.git included), the
@@ -37,6 +37,9 @@ the turn ends. Completed turns, tokens spent and the cleanup epoch live in that
 state, cleared when the budget ends the run. Each turn prints its number, the
 agent, the epoch and the spend; each cleanup prints which epoch begins, how many
 files were removed and which configured paths were carried over.
+Each turn also has configurable wall-clock and token-idle watchdogs: a wall-clock
+limit injects a short wrap-up request and closes the session after its grace
+period, while an idle limit injects a status reminder.
 """
 
 from __future__ import annotations
@@ -53,9 +56,11 @@ import tempfile
 import time
 import tokenize
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from _workspace_cleanup_watchdog import run_guarded
 from hmz.flows import Agent, flow, home
 from pydantic import BaseModel, Field, field_validator
 
@@ -148,7 +153,7 @@ class Config(BaseModel):
         "across every run in this workspace before the flow stops",
     )
     cleanup_turns: int = Field(
-        default=5,
+        default=3,
         ge=0,
         description="completed coding-agent turns between cleanups of the working "
         "repository; 0 never cleans",
@@ -157,6 +162,21 @@ class Config(BaseModel):
         min_length=1,
         description="required relative, non-overlapping files or directories whose "
         "current contents survive each cleanup",
+    )
+    session_timeout_minutes: float = Field(
+        default=240.0,
+        ge=0,
+        description="minutes per session before a forced wrap-up prompt; 0 disables it",
+    )
+    idle_timeout_minutes: float = Field(
+        default=10.0,
+        ge=0,
+        description="minutes without token usage increasing before a reminder; 0 disables it",
+    )
+    stop_grace_minutes: float = Field(
+        default=10.0,
+        ge=0,
+        description="minutes after the wrap-up prompt before the session is closed",
     )
 
     @field_validator("work_paths")
@@ -246,7 +266,14 @@ def run(
         seat = agents.flame if next_seat == FLAME else agents.chaser
         before = int(seat.spent().output)
         session = seat.new(cwd=str(workdir))
-        said = session(task, suppress=True)
+        said = run_guarded(
+            session,
+            partial(session, task, suppress=True),
+            session_timeout_minutes=held.session_timeout_minutes,
+            idle_timeout_minutes=held.idle_timeout_minutes,
+            stop_grace_minutes=held.stop_grace_minutes,
+            label=f"{next_seat} turn {turns + 1}",
+        )
         del session  # dropped: the next turn arrives remembering nothing
         spent += max(0, int(seat.spent().output) - before)
         kept["spent"] = spent  # the turn's cost lands in state at once
