@@ -41,6 +41,13 @@ a child-only frozen type. The root comparator dispatches directly to the officia
 challenge, whose trusted declarations fix every required root theorem type. Do not apply the
 child-only metadata requirement to that official root gate.
 
+Once the decomposition gate has selected and audited the current DAG, that node identity, frozen
+type, and accepted dependency list are authoritative for Lean implementation. An older one-time
+scaffold or natural proof may contain speculative interface names or a different decomposition;
+use those parts only as mathematical background. A later implementation reviewer must not reopen
+planning, replace the selected cone, require extra nodes, or reject an exact comparator-passing
+theorem solely for source-layout or certification-architecture preferences.
+
 For Lean:
 
 - Turn each DAG node into a globally named theorem or lemma.

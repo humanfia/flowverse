@@ -200,7 +200,10 @@ blocking prerequisite.
 - A decomposition reviewer checks every proposed child statement, exact frozen Lean type, and
   dependency edge after the prose proof passes.
 - The official RLCR implementation loop reviews every Lean worker round and performs its own code
-  review when a base branch is available.
+  review when a base branch is available. Its implementation contract is the current audited DAG
+  node, frozen type, and accepted dependency list; it cannot reopen decomposition or demand a
+  different graph/interface architecture from an older scaffold after the selected theorem passes
+  the configured correctness and safety gates.
 - The controller runs the comparator with a default six-hour timeout. Only after that passes does
   a fresh Lean reviewer inspect the exact candidate and personally rerun the same comparator.
 - If independently accepted histories must be combined, integration runs the comparator again on
