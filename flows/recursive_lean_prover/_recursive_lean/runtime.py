@@ -1218,6 +1218,13 @@ class Runtime:
                 node_id=node.id,
                 feedback=overlay_feedback,
             )
+        # Humanize RLCR otherwise discovers the repository's default branch (usually
+        # ``main``) and reviews against that branch.  A recursive proof worktree can be
+        # based on a different, frozen history, and accepted child commits may have just
+        # been overlaid on top of it.  Anchor RLCR's code review to the exact post-overlay
+        # commit so it reviews only this node's new implementation and never reopens
+        # frozen child or unrelated default-branch history.
+        review_base = self._git_head(worktree)
         self.store.update(
             node.id,
             "rlcr-lean",
@@ -1242,7 +1249,9 @@ class Runtime:
             comparator_success=self.config.comparator_success,
         )
         try:
-            rlcr_ok, rlcr_log = self._run_rlcr_process(node, worktree, plan_path, task)
+            rlcr_ok, rlcr_log = self._run_rlcr_process(
+                node, worktree, plan_path, task, review_base
+            )
         except OSError as error:
             return SolveResult(
                 ok=False,
@@ -1438,7 +1447,12 @@ class Runtime:
         return f"env {environment} {self._render_command(node, lean_files)}"
 
     def _run_rlcr_process(
-        self, node: NodeRecord, worktree: Path, plan_path: Path, task: str
+        self,
+        node: NodeRecord,
+        worktree: Path,
+        plan_path: Path,
+        task: str,
+        review_base: str,
     ) -> tuple[bool, Path]:
         """Run official RLCR in a process whose real cwd is the node worktree.
 
@@ -1454,6 +1468,7 @@ class Runtime:
                 {
                     "plan_file": str(plan_path),
                     "max": self.config.rlcr_rounds,
+                    "base_branch": review_base,
                     "track_plan_file": False,
                     "push_every_round": False,
                     "skip_impl": False,

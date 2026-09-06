@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -204,7 +205,11 @@ class WorktreeTests(unittest.TestCase):
                 ):
                     launched.return_value = SimpleNamespace(returncode=0)
                     passed, log = runtime._run_rlcr_process(
-                        node, worktree, plan, "prove the node"
+                        node,
+                        worktree,
+                        plan,
+                        "prove the node",
+                        "frozen-post-overlay-base",
                     )
 
                 self.assertTrue(passed)
@@ -214,6 +219,15 @@ class WorktreeTests(unittest.TestCase):
                 self.assertIn(":worktree-rlcr", command[3])
                 self.assertEqual(command[-1], "prove the node")
                 self.assertTrue(any("web_search=on" in part for part in command))
+                rlcr_config = json.loads(
+                    (
+                        runtime._node_dir(node)
+                        / f"rlcr-config-v{node.attempts}.json"
+                    ).read_text()
+                )
+                self.assertEqual(
+                    rlcr_config["base_branch"], "frozen-post-overlay-base"
+                )
             finally:
                 os.chdir(original)
 

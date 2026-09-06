@@ -203,7 +203,9 @@ blocking prerequisite.
   review when a base branch is available. Its implementation contract is the current audited DAG
   node, frozen type, and accepted dependency list; it cannot reopen decomposition or demand a
   different graph/interface architecture from an older scaffold after the selected theorem passes
-  the configured correctness and safety gates.
+  the configured correctness and safety gates. The loop's code-review base is pinned to the exact
+  post-overlay worktree commit, rather than the repository's default branch, so its diff contains
+  only the current node implementation and never re-reviews accepted child histories.
 - The controller runs the comparator with a default six-hour timeout. Only after that passes does
   a fresh Lean reviewer inspect the exact candidate and personally rerun the same comparator.
 - If independently accepted histories must be combined, integration runs the comparator again on
