@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from typing import Annotated, Any, NamedTuple
 
 from _recursive_lean.runtime import Runtime
@@ -169,6 +170,12 @@ class WorktreeRlcrConfig(BaseModel):
         le=200,
         description="maximum official RLCR implementation/review rounds",
     )
+    base_branch: str = Field(
+        default="",
+        description=(
+            "exact post-overlay commit used as the official RLCR code-review base"
+        ),
+    )
     track_plan_file: bool = False
     push_every_round: bool = False
     skip_impl: bool = False
@@ -205,10 +212,25 @@ def worktree_rlcr(
     state: dict[str, Any] | None = None,
 ) -> None:
     """Process-isolated bridge whose actual cwd is the formalizing node worktree."""
+    forwarded = config.model_dump()
+    if not forwarded["base_branch"]:
+        # Backward compatibility for a long-lived recursive supervisor that was
+        # started before ``base_branch`` was added to its generated config.  This
+        # bridge is launched before the nested builder edits anything, so HEAD is
+        # exactly the post-overlay commit the subsequent code review must use.
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            raise RuntimeError("cannot resolve the node worktree review base")
+        forwarded["base_branch"] = completed.stdout.strip()
     load("official/humanize1:rlcr", inherit_skills=True)(
         agents,
         task,
-        config.model_dump(),
+        forwarded,
     )
     if state is not None:
         state.clear()
