@@ -1,0 +1,81 @@
+---
+name: recursive-lean-proof
+description: Prove a mathematical statement in natural language before Lean, factor it into independently checkable named lemmas, and accept Lean only through the configured comparator.
+---
+
+# Recursive Lean proof discipline
+
+Keep the mathematical statement fixed. A proof is not a proof of a nearby easier theorem.
+
+Before writing new or revised Lean:
+
+1. Give a numbered natural-language proof.
+2. State every lemma with every hypothesis.
+3. Identify the first unsupported step rather than papering over it.
+4. Split only at genuine mathematical obligations; never create circular child statements.
+
+A plan is not itself the complete proof. Generate it once in direct mode as a concrete scaffold,
+then freeze it without a separate plan-review or plan-revision stage. The next flow gate writes
+and independently reviews the full numbered proof. Lean files that already existed when the flow
+started are inherited, untrusted
+checkpoints. Their earlier filesystem/Git chronology is not a reason to reject a plan. They may be
+inspected as evidence, but must not be modified, relied on, or accepted until the new natural proof
+and its child gates have passed.
+
+At the natural-language proof review gate, audit the mathematical argument and every stated
+lemma, but do not require child Lean declarations or frozen Lean type expressions yet. Those are
+created and independently audited only in the following decomposition gate. Missing mathematical
+hypotheses or circular prose remain rejection reasons; missing post-decomposition Lean artifacts
+at this earlier gate do not.
+
+For every recursive child, freeze before formalization both a prose statement with all hypotheses
+and a single-line exact Lean proposition/type expression. The expression must not contain a full
+declaration or `:=` proof. Independently review that prose/type pair and its acyclic dependencies.
+Use a bare child identifier `X` in decomposition metadata; the implementation and comparator refer
+to it as `Submission.X`. Do not encode the namespace as `Submission_X` or `SubmissionX`.
+The child comparator must compile the candidate against this frozen type; comparing two aliases
+whose types are both inferred from the candidate is not an acceptable correctness gate.
+
+The root is intentionally different: its DAG metadata may use the aggregate module name and omit
+a child-only frozen type. The root comparator dispatches directly to the official benchmark
+challenge, whose trusted declarations fix every required root theorem type. Do not apply the
+child-only metadata requirement to that official root gate.
+
+For Lean:
+
+- Turn each DAG node into a globally named theorem or lemma.
+- Do not use `sorry`, `admit`, new axioms, declaration shadowing, or weaker assumptions/targets.
+- Preserve challenge files, imports, namespaces, and theorem types unless the task explicitly
+  requires an authorized change.
+- Run the exact configured comparator. A successful build alone is insufficient.
+- A reviewer must rerun the comparator independently before accepting a theorem.
+
+Generate one scaffold plan per node and never iterate it. When a natural-proof reviewer,
+decomposition reviewer, comparator, or Lean reviewer rejects work, preserve the latest prose
+draft and revise only that natural-language proof before trying another Lean proof. Publish every
+accepted theorem, including leaf lemmas, to the wiki.
+
+The nested RLCR implementation stage ends after it has produced a warning-clean, committed
+candidate and its author comparator run passes. It must then return control immediately. The
+outer recursive controller—not nested RLCR—runs the role-distinct reviewer comparator, publishes
+the wiki page, and changes the DAG node to `proved`; waiting inside RLCR for those later actions
+is a circular wait.
+
+Scan the whole existing DAG and launch every dependency-ready frontier node into a shared worker
+pool. Refill the pool as soon as any completion unlocks another node; do not wait for an unrelated
+slow branch. Fresh decompositions launch every zero-indegree sibling in the first topological
+wave. Planning, natural-proof review, decomposition, Lean formalization, comparator runs, and Lean
+review may proceed concurrently. Give every formalizing node its own named Git branch and
+worktree, and invoke nested RLCR in a separate process whose real working directory is that
+worktree, so Humanize state, source edits, and comparator scratch files are isolated. Serialize
+integration of fully comparator- and reviewer-approved histories into the problem branch. When
+parallel histories touch the same Lean file, preserve both in an integration worktree and rerun
+the comparator before advancing the problem branch. Nodes with unproved dependencies remain
+queued until prerequisite commits are integrated. In the live Mermaid graph every edge is solid
+and every arrow `A --> B` means A depends on B. Parent theorems therefore point to their
+decomposition children, and nodes point to their explicit prerequisites; a decomposition leaf may
+still be dependency-blocked.
+
+Persist every natural-language draft and its exact review feedback. If proof review fails or the
+run resumes, revise the latest preserved draft—retaining its sound steps—instead of starting the
+proof again from an empty response.
