@@ -2062,6 +2062,28 @@ class Runtime:
             )
             if continued.returncode:
                 detail = (continued.stderr or continued.stdout).strip()
+                status = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=integration,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if status.returncode == 0 and not status.stdout.strip():
+                    # Union conflict resolution can discover that the canonical branch
+                    # already contains the candidate's complete Lean result.  Git then
+                    # keeps the sequencer active but rejects --continue as an empty
+                    # commit.  This is the same successful duplicate-patch case handled
+                    # above, reached only after resolving an ordinary Lean conflict.
+                    skipped = subprocess.run(
+                        ["git", "cherry-pick", "--skip"],
+                        cwd=integration,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if skipped.returncode == 0:
+                        continue
                 subprocess.run(
                     ["git", "cherry-pick", "--abort"],
                     cwd=integration,
