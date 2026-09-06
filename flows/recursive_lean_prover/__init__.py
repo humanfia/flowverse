@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
 from _recursive_lean.runtime import Runtime
@@ -212,6 +214,33 @@ def worktree_rlcr(
     state: dict[str, Any] | None = None,
 ) -> None:
     """Process-isolated bridge whose actual cwd is the formalizing node worktree."""
+    # Long-lived recursive supervisors may have been imported before automatic
+    # Lake-input provisioning was added.  This newly spawned bridge still runs in
+    # the node worktree before the builder starts, so repair a missing ignored
+    # manifest from the repository's primary worktree without restarting anything.
+    worktree = Path.cwd()
+    manifest = worktree / "lake-manifest.json"
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--quiet", "lake-manifest.json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    common = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if (
+        not manifest.exists()
+        and ignored.returncode == 0
+        and common.returncode == 0
+        and common.stdout.strip()
+    ):
+        source = Path(common.stdout.strip()).parent / "lake-manifest.json"
+        if source.is_file() and source.resolve() != manifest.resolve():
+            shutil.copy2(source, manifest)
     forwarded = config.model_dump()
     if not forwarded["base_branch"]:
         # Backward compatibility for a long-lived recursive supervisor that was

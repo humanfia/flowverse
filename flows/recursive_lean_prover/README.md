@@ -43,6 +43,9 @@ and must pass both a machine comparator and a fresh reviewer comparator. It neve
 to planning, natural-language proof, decomposition, or theorem proving. Deep repository paths are
 mapped to a stable short checkout path under `/tmp/humanize-lean-worktrees`; the named Git branch
 retains the durable proof history even if that disposable checkout is later removed.
+Each isolated checkout also receives its own ignored copy of the repository's pinned
+`lake-manifest.json` and a link to the immutable `.lake/packages` checkout. This keeps Lean builds
+offline-reproducible and prevents Lake from trying to update shared read-only Git metadata.
 
 ## How the flow works
 

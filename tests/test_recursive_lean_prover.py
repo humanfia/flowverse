@@ -290,13 +290,18 @@ class WorktreeTests(unittest.TestCase):
             git(project, "init", "-b", "main")
             git(project, "config", "user.name", "Flow Test")
             git(project, "config", "user.email", "flow-test@example.invalid")
-            (project / ".gitignore").write_text(".humanize/\n.lake/\n")
+            (project / ".gitignore").write_text(
+                ".humanize/\n.lake/\n/lake-manifest.json\n"
+            )
             (project / "Submission.lean").write_text(
                 "namespace Submission\nend Submission\n"
             )
             git(project, "add", ".gitignore", "Submission.lean")
             git(project, "commit", "-m", "test: initialize fixture")
             (project / ".lake" / "packages").mkdir(parents=True)
+            (project / "lake-manifest.json").write_text(
+                '{"version": "1.1.0", "packages": []}\n'
+            )
 
             try:
                 os.chdir(project)
@@ -328,6 +333,16 @@ class WorktreeTests(unittest.TestCase):
                 self.assertEqual(node.proof_base_commit, original_base)
                 self.assertTrue(runtime._git_clean(worktree))
                 self.assertTrue((worktree / ".lake" / "packages").is_symlink())
+                self.assertEqual(
+                    (worktree / "lake-manifest.json").read_text(),
+                    (project / "lake-manifest.json").read_text(),
+                )
+
+                # Reusing an already-recorded worktree also repairs disposable
+                # ignored Lake inputs that vanished between process invocations.
+                (worktree / "lake-manifest.json").unlink()
+                self.assertEqual(runtime._node_worktree(node), worktree)
+                self.assertTrue((worktree / "lake-manifest.json").is_file())
 
                 proof = worktree / "Leaf.lean"
                 proof.write_text("theorem leaf : True := by trivial\n")
@@ -343,6 +358,60 @@ class WorktreeTests(unittest.TestCase):
                 self.assertTrue(integrated, feedback)
                 self.assertTrue((project / "Leaf.lean").is_file())
                 self.assertTrue(runtime._git_clean(project))
+            finally:
+                os.chdir(original)
+
+    def test_node_worktree_finds_manifest_in_primary_git_worktree(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary = root / "primary"
+            supervisor = root / "supervisor"
+            primary.mkdir()
+            git(primary, "init", "-b", "main")
+            git(primary, "config", "user.name", "Flow Test")
+            git(primary, "config", "user.email", "flow-test@example.invalid")
+            (primary / ".gitignore").write_text(
+                ".humanize/\n.lake/\n/lake-manifest.json\n"
+            )
+            (primary / "Submission.lean").write_text(
+                "theorem seed : True := by trivial\n"
+            )
+            git(primary, "add", ".gitignore", "Submission.lean")
+            git(primary, "commit", "-m", "test: initialize linked-worktree fixture")
+            expected = '{"version": "1.1.0", "packages": []}\n'
+            (primary / "lake-manifest.json").write_text(expected)
+            git(
+                primary,
+                "worktree",
+                "add",
+                "-b",
+                "supervisor",
+                str(supervisor),
+                "main",
+            )
+
+            try:
+                os.chdir(supervisor)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                )
+                runtime = Runtime(None, "linked manifest fixture", config, {})
+                node = NodeRecord(
+                    id="root.linked_manifest-a1",
+                    title="Linked manifest",
+                    statement="True",
+                    attempts=1,
+                )
+
+                worktree = runtime._node_worktree(node)
+
+                self.assertFalse((supervisor / "lake-manifest.json").exists())
+                self.assertEqual(
+                    (worktree / "lake-manifest.json").read_text(), expected
+                )
+                self.assertTrue(runtime._git_clean(worktree))
             finally:
                 os.chdir(original)
 

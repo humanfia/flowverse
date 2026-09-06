@@ -1535,11 +1535,13 @@ class Runtime:
             recorded is not None and self._git_toplevel(recorded) == recorded
         )
         if recorded_valid and len(str(recorded)) <= 180:
+            self._prepare_lake_workspace(recorded)
             return recorded
         path = self._node_worktree_path(node)
         if recorded_valid:
             if self._git_toplevel(path) == path:
                 node.worktree = str(path)
+                self._prepare_lake_workspace(path)
                 return path
             if path.exists() and any(path.iterdir()):
                 raise RuntimeError(
@@ -1558,9 +1560,11 @@ class Runtime:
                 detail = (moved.stderr or moved.stdout).strip()
                 raise RuntimeError(f"could not shorten node worktree path: {detail}")
             node.worktree = str(path)
+            self._prepare_lake_workspace(path)
             return path
         if self._git_toplevel(path) == path:
             node.worktree = str(path)
+            self._prepare_lake_workspace(path)
             return path
         if path.exists() and any(path.iterdir()):
             raise RuntimeError(
@@ -1633,7 +1637,7 @@ class Runtime:
         # commit the new worktree actually checked out, not a pre-lock snapshot of the
         # moving problem branch.
         node.proof_base_commit = self._git_head(path)
-        self._link_lake_packages(path)
+        self._prepare_lake_workspace(path)
         return path
 
     def _node_worktree_path(self, node: NodeRecord) -> Path:
@@ -1664,20 +1668,57 @@ class Runtime:
             / self.project.name
         )
 
-    def _link_lake_packages(self, path: Path) -> None:
-        """Share the immutable dependency checkout when Git excludes the link."""
+    def _prepare_lake_workspace(self, path: Path) -> None:
+        """Provision ignored pinned Lake inputs in an isolated worktree.
+
+        Lake worktrees do not receive ignored files.  Sharing the immutable package
+        checkout avoids a network fetch, while copying the pinned manifest prevents
+        Lake from trying to update dependency repositories through read-only shared
+        Git metadata.  A copy is intentional: a worker must never rewrite the source
+        manifest in another checkout.
+        """
         packages = self.project / ".lake" / "packages"
         linked = path / ".lake" / "packages"
-        ignored = subprocess.run(
+        packages_ignored = subprocess.run(
             ["git", "check-ignore", "--quiet", ".lake/packages"],
             cwd=path,
             capture_output=True,
             text=True,
             check=False,
         )
-        if packages.is_dir() and not linked.exists() and ignored.returncode == 0:
+        if (
+            packages.is_dir()
+            and not linked.exists()
+            and packages_ignored.returncode == 0
+        ):
             linked.parent.mkdir(parents=True, exist_ok=True)
             linked.symlink_to(packages, target_is_directory=True)
+
+        manifest = path / "lake-manifest.json"
+        manifest_ignored = subprocess.run(
+            ["git", "check-ignore", "--quiet", "lake-manifest.json"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if manifest.exists() or manifest_ignored.returncode != 0:
+            return
+
+        sources = [self.project / "lake-manifest.json"]
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=self.project,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if common.returncode == 0 and common.stdout.strip():
+            sources.append(Path(common.stdout.strip()).parent / "lake-manifest.json")
+        for source in sources:
+            if source.is_file() and source.resolve() != manifest.resolve():
+                shutil.copy2(source, manifest)
+                return
 
     def _node_branch(self, node: NodeRecord) -> str:
         """Return the stable Git branch name retaining one node attempt's proof."""
@@ -1821,7 +1862,7 @@ class Runtime:
                     pass
                 return False, f"could not create integration recheck worktree: {detail}"
             try:
-                self._link_lake_packages(integration)
+                self._prepare_lake_workspace(integration)
                 applied, unioned, detail = self._apply_candidate_commits(
                     integration, commits
                 )
