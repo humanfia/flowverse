@@ -33,10 +33,15 @@ proof-producing route with a feasibility report, failure disposition, request fo
 a list of controller decisions. Exact child Lean signatures, DAG node IDs, and detailed formal
 interfaces are derived only after the complete prose proof passes review, so do not try to
 pre-build that later decomposition here. Lean files already present when this flow began are
-inherited checkpoints, not new formalization performed out of order. They may be inspected as
-untrusted evidence, but may not be relied on, modified, or accepted until the new natural proof
-and child gates have passed. Do not invent controller receipts or services beyond the configured
-DAG, wiki, Git checks, and comparator commands.
+inherited proof-base material, not new formalization performed out of order. Their presence does
+not by itself prove the current node. However, definitions and kernel-checked helper lemmas
+already present at the node's frozen proof-base commit may be reused as ordinary library
+infrastructure when the configured comparator and source-safety checks accept them. The
+approved-child list governs candidate histories overlaid after that base; it is not an exhaustive
+allowlist of declarations available from the base. A previous unapproved proof of the current
+theorem, a placeholder, a new axiom, or a non-base candidate history still requires its
+corresponding checkpoint gates. Do not invent controller receipts or services beyond the
+configured DAG, wiki, Git checks, and comparator commands.
 The root is validated directly against the official trusted Challenge declarations, so its
 aggregate DAG name and absence of a child-only frozen type are not defects.
 
@@ -150,6 +155,7 @@ Exact theorem:
 
 Proposed declaration name: `{lean_name}`
 Frozen expected Lean type: `{lean_statement}`
+Frozen proof-base commit: `{proof_base_commit}`
 Lean target: `{lean_target}`
 
 Comparator-approved child theorem wiki pages:
@@ -161,6 +167,12 @@ Requirements:
   the authoritative implementation boundary. The one-time controller scaffold is mathematical
   background only: do not reopen planning or decomposition, require additional DAG nodes or
   interfaces, or replace the controller's already audited selected dependency graph.
+- Definitions and kernel-checked helper lemmas already present at the frozen proof-base commit may
+  be reused as ordinary library infrastructure. The approved-child list describes new histories
+  overlaid after that base; an empty list does not ban proof-base helpers. Do not reject a
+  comparator-passing implementation solely because such a helper predates the flow or is not on a
+  child wiki page. This permission does not cover an unapproved prior proof of this node, a
+  placeholder, a new axiom, or a candidate history absent from both the base and approved children.
 - Create or complete a globally named theorem for this node; do not hide it as a local `have`.
 - For a child node, its declaration must have exactly the frozen expected Lean type above.
 - Preserve the exact target, hypotheses, imports, and declarations.
@@ -196,6 +208,9 @@ Mathematical statement:
 Frozen expected Lean type (children only):
 {lean_statement}
 
+Frozen proof-base commit:
+{proof_base_commit}
+
 Lean files:
 {lean_files}
 
@@ -207,6 +222,12 @@ For a non-root node, personally run only that exact node comparator. Do not add 
 root/whole-benchmark comparator run or use an unrelated parent/sibling theorem as an additional
 acceptance condition. The selected node's frozen statement and configured comparator define the
 review boundary.
+
+Definitions and kernel-checked helper lemmas already present at the frozen proof-base commit are
+ordinary library infrastructure. The approved-child list is about post-base candidate overlays,
+not an exhaustive declaration allowlist. Do not reject a passing candidate merely because a base
+helper predates the flow or lacks its own child wiki page. Still reject an unapproved prior proof
+of this node, placeholders, new axioms, or code outside the base and approved candidate histories.
 
 Independent machine-gate log from before your review:
 {comparator_log}

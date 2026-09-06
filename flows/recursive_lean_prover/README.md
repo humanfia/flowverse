@@ -213,6 +213,9 @@ blocking prerequisite.
 - A decomposed parent may start from comparator-approved child candidates while they integrate;
   its isolated worktree overlays those exact commits and rechecks the combination. The root cannot
   become `proved` until all descendant integration gates and its own final comparator contract pass.
+- Every node records a frozen proof-base commit. Kernel-checked definitions and helper lemmas at
+  that base may be reused as library infrastructure; the child list governs only post-base
+  candidate overlays and is not an exhaustive theorem allowlist.
 - Any mathematical rejection returns to the latest natural-language proof. The full outer
   comparator/reviewer pass freezes the candidate, marks it `integrating`, publishes it, and
   unlocks dependants. Only the subsequent canonical integration gate marks the node `proved`.

@@ -17,10 +17,13 @@ Before writing new or revised Lean:
 A plan is not itself the complete proof. Generate it once in direct mode as a concrete scaffold,
 then freeze it without a separate plan-review or plan-revision stage. The next flow gate writes
 and independently reviews the full numbered proof. Lean files that already existed when the flow
-started are inherited, untrusted
-checkpoints. Their earlier filesystem/Git chronology is not a reason to reject a plan. They may be
-inspected as evidence, but must not be modified, relied on, or accepted until the new natural proof
-and its child gates have passed.
+started are inherited proof-base material, not automatic evidence that the current node is proved.
+Definitions and kernel-checked helper lemmas present at the node's frozen proof-base commit may be
+reused as ordinary library infrastructure when the configured comparator and source-safety checks
+accept them. The approved-child list governs new candidate histories overlaid after that base; it
+is not an exhaustive allowlist of declarations in the base, and an empty child list does not ban
+base helpers. Do not reuse an unapproved previous proof of the current node, a placeholder, a new
+axiom, or a candidate history absent from both the frozen base and approved children.
 
 At the natural-language proof review gate, audit the mathematical argument and every stated
 lemma, but do not require child Lean declarations or frozen Lean type expressions yet. Those are
@@ -46,7 +49,9 @@ type, and accepted dependency list are authoritative for Lean implementation. An
 scaffold or natural proof may contain speculative interface names or a different decomposition;
 use those parts only as mathematical background. A later implementation reviewer must not reopen
 planning, replace the selected cone, require extra nodes, or reject an exact comparator-passing
-theorem solely for source-layout or certification-architecture preferences.
+theorem solely for source-layout or certification-architecture preferences. In particular, it
+must not reject a proof merely because a kernel-checked helper already existed at the frozen
+proof-base commit or lacks a child wiki page.
 
 For Lean:
 

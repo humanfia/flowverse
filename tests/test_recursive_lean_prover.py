@@ -262,6 +262,8 @@ class WorktreeTests(unittest.TestCase):
                 )
                 self.assertIn("authoritative implementation boundary", RLCR_LEAN_TASK)
                 self.assertIn("do not reopen planning or decomposition", RLCR_LEAN_TASK)
+                self.assertIn("Frozen proof-base commit", RLCR_LEAN_TASK)
+                self.assertIn("empty list does not ban proof-base helpers", RLCR_LEAN_TASK)
             finally:
                 os.chdir(original)
 

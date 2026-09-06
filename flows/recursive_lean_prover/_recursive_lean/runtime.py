@@ -1234,6 +1234,7 @@ class Runtime:
             lean_statement=node.lean_statement
             or "Root declarations are fixed by Challenge.lean and the official comparator.",
             lean_name=node.lean_name or "choose a descriptive theorem name",
+            proof_base_commit=before,
             lean_target=self.config.lean_target
             or "infer the repository's correct target .lean file",
             children=child_text,
@@ -1297,6 +1298,7 @@ class Runtime:
                 statement=node.statement,
                 lean_statement=node.lean_statement
                 or "Root declarations are fixed by Challenge.lean and the official comparator.",
+                proof_base_commit=before,
                 lean_files="\n".join(f"- {one}" for one in lean_files),
                 comparator_command=self._review_command(node, lean_files),
                 comparator_success=self.config.comparator_success,
