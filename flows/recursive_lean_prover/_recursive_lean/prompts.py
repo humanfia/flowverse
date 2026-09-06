@@ -166,6 +166,9 @@ Requirements:
 - Preserve the exact target, hypotheses, imports, and declarations.
 - No `sorry`, `admit`, new axioms, unsafe loopholes, or weakened replacement theorem.
 - Run `{comparator_command}` until it exits zero and contains `{comparator_success}`.
+- For a non-root node, that exact node comparator is the complete configured correctness gate.
+  Do not run the official root/whole-benchmark comparator or validate unrelated parent or sibling
+  theorems; those checks consume the shared build pool and are outside this node's boundary.
 - Commit only real Lean/project changes with a conventional descriptive commit.
 - Do not edit anything under `.humanize/` except files the RLCR runtime itself requires.
 
@@ -199,6 +202,11 @@ Lean files:
 Comparator command to rerun:
 {comparator_command}
 Required marker: {comparator_success}
+
+For a non-root node, personally run only that exact node comparator. Do not add an official
+root/whole-benchmark comparator run or use an unrelated parent/sibling theorem as an additional
+acceptance condition. The selected node's frozen statement and configured comparator define the
+review boundary.
 
 Independent machine-gate log from before your review:
 {comparator_log}
@@ -246,6 +254,9 @@ Changed Lean files:
 You must personally rerun this exact comparator command:
 {comparator_command}
 Required marker: {comparator_success}
+
+For a non-root node, this exact node comparator is the only comparator in scope. Do not add an
+official root/whole-benchmark comparator run or revalidate unrelated parent or sibling nodes.
 
 Machine comparator log for the repaired combined history:
 {comparator_log}

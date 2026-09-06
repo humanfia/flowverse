@@ -2275,7 +2275,9 @@ comparator-approved implementation of this selected node.
 3. Commit the candidate and require a clean worktree at that exact SHA.
 4. Run `{self._review_command(node, [])}` and require exit zero plus
    `{self.config.comparator_success}`.
-5. Return control to the recursive controller immediately.
+5. For a non-root node, run only that exact node comparator. Do not run the official root or
+   whole-benchmark comparator and do not validate unrelated parent or sibling theorems.
+6. Return control to the recursive controller immediately.
 
 The implementation reviewer may request another round only for a defect in this exact selected
 node: a frozen-statement mismatch, invalid Lean proof, source-safety or protected-file violation,
