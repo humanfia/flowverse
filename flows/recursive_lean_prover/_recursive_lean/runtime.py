@@ -31,6 +31,8 @@ from .models import (
 from .prompts import (
     DECOMPOSE,
     DECOMPOSITION_AUDIT,
+    INTEGRATION_AUDIT,
+    INTEGRATION_REPAIR,
     LEAN_AUDIT,
     NATURAL_AUDIT,
     NATURAL_PROOF,
@@ -137,6 +139,12 @@ class Runtime:
         self._graph_lock = threading.RLock()
         self._integration_lock = threading.Lock()
         self._revision_lock = threading.Lock()
+        self._integration_futures_lock = threading.RLock()
+        self._integration_executor = ThreadPoolExecutor(
+            max_workers=max(1, getattr(self.config, "max_parallel_children", 4)),
+            thread_name_prefix="accepted-integration",
+        )
+        self._integration_futures: dict[str, Any] = {}
         self.run_root = self._run_root()
         self.store = Store(
             self.run_root,
@@ -192,8 +200,14 @@ class Runtime:
 
     def _solve(self, node: NodeRecord) -> SolveResult:
         """Solve one node; child calls use this same method and can split again."""
-        if node.status == "proved" and node.theorems:
-            return SolveResult(ok=True, node_id=node.id)
+        if node.status == "proved":
+            return SolveResult(
+                ok=True,
+                node_id=node.id,
+                theorems=self._checkpoint_theorems(node),
+            )
+        if node.status == "integrating" and node.candidate_commit:
+            return self._resume_accepted_candidate(node)
         feedback = node.message if node.status == "failed" else "None."
         # Once a plan passes its independent gate it is a stable scaffold.  Subsequent
         # mathematical corrections iterate the natural-language proof from its latest
@@ -569,26 +583,59 @@ class Runtime:
         decomposition: Decomposition,
         parent_attempt: int,
     ) -> list[SolveResult]:
-        """Activate fresh worker/reviewer sessions recursively in dependency order."""
+        """Activate or reuse theorem workers recursively in dependency order.
+
+        A Lean theorem name is the stable identity of a child below one parent.  Outer
+        retries may revise prose or decomposition, but they may not create ``-a2`` copies
+        of an already accepted ``-a1`` theorem or send that theorem through proof stages
+        again.
+        """
+        del parent_attempt
         if not decomposition.should_split:
             return []
         with self._graph_lock:
+            existing_by_name: dict[str, NodeRecord] = {}
+            candidates = sorted(
+                (
+                    one
+                    for one in self.store.nodes.values()
+                    if one.lean_name
+                    and (one.parent == parent.id or self._accepted_checkpoint(one))
+                ),
+                key=lambda one: (
+                    0
+                    if one.status == "proved"
+                    else 1
+                    if one.status == "integrating" and one.candidate_commit
+                    else 2,
+                    one.id,
+                ),
+            )
+            for candidate in candidates:
+                existing_by_name.setdefault(candidate.lean_name, candidate)
+            ids = {
+                one.key: (
+                    existing_by_name[one.lean_name].id
+                    if one.lean_name in existing_by_name
+                    else f"{parent.id}.{one.key}-a1"
+                )
+                for one in decomposition.subproblems
+            }
+            new_ids = {
+                node_id for node_id in ids.values() if node_id not in self.store.nodes
+            }
             remaining = self.config.max_nodes - len(self.store.nodes)
-            if remaining < len(decomposition.subproblems):
+            if remaining < len(new_ids):
                 return [
                     SolveResult(
                         ok=False,
                         node_id=parent.id,
                         feedback=(
                             f"node bound {self.config.max_nodes} leaves room for {remaining}, "
-                            f"but decomposition needs {len(decomposition.subproblems)}"
+                            f"but decomposition needs {len(new_ids)} new node(s)"
                         ),
                     )
                 ]
-            ids = {
-                one.key: f"{parent.id}.{one.key}-a{parent_attempt}"
-                for one in decomposition.subproblems
-            }
             made: dict[str, NodeRecord] = {}
             for one in decomposition.subproblems:
                 made[one.key] = self.store.ensure(
@@ -601,6 +648,10 @@ class Runtime:
                     lean_name=one.lean_name,
                     depends_on=[ids[key] for key in one.depends_on],
                 )
+            retained_children = list(dict.fromkeys(ids.values()))
+            if parent.children != retained_children:
+                parent.children = retained_children
+                self.store.render()
         self.store.update(
             parent.id,
             "waiting-children",
@@ -640,7 +691,36 @@ class Runtime:
                         continue
                     if all(dependency in results for dependency in child.depends_on):
                         pending.remove(key)
-                        futures[executor.submit(self._solve, made[key])] = key
+                        checkpoint = made[key]
+                        if checkpoint.status == "proved":
+                            results[key] = SolveResult(
+                                ok=True,
+                                node_id=checkpoint.id,
+                                theorems=self._checkpoint_theorems(checkpoint),
+                            )
+                        elif (
+                            checkpoint.status == "integrating"
+                            and checkpoint.candidate_commit
+                        ):
+                            theorems = self._checkpoint_theorems(checkpoint)
+                            if not theorems:
+                                result = SolveResult(
+                                    ok=False,
+                                    node_id=checkpoint.id,
+                                    feedback=(
+                                        "accepted checkpoint lacks durable reviewer metadata"
+                                    ),
+                                )
+                                results[key] = result
+                            else:
+                                self._submit_resumed_integration(checkpoint)
+                                results[key] = SolveResult(
+                                    ok=True,
+                                    node_id=checkpoint.id,
+                                    theorems=theorems,
+                                )
+                        else:
+                            futures[executor.submit(self._solve, checkpoint)] = key
                         progressed = True
                 if not futures:
                     if pending and not progressed:
@@ -677,17 +757,28 @@ class Runtime:
         whenever any result unlocks another node. Newly created descendants remain owned by
         the `_solve` call that created them, preventing duplicate scheduling.
         """
+        # Follow the durable graph edges, not every historical record whose ``parent``
+        # field happens to match.  This keeps obsolete pre-fix ``-a2`` duplicates out of
+        # the runnable frontier after their parent has been rewired to the accepted node.
         managed = {root.id}
-        changed = True
-        while changed:
-            changed = False
-            for node in list(self.store.nodes.values()):
-                if node.parent in managed and node.id not in managed:
-                    managed.add(node.id)
-                    changed = True
+        frontier = [root.id]
+        while frontier:
+            node = self.store.nodes[frontier.pop()]
+            for related in [*node.children, *node.depends_on]:
+                if related in self.store.nodes and related not in managed:
+                    managed.add(related)
+                    frontier.append(related)
         scheduled: set[str] = set()
         running: dict[Any, str] = {}
         workers = min(self.config.max_parallel_children, max(1, len(managed)))
+
+        if root.status == "integrating" and root.candidate_commit:
+            for node_id in sorted(managed - {root.id}):
+                node = self.store.nodes[node_id]
+                if node.status == "integrating" and node.candidate_commit:
+                    self._submit_resumed_integration(node)
+            self._wait_for_integrations()
+            return self._resume_accepted_candidate(root)
 
         def ready_nodes() -> list[NodeRecord]:
             ready: list[NodeRecord] = []
@@ -698,13 +789,17 @@ class Runtime:
                 if node.status == "proved":
                     scheduled.add(node_id)
                     continue
+                if node.status == "integrating" and node.candidate_commit:
+                    self._submit_resumed_integration(node)
+                    scheduled.add(node_id)
+                    continue
                 if any(
-                    self.store.nodes[dependency].status != "proved"
+                    not self._accepted_checkpoint(self.store.nodes[dependency])
                     for dependency in node.depends_on
                 ):
                     continue
                 if node.children and any(
-                    self.store.nodes[child].status != "proved"
+                    not self._accepted_checkpoint(self.store.nodes[child])
                     for child in node.children
                 ):
                     continue
@@ -801,10 +896,13 @@ class Runtime:
 
     def _checkpoint_theorems(self, node: NodeRecord) -> list[ProvedTheorem]:
         """Rehydrate enough accepted child metadata for resumed parent formalization."""
+        audit = self._latest_lean_audit(node)
+        if audit is not None:
+            return audit.theorems
         lean_file = (
             node.lean_files[0]
             if node.lean_files
-            else self.config.lean_target or "Submission.lean"
+            else getattr(self.config, "lean_target", "") or "Submission.lean"
         )
         statement = node.lean_statement or node.statement
         return [
@@ -818,6 +916,269 @@ class Runtime:
             )
             for name in node.theorems
         ]
+
+    @staticmethod
+    def _accepted_checkpoint(node: NodeRecord) -> bool:
+        """Whether a dependency has passed both isolated correctness gates."""
+        return node.status == "proved" or (
+            node.status == "integrating" and bool(node.candidate_commit)
+        )
+
+    def _latest_lean_audit(self, node: NodeRecord) -> LeanAudit | None:
+        """Load the durable reviewer approval that created an accepted checkpoint."""
+        candidates = sorted(
+            self._node_dir(node).glob("lean-audit-v*.json"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for candidate in candidates:
+            try:
+                audit = LeanAudit.model_validate_json(
+                    candidate.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                continue
+            if audit.passed:
+                return audit
+        return None
+
+    def _resume_accepted_candidate(self, node: NodeRecord) -> SolveResult:
+        """Resume only integration for a comparator/reviewer-approved checkpoint."""
+        theorems = self._checkpoint_theorems(node)
+        if not theorems:
+            return SolveResult(
+                ok=False,
+                node_id=node.id,
+                feedback="accepted checkpoint has no durable reviewer theorem record",
+            )
+        worktree = Path(node.worktree)
+        if not worktree.is_dir():
+            return SolveResult(
+                ok=False,
+                node_id=node.id,
+                feedback=f"accepted proof worktree is unavailable: {worktree}",
+            )
+        if not node.proof_base_commit or not node.candidate_commit:
+            return SolveResult(
+                ok=False,
+                node_id=node.id,
+                feedback="accepted checkpoint lacks its Git base or candidate commit",
+            )
+        return self._complete_accepted_integration(
+            node,
+            worktree,
+            node.proof_base_commit,
+            node.candidate_commit,
+            theorems,
+        )
+
+    def _submit_resumed_integration(self, node: NodeRecord) -> Any:
+        """Ensure one retained accepted checkpoint has one background promotion."""
+        theorems = self._checkpoint_theorems(node)
+        worktree = Path(node.worktree)
+        with self._integration_futures_lock:
+            existing = self._integration_futures.get(node.id)
+            if existing is not None:
+                return existing
+            future = self._integration_executor.submit(
+                self._complete_accepted_integration,
+                node,
+                worktree,
+                node.proof_base_commit,
+                node.candidate_commit,
+                theorems,
+            )
+            self._integration_futures[node.id] = future
+            return future
+
+    def _submit_accepted_integration(
+        self,
+        node: NodeRecord,
+        worktree: Path,
+        before: str,
+        after: str,
+        theorems: list[ProvedTheorem],
+        comparator_log: str,
+    ) -> Any:
+        """Promote an accepted non-root proof while its parent starts immediately."""
+        with self._integration_futures_lock:
+            existing = self._integration_futures.get(node.id)
+            if existing is not None:
+                return existing
+            future = self._integration_executor.submit(
+                self._complete_accepted_integration,
+                node,
+                worktree,
+                before,
+                after,
+                theorems,
+                comparator_log,
+            )
+            self._integration_futures[node.id] = future
+            return future
+
+    def _wait_for_integrations(self) -> None:
+        """Wait for every accepted descendant promotion before root acceptance."""
+        while True:
+            with self._integration_futures_lock:
+                futures = list(self._integration_futures.values())
+            unfinished = [future for future in futures if not future.done()]
+            if not unfinished:
+                for future in futures:
+                    future.result()
+                return
+            wait(tuple(unfinished), return_when=FIRST_COMPLETED)
+
+    def _complete_accepted_integration(
+        self,
+        node: NodeRecord,
+        worktree: Path,
+        before: str,
+        after: str,
+        theorems: list[ProvedTheorem],
+        comparator_log: str = "",
+    ) -> SolveResult:
+        """Finish only the integration gate, retaining all accepted proof artifacts."""
+        integrated, feedback = self._integrate_reviewed_candidate(
+            worktree,
+            before,
+            after,
+            node=node,
+            lean_files=node.lean_files,
+        )
+        if not integrated:  # pragma: no cover - integration retries until success
+            return SolveResult(ok=False, node_id=node.id, feedback=feedback)
+        integrated_head = self._git_head(self.project)
+        self.store.update(
+            node.id,
+            "integrating",
+            feedback,
+            candidate_commit=after,
+            integrated_commit=integrated_head,
+            theorems=[one.name for one in theorems],
+        )
+        self._publish_checkpoint(node, theorems, comparator_log=comparator_log)
+        self.store.update(
+            node.id,
+            "proved",
+            "retained comparator-approved proof; integration gate passed",
+            candidate_commit=after,
+            integrated_commit=integrated_head,
+            theorems=[one.name for one in theorems],
+        )
+        return SolveResult(ok=True, node_id=node.id, theorems=theorems)
+
+    def _publish_checkpoint(
+        self,
+        node: NodeRecord,
+        theorems: list[ProvedTheorem],
+        *,
+        comparator_log: str = "",
+    ) -> None:
+        """Publish an accepted theorem from durable artifacts without reproving it."""
+        plan_path = self._recorded_plan(node) or self._preserved_plan(node)
+        natural_path = self.project / node.natural_proof if node.natural_proof else None
+        try:
+            plan = (
+                plan_path.read_text(encoding="utf-8") if plan_path else "Unavailable."
+            )
+        except OSError:
+            plan = "Unavailable."
+        try:
+            natural = (
+                natural_path.read_text(encoding="utf-8")
+                if natural_path is not None
+                else "Unavailable."
+            )
+        except OSError:
+            natural = "Unavailable."
+        if not comparator_log:
+            logs = sorted(
+                self._node_dir(node).glob("comparator-v*.log"),
+                key=lambda path: path.stat().st_mtime_ns,
+                reverse=True,
+            )
+            if logs:
+                try:
+                    comparator_log = logs[0].read_text(encoding="utf-8")
+                except OSError:
+                    comparator_log = "Comparator passed; log could not be reloaded."
+        for theorem in theorems:
+            self.store.publish(
+                node,
+                theorem,
+                plan=plan,
+                natural=natural,
+                comparator_log=comparator_log or "Comparator passed.",
+            )
+
+    def _overlay_accepted_children(
+        self, node: NodeRecord, worktree: Path
+    ) -> tuple[bool, str]:
+        """Put accepted child commits into a parent's speculative proof worktree.
+
+        A child in ``integrating`` has already passed both isolated correctness gates.
+        Its immutable candidate history may therefore be used by the parent before the
+        serialized canonical-branch promotion finishes.  The parent's own comparator
+        and reviewer validate the combined history again.
+        """
+        commits: list[str] = []
+        seen: set[str] = set()
+        prerequisite_ids = list(dict.fromkeys([*node.children, *node.depends_on]))
+        current = self._git_head(worktree)
+        for child_id in prerequisite_ids:
+            child = self.store.nodes.get(child_id)
+            if child is None or not self._accepted_checkpoint(child):
+                continue
+            if not child.candidate_commit or not child.proof_base_commit:
+                continue
+            listed = subprocess.run(
+                [
+                    "git",
+                    "rev-list",
+                    "--reverse",
+                    f"{child.proof_base_commit}..{child.candidate_commit}",
+                ],
+                cwd=self.project,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if listed.returncode:
+                return (
+                    False,
+                    f"could not enumerate accepted child history for {child.id}",
+                )
+            for commit in listed.stdout.splitlines():
+                if not commit or commit in seen:
+                    continue
+                already_present = (
+                    subprocess.run(
+                        ["git", "merge-base", "--is-ancestor", commit, current],
+                        cwd=worktree,
+                        capture_output=True,
+                        check=False,
+                    ).returncode
+                    == 0
+                )
+                if not already_present:
+                    commits.append(commit)
+                    seen.add(commit)
+        if not commits:
+            return True, "all accepted child checkpoints already present"
+        if not self._git_clean(worktree):
+            return False, "parent worktree is dirty before accepted-child overlay"
+        applied, unioned, detail = self._apply_candidate_commits(worktree, commits)
+        if not applied:
+            return (
+                False,
+                (
+                    "could not overlay accepted child checkpoints without altering "
+                    f"them: {detail}"
+                ),
+            )
+        method = "Lean-unioned" if unioned else "cherry-picked"
+        return True, f"{method} {len(commits)} accepted child commit(s)"
 
     def _formalize(
         self,
@@ -850,6 +1211,13 @@ class Runtime:
         except RuntimeError as error:
             return SolveResult(ok=False, node_id=node.id, feedback=str(error))
         before = node.proof_base_commit or self._git_head(worktree)
+        overlaid, overlay_feedback = self._overlay_accepted_children(node, worktree)
+        if not overlaid:
+            return SolveResult(
+                ok=False,
+                node_id=node.id,
+                feedback=overlay_feedback,
+            )
         self.store.update(
             node.id,
             "rlcr-lean",
@@ -954,59 +1322,28 @@ class Runtime:
             "integrating",
             f"all isolated gates passed; integrating commit {after[:12]}",
             candidate_commit=after,
+            theorems=[one.name for one in audit.theorems],
         )
-        integrated, integration_feedback = self._integrate_candidate(
+        self._publish_checkpoint(node, audit.theorems, comparator_log=log)
+        if node.parent is not None:
+            self._submit_accepted_integration(
+                node,
+                worktree,
+                before,
+                after,
+                audit.theorems,
+                log,
+            )
+            return SolveResult(ok=True, node_id=node.id, theorems=audit.theorems)
+        self._wait_for_integrations()
+        return self._complete_accepted_integration(
+            node,
             worktree,
             before,
             after,
-            node=node,
-            lean_files=lean_files,
+            audit.theorems,
+            log,
         )
-        if not integrated:
-            self.store.update(
-                node.id,
-                "natural-proof",
-                "integration recheck failed; retain old proof branch and retry from "
-                f"latest NL proof: {integration_feedback}",
-                worktree="",
-                proof_branch="",
-                proof_base_commit="",
-                candidate_commit="",
-            )
-            return SolveResult(
-                ok=False,
-                node_id=node.id,
-                feedback=integration_feedback,
-            )
-        integrated_head = self._git_head(self.project)
-        self.store.update(
-            node.id,
-            "integrating",
-            integration_feedback,
-            candidate_commit=after,
-            integrated_commit=integrated_head,
-        )
-        plan = accepted_plan.read_text(encoding="utf-8")
-        pages: list[str] = []
-        for theorem in audit.theorems:
-            page = self.store.publish(
-                node,
-                theorem,
-                plan=plan,
-                natural=natural.proof,
-                comparator_log=log,
-            )
-            pages.append(str(page.relative_to(self.project)))
-        names = [one.name for one in audit.theorems]
-        self.store.update(
-            node.id,
-            "proved",
-            f"comparator + reviewer passed; wiki: {', '.join(pages)}",
-            theorems=names,
-            candidate_commit=after,
-            integrated_commit=integrated_head,
-        )
-        return SolveResult(ok=True, node_id=node.id, theorems=audit.theorems)
 
     def _revise_parent(self, child: NodeRecord, failure: str) -> None:
         """Route an incorrect child theorem into the parent's NL-proof loop."""
@@ -1335,6 +1672,47 @@ class Runtime:
             f"{slug(node.id)}-a{max(node.attempts, 1)}"
         )
 
+    def _integrate_reviewed_candidate(
+        self,
+        worktree: Path,
+        before: str,
+        after: str,
+        *,
+        node: NodeRecord,
+        lean_files: list[str],
+    ) -> tuple[bool, str]:
+        """Keep an accepted candidate in integration until its latest-base merge passes.
+
+        Returning a comparator- and reviewer-approved theorem to natural-language proof would
+        discard the wrong checkpoint: an integration failure concerns composition with a moving
+        sibling history, not the theorem's accepted mathematics.  Retry only this promotion gate,
+        retaining the candidate branch and all earlier approvals.
+        """
+        retry = 0
+        while True:
+            integrated, feedback = self._integrate_candidate(
+                worktree,
+                before,
+                after,
+                node=node,
+                lean_files=lean_files,
+            )
+            if integrated:
+                return True, feedback
+            retry += 1
+            self.store.update(
+                node.id,
+                "integrating",
+                (
+                    "accepted proof retained; integration-only retry "
+                    f"{retry} after: {feedback}"
+                ),
+                candidate_commit=after,
+            )
+            # Infrastructure or Git-lock failures may resolve without a source repair.  Keep the
+            # retry bounded enough to remain observable while avoiding a hot failure loop.
+            time.sleep(min(60.0, float(retry)))
+
     def _integrate_candidate(
         self,
         worktree: Path,
@@ -1430,23 +1808,42 @@ class Runtime:
                 applied, unioned, detail = self._apply_candidate_commits(
                     integration, commits
                 )
+                agent_repaired = False
                 if not applied:
-                    return False, detail
-                if node is not None:
-                    passed, log_path, _ = self._compare(
+                    repaired, detail = self._repair_integration(
+                        integration,
+                        canonical=canonical,
+                        commits=commits,
+                        node=node,
+                        lean_files=lean_files or [],
+                        failure=detail,
+                    )
+                    if not repaired:
+                        return False, detail
+                    agent_repaired = True
+                if node is not None and not agent_repaired:
+                    passed, log_path, log = self._compare(
                         node,
                         lean_files or [],
                         integration,
                         label="integration",
                     )
                     if not passed:
-                        return (
-                            False,
-                            (
+                        repaired, detail = self._repair_integration(
+                            integration,
+                            canonical=canonical,
+                            commits=commits,
+                            node=node,
+                            lean_files=lean_files or [],
+                            failure=(
                                 "combined parallel history failed its integration comparator; "
-                                f"see {log_path.relative_to(self.project)}"
+                                f"see {log_path.relative_to(self.project)}\n\n"
+                                f"{log[-12000:]}"
                             ),
                         )
+                        if not repaired:
+                            return False, detail
+                        agent_repaired = True
                 integration_head = self._git_head(integration)
                 merged = subprocess.run(
                     ["git", "merge", "--ff-only", integration_head],
@@ -1461,7 +1858,13 @@ class Runtime:
                         False,
                         f"could not fast-forward reconciled node history: {detail}",
                     )
-                method = "union-reconciled" if unioned else "rebased"
+                method = (
+                    "agent-reconciled"
+                    if agent_repaired
+                    else "union-reconciled"
+                    if unioned
+                    else "rebased"
+                )
                 return (
                     True,
                     f"{method} and integrated {len(commits)} reviewed commit(s)",
@@ -1478,6 +1881,119 @@ class Runtime:
                     temporary.rmdir()
                 except OSError:
                     pass
+
+    def _repair_integration(
+        self,
+        integration: Path,
+        *,
+        canonical: str,
+        commits: list[str],
+        node: NodeRecord | None,
+        lean_files: list[str],
+        failure: str,
+    ) -> tuple[bool, str]:
+        """Repair only composition of histories whose isolated proof gates passed.
+
+        The repair loop deliberately remains inside the serialized integration worktree.  It
+        never calls the mathematical planner, natural-language author, decomposition stage, or
+        node RLCR prover.  Every source repair receives a new machine comparator run and a fresh
+        independent reviewer comparator run before it can advance the canonical branch.
+        """
+        if node is None or self.agents is None:
+            return False, failure
+        feedback = failure
+        round_number = 0
+        while True:
+            round_number += 1
+            self.store.update(
+                node.id,
+                "integrating",
+                (
+                    "accepted proof retained; repairing combined history, round "
+                    f"{round_number}: {feedback.splitlines()[0]}"
+                ),
+            )
+            prompt = INTEGRATION_REPAIR.format(
+                node_id=node.id,
+                statement=node.statement,
+                lean_statement=node.lean_statement
+                or "Root declarations are fixed by Challenge.lean and the official comparator.",
+                candidate_commits="\n".join(f"- `{one}`" for one in commits),
+                failure=feedback[-16000:],
+                comparator_command=self._review_command(node, lean_files),
+                comparator_success=self.config.comparator_success,
+            )
+            try:
+                _WorkspaceAgent(self.agents.worker.clone(), integration)(
+                    prompt,
+                    suppress=True,
+                )
+            except Exception as error:  # noqa: BLE001
+                feedback = f"integration repair worker failed: {error}"
+                continue
+            if not self._git_clean(integration):
+                feedback = (
+                    "integration repair left uncommitted changes; preserve them, finish the "
+                    "repair, and commit a clean candidate"
+                )
+                continue
+            integration_head = self._git_head(integration)
+            combined_files = sorted(
+                set(lean_files)
+                | set(self._lean_files(canonical, integration_head, integration))
+            )
+            passed, log_path, log = self._compare(
+                node,
+                combined_files,
+                integration,
+                label=f"integration-repair-{round_number}",
+            )
+            if not passed:
+                feedback = (
+                    "repaired combined history still failed its comparator; see "
+                    f"{log_path.relative_to(self.project)}\n\n{log[-12000:]}"
+                )
+                continue
+            audit = _WorkspaceAgent(self.agents.reviewer.clone(), integration)(
+                INTEGRATION_AUDIT.format(
+                    node_id=node.id,
+                    statement=node.statement,
+                    lean_statement=node.lean_statement
+                    or (
+                        "Root declarations are fixed by Challenge.lean and the official "
+                        "comparator."
+                    ),
+                    lean_files="\n".join(f"- {one}" for one in combined_files),
+                    comparator_command=self._review_command(node, combined_files),
+                    comparator_success=self.config.comparator_success,
+                    comparator_log=log[-12000:],
+                ),
+                suppress=True,
+                schema=LeanAudit,
+            )
+            if audit is not None:
+                audit_version = self._next_json_version(node, "integration-lean-audit")
+                atomic_text(
+                    self._node_dir(node)
+                    / f"integration-lean-audit-v{audit_version}.json",
+                    audit.model_dump_json(indent=2) + "\n",
+                )
+            if audit is None or not audit.passed:
+                feedback = self._lean_feedback(audit)
+                continue
+            if not self._git_clean(integration):
+                feedback = "integration reviewer modified the reviewed worktree"
+                continue
+            if self._git_head(integration) != integration_head:
+                feedback = "integration reviewer changed the reviewed Git history"
+                continue
+            return (
+                True,
+                (
+                    "integration repair passed machine comparator and fresh reviewer "
+                    f"comparator in round {round_number}"
+                ),
+            )
 
     def _apply_candidate_commits(
         self, integration: Path, commits: list[str]

@@ -195,3 +195,53 @@ Required marker: {comparator_success}
 Independent machine-gate log from before your review:
 {comparator_log}
 """
+
+INTEGRATION_REPAIR = """Repair only the integration of already comparator- and reviewer-approved
+Lean histories. The mathematical plan, natural-language proof, frozen theorem statement, and
+isolated Lean candidate are accepted checkpoints: do not regenerate, revise, or weaken any of
+them. Work only in the current integration worktree.
+
+Node: {node_id}
+Exact mathematical statement: {statement}
+Frozen expected Lean type (children only): {lean_statement}
+Reviewed candidate commits that must remain represented:
+{candidate_commits}
+
+The latest canonical problem history and the reviewed candidate did not compose successfully:
+{failure}
+
+Inspect the current Git state and preserve every theorem and sound change from both histories.
+Resolve merge conflicts, module/import ordering, duplicate declarations, and combined-build
+incompatibilities without deleting an accepted theorem or changing a challenge declaration.
+Do not edit the plan, natural-language proof, challenge files, comparator, or anything under
+`.humanize/`. No `sorry`, `admit`, new axiom, unsafe loophole, weakened theorem, or prohibited
+import is allowed. Run this exact comparator until it exits zero and prints `{comparator_success}`:
+
+{comparator_command}
+
+Commit the integration-only repair with a descriptive conventional commit and leave the worktree
+clean. This is not a new proof attempt; retain and reconcile the accepted proof.
+"""
+
+INTEGRATION_AUDIT = """Independently review an integration-only repair of an already accepted Lean
+theorem. You did not write the repair. Inspect the complete diff from the latest canonical base,
+confirm that both accepted histories and the exact theorem remain present, and reject deletion,
+weakening, challenge changes, new axioms, `sorry`, `admit`, unsafe mechanisms, or prohibited
+imports. Do not edit files.
+
+Node: {node_id}
+Mathematical statement: {statement}
+Frozen expected Lean type (children only): {lean_statement}
+Changed Lean files:
+{lean_files}
+
+You must personally rerun this exact comparator command:
+{comparator_command}
+Required marker: {comparator_success}
+
+Machine comparator log for the repaired combined history:
+{comparator_log}
+
+Return the normal Lean audit schema. List the accepted node theorem in `theorems`; this audit is a
+fresh gate on the reconciliation, not a request to redo its mathematical or natural-language proof.
+"""

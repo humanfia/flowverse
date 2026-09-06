@@ -85,6 +85,45 @@ class WorktreeTests(unittest.TestCase):
         )
         self.assertIn("recursive_lean_prover", offered(FLOW.parent))
 
+    def test_proved_and_accepted_nodes_reject_regressive_transitions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = Store(root / "run", root / "wiki", "monotone fixture")
+            proved = store.ensure(
+                "root.proved-a1",
+                parent=None,
+                depth=0,
+                title="Proved",
+                statement="A proved theorem",
+            )
+            store.update(
+                proved.id,
+                "proved",
+                "accepted",
+                candidate_commit="proved-candidate",
+                theorems=["Submission.proved"],
+            )
+            store.update(proved.id, "natural-proof", "must be ignored")
+            self.assertEqual(proved.status, "proved")
+            self.assertEqual(proved.message, "accepted")
+
+            integrating = store.ensure(
+                "root.integrating-a1",
+                parent=None,
+                depth=0,
+                title="Integrating",
+                statement="An accepted theorem",
+            )
+            store.update(
+                integrating.id,
+                "integrating",
+                "accepted candidate",
+                candidate_commit="candidate",
+            )
+            store.update(integrating.id, "planning", "must be ignored")
+            self.assertEqual(integrating.status, "integrating")
+            self.assertEqual(integrating.message, "accepted candidate")
+
     def test_mermaid_arrows_point_from_dependent_to_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -239,6 +278,66 @@ class WorktreeTests(unittest.TestCase):
                 self.assertTrue(integrated, feedback)
                 self.assertTrue((project / "Leaf.lean").is_file())
                 self.assertTrue(runtime._git_clean(project))
+            finally:
+                os.chdir(original)
+
+    def test_accepted_candidate_retries_only_integration(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "integration_retry_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                )
+                runtime = Runtime(None, "integration retry fixture", config, {})
+                node = runtime.store.ensure(
+                    "root.accepted-a1",
+                    parent="root",
+                    depth=1,
+                    title="Accepted theorem",
+                    statement="True",
+                )
+                node.status = "integrating"
+                node.natural_proof = "accepted-natural-proof.md"
+                node.worktree = "/tmp/accepted-proof-worktree"
+                node.proof_branch = "humanize-recursive/accepted"
+                node.proof_base_commit = "base"
+                node.candidate_commit = "candidate"
+
+                with (
+                    patch.object(
+                        runtime,
+                        "_integrate_candidate",
+                        side_effect=[
+                            (False, "combined history failed"),
+                            (True, "agent-reconciled and integrated"),
+                        ],
+                    ) as integrate,
+                    patch("_recursive_lean.runtime.time.sleep") as pause,
+                ):
+                    accepted, feedback = runtime._integrate_reviewed_candidate(
+                        project,
+                        "base",
+                        "candidate",
+                        node=node,
+                        lean_files=["Submission.lean"],
+                    )
+
+                self.assertTrue(accepted)
+                self.assertEqual(feedback, "agent-reconciled and integrated")
+                self.assertEqual(integrate.call_count, 2)
+                pause.assert_called_once_with(1.0)
+                record = runtime.store.nodes[node.id]
+                self.assertEqual(record.status, "integrating")
+                self.assertIn("accepted proof retained", record.message)
+                self.assertEqual(record.natural_proof, "accepted-natural-proof.md")
+                self.assertEqual(record.worktree, "/tmp/accepted-proof-worktree")
+                self.assertEqual(record.proof_branch, "humanize-recursive/accepted")
+                self.assertEqual(record.proof_base_commit, "base")
+                self.assertEqual(record.candidate_commit, "candidate")
             finally:
                 os.chdir(original)
 
@@ -692,6 +791,228 @@ class WorktreeTests(unittest.TestCase):
 
                 self.assertTrue(all(result.ok for result in results))
                 self.assertLess(moments["start:after_fast"], moments["end:slow"])
+            finally:
+                os.chdir(original)
+
+    def test_redecomposition_reuses_proved_theorem_instead_of_creating_a2(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "reuse_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    max_nodes=10,
+                    max_parallel_children=4,
+                )
+                runtime = Runtime(None, "reuse fixture", config, {})
+                parent = runtime.store.ensure(
+                    "root",
+                    parent=None,
+                    depth=0,
+                    title="Root",
+                    statement="Root theorem",
+                )
+                child = runtime.store.ensure(
+                    "root.lemma-a1",
+                    parent="root",
+                    depth=1,
+                    title="Lemma",
+                    statement="Original statement",
+                    lean_statement="True",
+                    lean_name="stable_lemma",
+                )
+                child.status = "proved"
+                child.theorems = ["Submission.stable_lemma"]
+                decomposition = Decomposition(
+                    should_split=True,
+                    rationale="retry with the same theorem identity",
+                    subproblems=[
+                        Subproblem(
+                            key="renamed_key",
+                            title="Same lemma",
+                            statement="A revised prose description",
+                            lean_statement="True",
+                            lean_name="stable_lemma",
+                            depends_on=[],
+                        ),
+                        Subproblem(
+                            key="second",
+                            title="Second lemma",
+                            statement="A second independent theorem",
+                            lean_statement="True",
+                            lean_name="second_lemma",
+                            depends_on=[],
+                        ),
+                    ],
+                )
+
+                seen: list[str] = []
+
+                def solve(node: NodeRecord) -> SolveResult:
+                    seen.append(node.id)
+                    node.status = "proved"
+                    node.theorems = [f"Submission.{node.lean_name}"]
+                    return SolveResult(
+                        ok=True,
+                        node_id=node.id,
+                        theorems=runtime._checkpoint_theorems(node),
+                    )
+
+                runtime._solve = solve  # type: ignore[method-assign]
+                results = runtime._solve_children(parent, decomposition, 9)
+
+                self.assertTrue(all(result.ok for result in results))
+                self.assertNotIn("root.lemma-a1", seen)
+                self.assertIn("root.second-a1", seen)
+                self.assertEqual(parent.children, ["root.lemma-a1", "root.second-a1"])
+                self.assertFalse(
+                    any(node_id.endswith("-a2") for node_id in runtime.store.nodes)
+                )
+            finally:
+                os.chdir(original)
+
+    def test_integrating_child_unlocks_its_dependent_without_reproving(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "accepted_frontier_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    max_nodes=10,
+                    max_parallel_children=4,
+                )
+                runtime = Runtime(None, "accepted frontier fixture", config, {})
+                parent = runtime.store.ensure(
+                    "root",
+                    parent=None,
+                    depth=0,
+                    title="Root",
+                    statement="Root theorem",
+                )
+                accepted = runtime.store.ensure(
+                    "root.accepted-a1",
+                    parent="root",
+                    depth=1,
+                    title="Accepted child",
+                    statement="An accepted child theorem",
+                    lean_statement="True",
+                    lean_name="accepted_child",
+                )
+                accepted.status = "integrating"
+                accepted.candidate_commit = "candidate"
+                accepted.theorems = ["Submission.accepted_child"]
+                decomposition = Decomposition(
+                    should_split=True,
+                    rationale="one accepted prerequisite and its dependent",
+                    subproblems=[
+                        Subproblem(
+                            key="accepted",
+                            title="Accepted child",
+                            statement="An accepted child theorem",
+                            lean_statement="True",
+                            lean_name="accepted_child",
+                            depends_on=[],
+                        ),
+                        Subproblem(
+                            key="dependent",
+                            title="Dependent child",
+                            statement="A theorem using the accepted child",
+                            lean_statement="True",
+                            lean_name="dependent_child",
+                            depends_on=["accepted"],
+                        ),
+                    ],
+                )
+                started: list[str] = []
+
+                def solve(node: NodeRecord) -> SolveResult:
+                    started.append(node.id)
+                    node.status = "proved"
+                    node.theorems = [f"Submission.{node.lean_name}"]
+                    return SolveResult(
+                        ok=True,
+                        node_id=node.id,
+                        theorems=runtime._checkpoint_theorems(node),
+                    )
+
+                runtime._solve = solve  # type: ignore[method-assign]
+                with patch.object(runtime, "_submit_resumed_integration") as promote:
+                    results = runtime._solve_children(parent, decomposition, 5)
+
+                self.assertTrue(all(result.ok for result in results))
+                promote.assert_called_once_with(accepted)
+                self.assertEqual(started, ["root.dependent-a1"])
+            finally:
+                os.chdir(original)
+
+    def test_parent_worktree_overlays_accepted_child_candidate(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "accepted_overlay_problem"
+            project.mkdir()
+            git(project, "init", "-b", "main")
+            git(project, "config", "user.name", "Flow Test")
+            git(project, "config", "user.email", "flow-test@example.invalid")
+            (project / ".gitignore").write_text(".humanize/\n.lake/\n")
+            (project / "Submission.lean").write_text(
+                "namespace Submission\nend Submission\n"
+            )
+            git(project, "add", ".gitignore", "Submission.lean")
+            git(project, "commit", "-m", "test: initialize overlay fixture")
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    max_parallel_children=4,
+                )
+                runtime = Runtime(None, "accepted overlay fixture", config, {})
+                parent = runtime.store.ensure(
+                    "root",
+                    parent=None,
+                    depth=0,
+                    title="Root",
+                    statement="Root theorem",
+                )
+                child = runtime.store.ensure(
+                    "root.child-a1",
+                    parent="root",
+                    depth=1,
+                    title="Child",
+                    statement="Child theorem",
+                    lean_name="accepted_child",
+                )
+                child.attempts = 1
+                child_worktree = runtime._node_worktree(child)
+                child_base = child.proof_base_commit
+                (child_worktree / "Child.lean").write_text(
+                    "theorem accepted_child : True := by trivial\n"
+                )
+                git(child_worktree, "add", "Child.lean")
+                git(child_worktree, "commit", "-m", "feat: prove accepted child")
+                child.status = "integrating"
+                child.candidate_commit = runtime._git_head(child_worktree)
+                child.theorems = ["Submission.accepted_child"]
+                self.assertEqual(child.proof_base_commit, child_base)
+
+                parent.attempts = 1
+                parent_worktree = runtime._node_worktree(parent)
+                passed, feedback = runtime._overlay_accepted_children(
+                    parent, parent_worktree
+                )
+
+                self.assertTrue(passed, feedback)
+                self.assertTrue((parent_worktree / "Child.lean").is_file())
+                self.assertEqual(
+                    (parent_worktree / "Child.lean").read_text(),
+                    "theorem accepted_child : True := by trivial\n",
+                )
             finally:
                 os.chdir(original)
 

@@ -51,9 +51,14 @@ For Lean:
 - A reviewer must rerun the comparator independently before accepting a theorem.
 
 Generate one scaffold plan per node and never iterate it. When a natural-proof reviewer,
-decomposition reviewer, comparator, or Lean reviewer rejects work, preserve the latest prose
-draft and revise only that natural-language proof before trying another Lean proof. Publish every
-accepted theorem, including leaf lemmas, to the wiki.
+decomposition reviewer, isolated comparator, or Lean reviewer rejects the theorem, preserve the
+latest prose draft and revise only that natural-language proof before trying another Lean proof.
+Once the isolated comparator and the independent reviewer comparator both pass, freeze those
+approvals: a later integration failure must remain in an integration-only repair loop and must
+never restart the NL proof or revise the parent. This invariant applies at every recursion depth.
+Re-decomposition must reuse an accepted theorem by its Lean name; never create an `-a2` copy or
+run planning, prose, or Lean proving for it again. Publish every accepted theorem, including leaf
+lemmas, to the wiki.
 
 The nested RLCR implementation stage ends after it has produced a warning-clean, committed
 candidate and its author comparator run passes. It must then return control immediately. The
@@ -70,11 +75,16 @@ worktree, and invoke nested RLCR in a separate process whose real working direct
 worktree, so Humanize state, source edits, and comparator scratch files are isolated. Serialize
 integration of fully comparator- and reviewer-approved histories into the problem branch. When
 parallel histories touch the same Lean file, preserve both in an integration worktree and rerun
-the comparator before advancing the problem branch. Nodes with unproved dependencies remain
-queued until prerequisite commits are integrated. In the live Mermaid graph every edge is solid
-and every arrow `A --> B` means A depends on B. Parent theorems therefore point to their
-decomposition children, and nodes point to their explicit prerequisites; a decomposition leaf may
-still be dependency-blocked.
+the comparator before advancing the problem branch. If the combined history fails, use a Codex
+worker to repair only the reconciliation, then require both a machine comparator and a fresh
+Codex reviewer comparator. Keep the node `integrating` throughout and retain its accepted branch,
+plan, NL proof, comparator, and reviewer checkpoints. An `integrating` node has passed both
+isolated gates and therefore unlocks its dependants immediately. Overlay its exact accepted commit
+history into each dependant's worktree, let parent proving and serialized integration overlap,
+and require the root to await every descendant integration before final acceptance. In the live
+Mermaid graph every edge is solid and every arrow `A --> B` means A depends on B. Parent theorems
+therefore point to their decomposition children, and nodes point to their explicit prerequisites;
+a decomposition leaf may still be dependency-blocked.
 
 Persist every natural-language draft and its exact review feedback. If proof review fails or the
 run resumes, revise the latest preserved draft—retaining its sound steps—instead of starting the

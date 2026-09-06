@@ -37,9 +37,12 @@ and its official RLCR invocation runs in a separate process whose real working d
 worktree. Source edits, Humanize state, and comparator scratch files therefore cannot collide.
 Only integration of fully reviewed histories is serialized. If parallel histories edited the
 same Lean file, the controller preserves both changes in an integration worktree and requires
-another comparator pass before advancing the problem branch. Deep repository paths are mapped to
-a stable short checkout path under `/tmp/humanize-lean-worktrees`; the named Git branch retains the
-durable proof history even if that disposable checkout is later removed.
+another comparator pass before advancing the problem branch. If that combined check fails, an
+integration-only Codex repair loop preserves the accepted candidate, reconciles the histories,
+and must pass both a machine comparator and a fresh reviewer comparator. It never returns the node
+to planning, natural-language proof, decomposition, or theorem proving. Deep repository paths are
+mapped to a stable short checkout path under `/tmp/humanize-lean-worktrees`; the named Git branch
+retains the durable proof history even if that disposable checkout is later removed.
 
 ## How the flow works
 
@@ -55,19 +58,25 @@ durable proof history even if that disposable checkout is later removed.
 4. **Decide whether to split.** After the prose proof passes, a decomposition audit checks each
    proposed child theorem, its exact Lean statement and name, and the acyclic dependency list. A
    child repeats the same lifecycle, so recursive workers also produce prose before Lean.
-5. **Launch the ready frontier.** Every node whose explicit prerequisites and required children are
-   proved is launched, up to `max_parallel_children`. Independent leaves from the same problem run
-   together. In the diagram, `A --> B` always means that A depends on B.
+5. **Launch the ready frontier.** Every node whose explicit prerequisites and required children
+   have passed both isolated comparator gates is launched, up to `max_parallel_children`.
+   Independent leaves from the same problem run together. A parent may therefore start while an
+   accepted child is still `integrating`; the accepted child commits are overlaid into the
+   parent's isolated worktree. In the diagram, `A --> B` always means that A depends on B.
 6. **Formalize in isolation.** Each ready Lean node gets a named Git branch and a short independent
    worktree. The official `humanize1:rlcr` worker/reviewer loop builds the Lean proof without sharing
    source files or build scratch state with sibling workers.
 7. **Apply the acceptance gates.** The controller runs the project comparator, then a fresh Codex
-   reviewer inspects the exact candidate and reruns that comparator itself. Accepted commits are
-   integrated into the problem branch. If concurrent proofs touched the same file, a separate
-   integration worktree preserves both histories and the comparator checks the combined result.
+   reviewer inspects the exact candidate and reruns that comparator itself. That creates an
+   immutable accepted checkpoint and immediately unlocks dependants while canonical integration
+   continues in the background. If concurrent proofs touched the same file, a separate integration
+   worktree preserves both histories and the comparator checks the combined result.
 8. **Publish or revise.** Every accepted theorem is written to the wiki immediately and unlocks its
-   dependants. A mathematical, Lean, comparator, or integration rejection is fed back into the
-   latest natural-language proof at the appropriate upper level; it does not create another plan.
+   dependants. A mathematical, isolated Lean, comparator, or Lean-review rejection is fed back into
+   the latest natural-language proof at the appropriate upper level; it does not create another
+   plan. A failure caused only by combining already accepted histories stays in `integrating` and
+   enters a dedicated Codex repair plus machine/reviewer-comparator loop. It never invalidates or
+   restarts the accepted NL proof and never sends false theorem-failure feedback to the parent.
 
 ## Requirements
 
@@ -87,17 +96,19 @@ different comparator target for each generated lemma should use these values in 
 
 ## Install
 
-Fetch or refresh the official flowverse, then check the flow:
+Install the flow directly into the user-flow directory:
 
 ```sh
-hmz flowverses fetch official
-hmz check official/recursive_lean_prover
+git clone git@github.com:humanfia/math-lean-flow.git \
+  ~/.humanize/flows/recursive_lean_prover
+hmz check user/recursive_lean_prover
 ```
 
-Before this branch is merged, run it directly from a flowverse checkout:
+For an existing clone, update the installed flow with:
 
 ```sh
-hmz check ./flows/recursive_lean_prover
+git -C ~/.humanize/flows/recursive_lean_prover pull --ff-only
+hmz check user/recursive_lean_prover
 ```
 
 ## Run
@@ -126,11 +137,8 @@ before the real evaluator succeeds.
 Copy and edit the example config, especially `lean_target` and `comparator_command`:
 
 ```sh
-cp ~/.humanize/flowverses/official/flows/recursive_lean_prover/config.example.yaml \
-  ./recursive-proof.yaml
+cp ~/.humanize/flows/recursive_lean_prover/config.example.yaml ./recursive-proof.yaml
 ```
-
-If `HUMANIZE_HOME` is customized, `hmz flowverses show official` prints the checkout location.
 
 The settings most often changed are:
 
@@ -146,7 +154,7 @@ The settings most often changed are:
 Then run both worker and reviewer on Codex:
 
 ```sh
-hmz exec -f official/recursive_lean_prover -c recursive-proof.yaml \
+hmz exec -f user/recursive_lean_prover -c recursive-proof.yaml \
   -a cli=codex,model=gpt-5.6-sol,effort=max,permission=auto,web_search=on \
   -a cli=codex,model=gpt-5.6-sol,effort=max,permission=auto,web_search=on \
   "$(cat PROBLEM.md)"
@@ -196,23 +204,30 @@ blocking prerequisite.
 - The controller runs the comparator with a default six-hour timeout. Only after that passes does
   a fresh Lean reviewer inspect the exact candidate and personally rerun the same comparator.
 - If independently accepted histories must be combined, integration runs the comparator again on
-  the merged candidate before advancing the problem branch.
-- A decomposed parent is rechecked after its children are integrated; the root must still pass the
-  repository's final comparator contract.
-- Any mathematical rejection returns to the latest natural-language proof. Only a full outer
-  comparator/reviewer pass marks the node `proved` and publishes it.
+  the merged candidate before advancing the problem branch. A failed combined check retains the
+  accepted proof and runs integration-only repair followed by another machine comparator and a
+  fresh reviewer comparator; it does not restart the theorem or NL proof.
+- A decomposed parent may start from comparator-approved child candidates while they integrate;
+  its isolated worktree overlays those exact commits and rechecks the combination. The root cannot
+  become `proved` until all descendant integration gates and its own final comparator contract pass.
+- Any mathematical rejection returns to the latest natural-language proof. The full outer
+  comparator/reviewer pass freezes the candidate, marks it `integrating`, publishes it, and
+  unlocks dependants. Only the subsequent canonical integration gate marks the node `proved`.
 
 ## DAG scheduling
 
-On resume, the scheduler scans the complete persisted DAG. Every node whose dependencies are
-already proved enters the global frontier together, up to `max_parallel_children`. Completing a
-node immediately unlocks and launches newly ready dependants. Planning, natural-language proof,
-decomposition, Lean implementation, and both comparator passes can run concurrently. Each node's
-Git worktree retains its proof history and exact reviewed candidate commit. The controller briefly
-serializes integration of accepted commits into the problem branch. Same-file reconciliations are
-performed in a separate integration worktree and comparator-checked before the branch advances.
-Dependency-blocked nodes remain queued until their prerequisite theorem commits have been
-integrated.
+On resume, the scheduler scans the complete persisted DAG. Every node whose dependencies have
+passed both isolated comparator gates enters the global frontier together, up to
+`max_parallel_children`. Accepted `integrating` nodes unlock dependants immediately; their exact
+candidate commits are overlaid into the dependant's isolated worktree. Planning, natural-language
+proof, decomposition, Lean implementation, comparator passes, parent proving, and serialized
+integration can therefore overlap. Same-file reconciliations are performed in a separate
+integration worktree and comparator-checked before the canonical branch advances. Any
+reconciliation failure remains in an integration-only repair loop; the accepted node branch,
+scaffold, NL proof, comparator result, reviewer result, theorem identity, and wiki page remain
+immutable checkpoints. Re-decomposition reuses an existing accepted Lean theorem by name at any
+depth instead of creating an `-a2` copy or proving it again. The root still waits for every
+descendant integration future before final acceptance.
 
 ## Safety and stopping
 

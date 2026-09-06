@@ -103,6 +103,26 @@ class Store:
         """Persist one status transition and immediately redraw the live DAG."""
         with self._lock:
             record = self.nodes[node_id]
+            # Comparator + independent reviewer approval is a permanent checkpoint.
+            # A later integration conflict is about composing Git histories; it must
+            # never send accepted mathematics back through planning, prose, splitting,
+            # or Lean proving.  Keep this invariant here at the persistence boundary so
+            # stale supervisors cannot accidentally erase it.
+            if record.status == "proved" and status != "proved":
+                print(
+                    f"[DAG] {node_id}: proved — ignored regressive transition to {status}"
+                )
+                return
+            if (
+                record.status == "integrating"
+                and record.candidate_commit
+                and status not in {"integrating", "proved"}
+            ):
+                print(
+                    f"[DAG] {node_id}: integrating — retained accepted candidate; "
+                    f"ignored regressive transition to {status}"
+                )
+                return
             record.status = status
             record.message = message
             record.updated_at = now()
@@ -140,7 +160,16 @@ class Store:
             # explicit prerequisite in ``depends_on``.
             edges: set[tuple[str, str]] = set()
             for record in ordered:
-                if record.parent:
+                edges.update(
+                    (record.id, child)
+                    for child in record.children
+                    if child in self.nodes
+                )
+                if (
+                    record.parent
+                    and record.parent in self.nodes
+                    and record.id not in self.nodes[record.parent].children
+                ):
                     edges.add((record.parent, record.id))
                 edges.update(
                     (record.id, dependency)
