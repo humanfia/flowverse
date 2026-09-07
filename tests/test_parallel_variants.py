@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _parallel_flame_chase.core.api import GitPRAgents
 from hmz.flows import configures, drives, offered, resumes
 from hmz.flows.skills import brought
 
@@ -14,7 +13,15 @@ def test_only_canonical_git_pr_lite_is_offered() -> None:
 
     assert "parallel_flame_chase" in names
     assert "parallel_flame_chase_git_pr" in names
-    assert drives(git_pr) == GitPRAgents._fields
+    assert drives(git_pr) == (
+        "orchestrateor",
+        "lane_1_actor_a",
+        "lane_1_actor_b",
+        "lane_2_actor_a",
+        "lane_2_actor_b",
+        "lane_3_actor_a",
+        "lane_3_actor_b",
+    )
     assert resumes(git_pr)
     assert [skill.name for skill in brought(git_pr.parent)] == [
         "parallel-flame-chase-git-pr"
@@ -25,6 +32,9 @@ def test_only_canonical_git_pr_lite_is_offered() -> None:
     assert set(config.model_fields) == {
         "rest_seconds",
         "resume_mode",
+        "confirm_large_workspace_copies",
+        "workspace_file_warning_threshold",
+        "workspace_copy_warning_threshold_bytes",
         "git_pr_enabled",
         "global_knowledge_enabled",
         "experiment_memory_enabled",
@@ -34,6 +44,9 @@ def test_only_canonical_git_pr_lite_is_offered() -> None:
     assert config().model_dump() == {
         "rest_seconds": 1.0,
         "resume_mode": "auto",
+        "confirm_large_workspace_copies": False,
+        "workspace_file_warning_threshold": 5_000,
+        "workspace_copy_warning_threshold_bytes": 1024**3,
         "git_pr_enabled": True,
         "global_knowledge_enabled": False,
         "experiment_memory_enabled": False,

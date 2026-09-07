@@ -16,6 +16,7 @@ from _parallel_flame_chase.core.models import (
     MissionSpec,
 )
 from _parallel_flame_chase.orchestration import state as runtime_state
+from hmz.flows import Stopped
 from parallel_flame_chase_git_pr import Config
 from parallel_flame_chase_git_pr.repository import (
     GitRunPaths,
@@ -381,8 +382,21 @@ class FakeAgent:
         return FakeSession(self, Path(cwd or ".").resolve())
 
 
-def agents() -> GitPRAgents:
-    return GitPRAgents(*(FakeAgent() for _ in range(7)))  # type: ignore[arg-type]
+class FakeHuman:
+    def __init__(self, answer: str | None = None) -> None:
+        self.answer = answer
+        self.questions: list[Any] = []
+
+    def asked(self, question: Any) -> str | None:
+        self.questions.append(question)
+        return self.answer
+
+
+def agents(*, human_answer: str | None = None) -> GitPRAgents:
+    return GitPRAgents(
+        *(FakeAgent() for _ in range(7)),
+        human=FakeHuman(human_answer),  # type: ignore[arg-type]
+    )
 
 
 def test_git_pr_agent_topology_has_no_reviewer_slot() -> None:
@@ -394,6 +408,7 @@ def test_git_pr_agent_topology_has_no_reviewer_slot() -> None:
         "lane_2_actor_b",
         "lane_3_actor_a",
         "lane_3_actor_b",
+        "human",
     )
 
 
@@ -414,6 +429,38 @@ def test_canonical_git_pr_lite_configuration_is_git_only() -> None:
     for field, value in forbidden_overrides.items():
         with pytest.raises(ValueError):
             Config.model_validate({field: value})
+
+
+def test_git_pr_large_workspace_confirmation_accounts_for_all_working_trees(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(3):
+        (source / f"file-{index}.txt").write_text("data", encoding="utf-8")
+    runtime_home = tmp_path / "humanize-home"
+    monkeypatch.chdir(source)
+    monkeypatch.setattr(runtime_state, "home", lambda: runtime_home)
+    chosen = agents(human_answer="Stop")
+    runtime = GitPRRuntime(
+        chosen,
+        "Improve the implementation.",
+        Config(
+            confirm_large_workspace_copies=True,
+            workspace_file_warning_threshold=2,
+        ),
+        {},
+    )
+    try:
+        with pytest.raises(Stopped, match="large workspace startup"):
+            runtime.prepare()
+    finally:
+        runtime.executor.shutdown(wait=False, cancel_futures=True)
+
+    output = capsys.readouterr().out
+    assert "5 Git working trees" in output
+    assert chosen.human.questions  # type: ignore[attr-defined]
+    assert not runtime_home.exists()
 
 
 @pytest.mark.parametrize(

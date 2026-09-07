@@ -25,8 +25,10 @@ from _parallel_flame_chase.persistence.leaderboard import (
 from _parallel_flame_chase.persistence.workspace import (
     RunPaths,
     SourceLock,
+    WorkspaceStats,
     artifacts_still_match,
     initialize_paths,
+    inspect_workspace_stats,
     validate_deliverable,
     validate_runtime_layout,
 )
@@ -75,6 +77,23 @@ def test_agent_output_schemas_require_every_object_property() -> None:
 
     for output in (InitialPlan, LaneReport):
         inspect(output.model_json_schema(), output.__name__)
+
+
+def test_workspace_inspection_counts_regular_files_and_apparent_bytes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    (source / "one.txt").write_text("one", encoding="utf-8")
+    (nested / "two.txt").write_text("two", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    (source / "link.txt").symlink_to(outside)
+
+    inspected = inspect_workspace_stats(source)
+
+    assert inspected == WorkspaceStats(regular_files=2, total_bytes=6)
 
 
 def candidate_report(

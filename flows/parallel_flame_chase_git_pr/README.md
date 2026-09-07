@@ -20,7 +20,8 @@ experiment variants.
 The seven ordered agents are `orchestrateor`, followed by A/B partners for lanes 1, 2, and 3. The
 orchestrateor plans once; each lane runs one actor at a time and alternates its A/B partners across
 fresh turns, so the six lane actors represent three concurrent research lanes. There is no
-reviewer agent slot. With Git enabled, every lane owns one clone and has equal PR rights. The
+reviewer agent slot. The person at the prompt is injected automatically and does not require an
+eighth `-a`. With Git enabled, every lane owns one clone and has equal PR rights. The
 runtime owns a bare central repository and a separate integration clone. A lane may keep many
 drafts but only one ready/reviewing PR. Ready heads are frozen, while a newer queued candidate from
 the same lane supersedes its older one. The runtime validates the exact official evaluator command
@@ -53,3 +54,9 @@ hmz exec -f ./flows/parallel_flame_chase_git_pr \
 Runs are resumable. Runtime state retains the central refs, receipts, artifacts, report archives,
 and official ledger. The original source is assumed not to change outside the flow while it holds
 the source lock.
+
+Before creating a fresh shadow repository, the source is measured. More than
+`workspace_file_warning_threshold` regular files, or a projected materialization size above
+`workspace_copy_warning_threshold_bytes`, prints a warning covering the planning tree, three lane
+trees, integration tree, and Git object storage. The default continues without asking; set
+`confirm_large_workspace_copies: true` to require approval before any of those copies are made.

@@ -219,6 +219,19 @@ class GitPRRuntime(ReportShareRuntime):
             directory / "pre_receive.py",
         )
 
+    def _workspace_copy_plan(self, *, resume: bool, revised: bool) -> tuple[int, str]:
+        """Account for the Git planning, lane, and integration working trees."""
+        if not resume and bool(getattr(self.config, "git_pr_enabled", True)):
+            copies = len(self.lane_names) + 2
+            return (
+                copies,
+                (
+                    f"{copies} Git working trees (planning, each lane, and integration) "
+                    "plus Git object storage"
+                ),
+            )
+        return super()._workspace_copy_plan(resume=resume, revised=revised)
+
     def _create_run(self, objective: str) -> None:
         if not bool(getattr(self.config, "git_pr_enabled", True)):
             super()._create_run(objective)

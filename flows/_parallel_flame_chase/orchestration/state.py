@@ -10,8 +10,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
 
-from hmz.flows import Stopped, home
+from hmz.flows import Question, Stopped, home
 
+from ..core.api import (
+    DEFAULT_WORKSPACE_COPY_WARNING_THRESHOLD_BYTES,
+    DEFAULT_WORKSPACE_FILE_WARNING_THRESHOLD,
+)
 from ..core.models import LANES, InitialPlan, LaneName
 from ..core.utils import (
     atomic_json,
@@ -29,8 +33,9 @@ from ..persistence.leaderboard import empty_leaderboard, validate_leaderboard
 from ..persistence.workspace import (
     RunPaths,
     SourceLock,
+    WorkspaceStats,
     initialize_paths,
-    inspect_workspace,
+    inspect_workspace_stats,
     snapshot,
     validate_runtime_layout,
 )
@@ -46,6 +51,31 @@ CONTINUATION_MARKERS = {
     "继续",
     "继续。",
 }
+_CONFIRMATION_OPTIONS = ("Start anyway", "Stop")
+_ACCEPTED_CONFIRMATIONS = frozenset(
+    {"a", "1", "y", "yes", "是", "继续", "start anyway", "proceed"}
+)
+
+
+class WorkspaceStartupCancelled(Stopped):
+    """A large-workspace confirmation ended startup before new copies were made."""
+
+
+def _confirmed(answer: str | None) -> bool:
+    """Return whether the person selected the option to continue startup."""
+    if not isinstance(answer, str):
+        return False
+    normalized = answer.strip().casefold()
+    if normalized in _ACCEPTED_CONFIRMATIONS:
+        return True
+    return normalized.startswith("a. start anyway")
+
+
+def _positive_int(value: object, fallback: int) -> int:
+    """Return a validated runtime integer when tests or older callers bypass config."""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        return fallback
+    return value
 
 
 class RuntimeState:
@@ -85,6 +115,7 @@ class RuntimeState:
         self.paths: RunPaths
         self.bus: ReportBus
         self.lanes: dict[LaneName, LaneRuntime] = {}
+        self._workspace_stats: WorkspaceStats | None = None
         self.executor = ThreadPoolExecutor(
             max_workers=self.executor_workers,
             thread_name_prefix="parallel-flame",
@@ -358,7 +389,78 @@ class RuntimeState:
         self.control = self._new_control(objective)
         self.paths = RunPaths(Path(cast("str", self.control["run_root"])), self.source)
         self.paths.root.mkdir(parents=True, exist_ok=False)
-        initialize_paths(self.paths, make_snapshots=True, lanes=self.lane_names)
+        initialize_paths(
+            self.paths,
+            make_snapshots=True,
+            lanes=self.lane_names,
+            source_size=self._workspace_statistics().total_bytes,
+        )
+
+    def _workspace_copy_plan(self, *, resume: bool, revised: bool) -> tuple[int, str]:
+        """Describe source-sized workspace materializations needed by this start."""
+        if not resume:
+            private_lanes = tuple(lane for lane in self.lane_names if lane != "lane-1")
+            copies = 1 + len(private_lanes)
+            destinations = ", ".join(("planning", *private_lanes))
+            return copies, f"{copies} workspace snapshots ({destinations})"
+        if revised and self.replan_on_objective_revision:
+            return 1, "1 revised-objective planning snapshot"
+        return 0, ""
+
+    def _workspace_statistics(self) -> WorkspaceStats:
+        """Inspect the source once and reuse the result during this startup."""
+        if self._workspace_stats is None:
+            self._workspace_stats = inspect_workspace_stats(self.source)
+        return self._workspace_stats
+
+    def _confirm_workspace_copies(self, *, copies: int, description: str) -> None:
+        """Warn for a large copy plan and optionally require a person's confirmation."""
+        if copies < 1:
+            return
+        stats = self._workspace_statistics()
+        file_threshold = _positive_int(
+            getattr(self.config, "workspace_file_warning_threshold", None),
+            DEFAULT_WORKSPACE_FILE_WARNING_THRESHOLD,
+        )
+        byte_threshold = _positive_int(
+            getattr(self.config, "workspace_copy_warning_threshold_bytes", None),
+            DEFAULT_WORKSPACE_COPY_WARNING_THRESHOLD_BYTES,
+        )
+        estimated_bytes = stats.total_bytes * copies
+        if stats.regular_files <= file_threshold and estimated_bytes <= byte_threshold:
+            return
+        warning = (
+            f"WARNING: source workspace {self.source} contains "
+            f"{stats.regular_files:,} regular files and {stats.total_bytes:,} apparent bytes.\n"
+            f"Starting Parallel Flame Chase will create {description}; the rough source-sized "
+            f"materialization estimate is {estimated_bytes:,} bytes before filesystem or Git "
+            "optimizations.\n"
+            f"Warning thresholds: {file_threshold:,} files or {byte_threshold:,} estimated "
+            "bytes. No new workspace copy has been created yet."
+        )
+        print(warning)
+        if getattr(self.config, "confirm_large_workspace_copies", False) is not True:
+            print("Interactive confirmation is disabled; continuing startup.")
+            return
+        human = getattr(self.agents, "human", None)
+        asked = cast(
+            "Callable[[Question], str | None] | None",
+            getattr(human, "asked", None),
+        )
+        if not callable(asked):
+            print("No interactive confirmation is available; startup cancelled.")
+            raise WorkspaceStartupCancelled(
+                "large workspace startup requires confirmation"
+            )
+        answer = asked(
+            Question(
+                text=f"{warning}\n\nStart anyway and create these workspace copies?",
+                options=_CONFIRMATION_OPTIONS,
+            )
+        )
+        if not _confirmed(answer):
+            print("Parallel Flame Chase startup cancelled; no new copies were created.")
+            raise WorkspaceStartupCancelled("large workspace startup cancelled")
 
     def _open_run(self, objective: str, resume: bool) -> None:
         if resume:
@@ -377,7 +479,7 @@ class RuntimeState:
             self.paths.shared / "planning-revisions" / task_fingerprint(objective)[:16]
         )
         if not workspace.exists():
-            snapshot(self.source, workspace, inspect_workspace(self.source))
+            snapshot(self.source, workspace, self._workspace_statistics().total_bytes)
         return workspace
 
     def _prepare_plan(self, objective: str, *, resume: bool, revised: bool) -> None:
@@ -439,6 +541,8 @@ class RuntimeState:
     def prepare(self) -> SourceLock:
         """Resolve, open, plan, and attach one resumable parallel run."""
         objective, resume, revised = self._resolve_objective()
+        copies, description = self._workspace_copy_plan(resume=resume, revised=revised)
+        self._confirm_workspace_copies(copies=copies, description=description)
         self._open_run(objective, resume)
         self._prepare_plan(objective, resume=resume, revised=revised)
         self._prepare_mode(objective, revised=revised)

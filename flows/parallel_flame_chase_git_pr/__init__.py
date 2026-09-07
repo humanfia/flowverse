@@ -1,4 +1,4 @@
-"""The fixed Git-PR-only Parallel Flame Chase Lite workflow."""
+"""Git-PR-only Parallel Flame Chase Lite with optional large-copy confirmation."""
 
 from __future__ import annotations
 

@@ -1,5 +1,8 @@
 rest_seconds: 1.0
 resume_mode: auto
+confirm_large_workspace_copies: false
+workspace_file_warning_threshold: 5000
+workspace_copy_warning_threshold_bytes: 1073741824
 git_pr_enabled: true
 global_knowledge_enabled: false
 experiment_memory_enabled: false
