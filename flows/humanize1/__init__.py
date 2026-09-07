@@ -418,6 +418,13 @@ class Rlcr(BaseModel):
     base_branch: str = Field(
         default="", description="--base-branch: what the code review reads against"
     )
+    skip_code_review: bool = Field(
+        default=False,
+        description=(
+            "--skip-code-review: finish after implementation RLCR; do not start the "
+            "final repository-wide code-review phase"
+        ),
+    )
     track_plan_file: bool = Field(
         default=False,
         description="--track-plan-file: the plan is in git and stays clean",
@@ -549,6 +556,17 @@ def _base(root: Path, asked: str) -> str:
         ]:
             return named
     return ""
+
+
+def _review_base(root: Path, config: Rlcr) -> str:
+    """Resolve the final code-review base, including an explicit opt-out.
+
+    A blank ``base_branch`` asks :func:`_base` to auto-detect a branch; it is
+    therefore not a way to disable review.  Keep that established default while
+    giving composed flows a setup-time switch for cases where a narrower,
+    authoritative review gate runs after RLCR.
+    """
+    return "" if config.skip_code_review else _base(root, config.base_branch)
 
 
 def _section(held: str, *headings: str) -> str:
@@ -1573,7 +1591,7 @@ def _fresh(
         shutil.copyfile(plan, where / "plan.md")
         named = _named(root, plan)
 
-    base = _base(root, config.base_branch)
+    base = _review_base(root, config)
     commit = git("rev-parse", base, at=root)[1] if base else ""
     state = State(
         current_round=0,

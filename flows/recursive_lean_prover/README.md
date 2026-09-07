@@ -206,8 +206,9 @@ blocking prerequisite.
   dependency edge after the prose proof passes.
 - The official RLCR implementation loop reviews every Lean worker round against the current audited
   DAG node, frozen type, accepted dependency list, and author comparator. Once that implementation
-  reviewer accepts the candidate, RLCR returns control immediately. The bridge deliberately leaves
-  RLCR's optional generic code-review base blank: enabling that second repository-wide review would
+  reviewer accepts the candidate, RLCR returns control immediately. The bridge explicitly sets
+  Humanize's setup-only `skip_code_review` switch; merely leaving the base blank is insufficient
+  because Humanize normally auto-detects `main`. Enabling that second repository-wide review would
   duplicate the controller review, would not enforce the exact comparator, and could reopen accepted
   child histories. The exact post-overlay base remains recorded in the node configuration for audit.
 - The controller runs the comparator with a default six-hour timeout. Only after that passes does

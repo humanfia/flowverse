@@ -84,6 +84,7 @@ class WorktreeTests(unittest.TestCase):
 
         self.assertEqual(config.base_branch, "frozen-post-overlay-base")
         self.assertEqual(forwarded["base_branch"], "")
+        self.assertTrue(forwarded["skip_code_review"])
         self.assertFalse(forwarded["skip_impl"])
 
     def test_public_recursive_lean_flow_contract(self) -> None:
