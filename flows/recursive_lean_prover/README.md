@@ -68,7 +68,9 @@ offline-reproducible and prevents Lake from trying to update shared read-only Gi
    parent's isolated worktree. In the diagram, `A --> B` always means that A depends on B.
 6. **Formalize in isolation.** Each ready Lean node gets a named Git branch and a short independent
    worktree. The official `humanize1:rlcr` worker/reviewer loop builds the Lean proof without sharing
-   source files or build scratch state with sibling workers.
+   source files or build scratch state with sibling workers. Its implementation reviewer checks the
+   worker against the selected node contract and author comparator, then returns control; it does not
+   start a second repository-wide code-review phase.
 7. **Apply the acceptance gates.** The controller runs the project comparator, then a fresh Codex
    reviewer inspects the exact candidate and reruns that comparator itself. That creates an
    immutable accepted checkpoint and immediately unlocks dependants while canonical integration
@@ -202,13 +204,12 @@ blocking prerequisite.
   the latest proof draft indefinitely; it never regenerates the plan.
 - A decomposition reviewer checks every proposed child statement, exact frozen Lean type, and
   dependency edge after the prose proof passes.
-- The official RLCR implementation loop reviews every Lean worker round and performs its own code
-  review when a base branch is available. Its implementation contract is the current audited DAG
-  node, frozen type, and accepted dependency list; it cannot reopen decomposition or demand a
-  different graph/interface architecture from an older scaffold after the selected theorem passes
-  the configured correctness and safety gates. The loop's code-review base is pinned to the exact
-  post-overlay worktree commit, rather than the repository's default branch, so its diff contains
-  only the current node implementation and never re-reviews accepted child histories.
+- The official RLCR implementation loop reviews every Lean worker round against the current audited
+  DAG node, frozen type, accepted dependency list, and author comparator. Once that implementation
+  reviewer accepts the candidate, RLCR returns control immediately. The bridge deliberately leaves
+  RLCR's optional generic code-review base blank: enabling that second repository-wide review would
+  duplicate the controller review, would not enforce the exact comparator, and could reopen accepted
+  child histories. The exact post-overlay base remains recorded in the node configuration for audit.
 - The controller runs the comparator with a default six-hour timeout. Only after that passes does
   a fresh Lean reviewer inspect the exact candidate and personally rerun the same comparator.
 - If independently accepted histories must be combined, integration runs the comparator again on

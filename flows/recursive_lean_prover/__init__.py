@@ -175,7 +175,7 @@ class WorktreeRlcrConfig(BaseModel):
     base_branch: str = Field(
         default="",
         description=(
-            "exact post-overlay commit used as the official RLCR code-review base"
+            "exact post-overlay commit retained in the node audit configuration"
         ),
     )
     track_plan_file: bool = False
@@ -187,47 +187,20 @@ class WorktreeRlcrConfig(BaseModel):
     claude_answer_codex: bool = True
 
 
-def _worktree_review_base(config: WorktreeRlcrConfig) -> str:
-    """Resolve and durably remember the code-review base for old supervisors.
+def _nested_rlcr_config(config: WorktreeRlcrConfig) -> dict[str, Any]:
+    """Forward implementation settings without enabling RLCR's generic code review.
 
-    A pre-upgrade supervisor omits ``base_branch``.  HEAD is authoritative only
-    on the first bridge launch, before its builder edits the worktree.  Persisting
-    that value beside the immutable plan prevents a resumed bridge from mistaking
-    an already-written candidate commit for its own review base.
+    The recursive controller owns the Lean acceptance review: after its machine
+    comparator succeeds, a fresh role-distinct Codex reviewer reruns that exact
+    comparator.  Giving official RLCR a base branch starts an additional generic
+    repository-wide code review that does not know the selected DAG-node boundary
+    and can reopen already accepted ancestor work.  Keep the frozen base in the
+    durable node-side config, but leave the nested loop's review base blank so it
+    returns immediately after its implementation reviewer accepts the candidate.
     """
-    if config.base_branch:
-        return config.base_branch
-    plan = Path(config.plan_file)
-    version = plan.stem.removeprefix("rlcr-plan-")
-    marker = plan.with_name(f"rlcr-review-base-{version}.txt")
-    if marker.is_file():
-        base = marker.read_text(encoding="utf-8").strip()
-        valid = subprocess.run(
-            ["git", "cat-file", "-e", f"{base}^{{commit}}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        ancestor = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", base, "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if base and valid.returncode == 0 and ancestor.returncode == 0:
-            return base
-        raise RuntimeError(f"invalid persisted node review base: {marker}")
-    completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise RuntimeError("cannot resolve the node worktree review base")
-    base = completed.stdout.strip()
-    marker.write_text(base + "\n", encoding="utf-8")
-    return base
+    forwarded = config.model_dump()
+    forwarded["base_branch"] = ""
+    return forwarded
 
 
 @flow(
@@ -284,11 +257,7 @@ def worktree_rlcr(
         source = Path(common.stdout.strip()).parent / "lake-manifest.json"
         if source.is_file() and source.resolve() != manifest.resolve():
             shutil.copy2(source, manifest)
-    forwarded = config.model_dump()
-    if not forwarded["base_branch"]:
-        # Backward compatibility for a long-lived recursive supervisor that was
-        # started before ``base_branch`` was added to its generated config.
-        forwarded["base_branch"] = _worktree_review_base(config)
+    forwarded = _nested_rlcr_config(config)
     load("official/humanize1:rlcr", inherit_skills=True)(
         agents,
         task,
