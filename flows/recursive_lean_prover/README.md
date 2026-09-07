@@ -85,7 +85,9 @@ offline-reproducible and prevents Lake from trying to update shared read-only Gi
 
 ## Requirements
 
-- Humanize with the `hmz` command and the official `humanize1` flowverse installed.
+- Humanize with the `hmz` command and an official `humanize1` flowverse exposing the RLCR
+  `skip_code_review` setting. The flow refuses older installs rather than silently running the
+  duplicate repository-wide review.
 - Lean projects should pin `leanprover/lean4:v4.33.0` in `lean-toolchain` when reproducing the
   current Lean-Eval experiment.
 - Run at the root of a clean Lean git repository.

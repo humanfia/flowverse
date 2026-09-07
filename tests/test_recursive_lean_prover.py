@@ -20,7 +20,11 @@ from hmz.flows.skills import brought
 FLOW = Path(__file__).parents[1] / "flows" / "recursive_lean_prover"
 sys.path.insert(0, str(FLOW))
 
-from __init__ import WorktreeRlcrConfig, _nested_rlcr_config
+from __init__ import (
+    WorktreeRlcrConfig,
+    _nested_rlcr_config,
+    _require_explicit_rlcr_review_skip,
+)
 from _recursive_lean.models import Decomposition, NodeRecord, SolveResult, Subproblem
 from _recursive_lean.prompts import RLCR_LEAN_TASK
 from _recursive_lean.runtime import Runtime, _WorkspaceAgent
@@ -86,6 +90,14 @@ class WorktreeTests(unittest.TestCase):
         self.assertEqual(forwarded["base_branch"], "")
         self.assertTrue(forwarded["skip_code_review"])
         self.assertFalse(forwarded["skip_impl"])
+
+    def test_nested_rlcr_refuses_an_official_flow_that_cannot_skip_review(self) -> None:
+        with patch.dict(
+            _require_explicit_rlcr_review_skip.__globals__,
+            {"configures": lambda _: SimpleNamespace(model_fields={})},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "too old"):
+                _require_explicit_rlcr_review_skip()
 
     def test_public_recursive_lean_flow_contract(self) -> None:
         base = FLOW / "__init__.py"
