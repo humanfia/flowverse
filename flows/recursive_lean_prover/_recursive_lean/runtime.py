@@ -1218,12 +1218,10 @@ class Runtime:
                 node_id=node.id,
                 feedback=overlay_feedback,
             )
-        # Humanize RLCR otherwise discovers the repository's default branch (usually
-        # ``main``) and reviews against that branch.  A recursive proof worktree can be
-        # based on a different, frozen history, and accepted child commits may have just
-        # been overlaid on top of it.  Anchor RLCR's code review to the exact post-overlay
-        # commit so it reviews only this node's new implementation and never reopens
-        # frozen child or unrelated default-branch history.
+        # Record the exact post-overlay commit in the durable bridge configuration for
+        # audit.  The bridge explicitly disables RLCR's duplicate final repository-wide
+        # code-review phase; the implementation rounds still use this frozen worktree,
+        # and the controller subsequently applies both exact comparator gates.
         review_base = self._git_head(worktree)
         self.store.update(
             node.id,
