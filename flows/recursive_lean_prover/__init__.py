@@ -187,6 +187,49 @@ class WorktreeRlcrConfig(BaseModel):
     claude_answer_codex: bool = True
 
 
+def _worktree_review_base(config: WorktreeRlcrConfig) -> str:
+    """Resolve and durably remember the code-review base for old supervisors.
+
+    A pre-upgrade supervisor omits ``base_branch``.  HEAD is authoritative only
+    on the first bridge launch, before its builder edits the worktree.  Persisting
+    that value beside the immutable plan prevents a resumed bridge from mistaking
+    an already-written candidate commit for its own review base.
+    """
+    if config.base_branch:
+        return config.base_branch
+    plan = Path(config.plan_file)
+    version = plan.stem.removeprefix("rlcr-plan-")
+    marker = plan.with_name(f"rlcr-review-base-{version}.txt")
+    if marker.is_file():
+        base = marker.read_text(encoding="utf-8").strip()
+        valid = subprocess.run(
+            ["git", "cat-file", "-e", f"{base}^{{commit}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base, "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if base and valid.returncode == 0 and ancestor.returncode == 0:
+            return base
+        raise RuntimeError(f"invalid persisted node review base: {marker}")
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise RuntimeError("cannot resolve the node worktree review base")
+    base = completed.stdout.strip()
+    marker.write_text(base + "\n", encoding="utf-8")
+    return base
+
+
 @flow(
     resumable=True,
     about="Recursive Lean proving with RLCR plans, comparator gates, a live DAG, and a wiki",
@@ -244,18 +287,8 @@ def worktree_rlcr(
     forwarded = config.model_dump()
     if not forwarded["base_branch"]:
         # Backward compatibility for a long-lived recursive supervisor that was
-        # started before ``base_branch`` was added to its generated config.  This
-        # bridge is launched before the nested builder edits anything, so HEAD is
-        # exactly the post-overlay commit the subsequent code review must use.
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0 or not completed.stdout.strip():
-            raise RuntimeError("cannot resolve the node worktree review base")
-        forwarded["base_branch"] = completed.stdout.strip()
+        # started before ``base_branch`` was added to its generated config.
+        forwarded["base_branch"] = _worktree_review_base(config)
     load("official/humanize1:rlcr", inherit_skills=True)(
         agents,
         task,
