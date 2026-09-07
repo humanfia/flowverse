@@ -199,7 +199,13 @@ def _nested_rlcr_config(config: WorktreeRlcrConfig) -> dict[str, Any]:
     returns immediately after its implementation reviewer accepts the candidate.
     """
     forwarded = config.model_dump()
+    # An empty base_branch is not itself a no-review setting: official Humanize
+    # resolves it to origin/HEAD, main, or master.  Use the explicit setup-only
+    # switch so the implementation loop finalizes as soon as its ordinary RLCR
+    # rounds accept the work.  The recursive controller then owns both exact
+    # Lean comparator gates.
     forwarded["base_branch"] = ""
+    forwarded["skip_code_review"] = True
     return forwarded
 
 
