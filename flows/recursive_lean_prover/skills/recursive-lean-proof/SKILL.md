@@ -50,6 +50,13 @@ is not an exhaustive allowlist of declarations in the base, and an empty child l
 base helpers. Do not reuse an unapproved previous proof of the current node, a placeholder, a new
 axiom, or a candidate history absent from both the frozen base and approved children.
 
+When formalizing a child, remember that the repository may still contain participant-side
+`sorry`/`admit` stubs for ancestors that have not reached Lean yet. If the configured source-safety
+scan covers such a stub, remove the entire unproved placeholder declaration before running the
+child comparator. Do not synthesize a fake proof, change a trusted challenge file, or remove any
+comparator-approved declaration. The parent formalization will add its real declaration after its
+approved children have been integrated.
+
 At the natural-language proof review gate, audit the mathematical argument and every stated
 lemma, but do not require child Lean declarations or frozen Lean type expressions yet. Those are
 created and independently audited only in the following decomposition gate. Missing mathematical

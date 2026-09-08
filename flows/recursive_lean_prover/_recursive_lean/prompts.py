@@ -275,7 +275,11 @@ Requirements:
   placeholder, a new axiom, or a candidate history absent from both the base and approved children.
 - Create or complete a globally named theorem for this node; do not hide it as a local `have`.
 - For a child node, its declaration must have exactly the frozen expected Lean type above.
-- Preserve the exact target, hypotheses, imports, and declarations.
+- Preserve the exact challenge target, hypotheses, imports, and trusted declarations. Participant
+  placeholder declarations for ancestors or unrelated nodes are not protected: if the configured
+  source-safety scan covers an inherited `sorry`/`admit` placeholder for a node that is not yet
+  proved, remove that placeholder declaration before comparison. Never replace it with a fake
+  proof, alter a trusted challenge file, or remove a comparator-approved declaration.
 - No `sorry`, `admit`, new axioms, unsafe loopholes, or weakened replacement theorem.
 - Run `{comparator_command}` until it exits zero and contains `{comparator_success}`.
 - For a non-root node, that exact node comparator is the complete configured correctness gate.
