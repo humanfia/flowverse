@@ -491,6 +491,8 @@ class PreflightTests(unittest.TestCase):
         for prompt in prompts:
             self.assertIn("{problem_context}", prompt)
             self.assertIn("{reference_context}", prompt)
+        for field in ("{node_id}", "{node_title}", "{lean_name}", "{lean_statement}"):
+            self.assertIn(field, NATURAL_AUDIT)
 
 
 if __name__ == "__main__":

@@ -169,12 +169,20 @@ and later child workers formalize them. Do not reject this proof solely because 
 artifacts are absent. Do reject a missing mathematical hypothesis, proof, or non-circular
 dependency in the prose itself.
 
+Exact review target (authoritative for this audit):
+- DAG node: `{node_id}`
+- Node title: {node_title}
+- Prose statement: {statement}
+- Lean declaration: `Submission.{lean_name}`
+- Frozen Lean proposition: `{lean_statement}`
+
+The official problem record below supplies provenance and root-level context. When the DAG node
+is not `root`, do not replace the exact child target above with the parent/root theorem and do not
+demand proof of sibling or downstream conclusions. Audit precisely the displayed node target.
+
 {problem_context}
 
 {reference_context}
-
-Theorem:
-{statement}
 
 Proof:
 {proof}

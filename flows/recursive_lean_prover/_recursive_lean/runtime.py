@@ -968,7 +968,11 @@ class Runtime:
                     NATURAL_AUDIT.format(
                         problem_context=self._problem_context(),
                         reference_context=self._reference_context(),
+                        node_id=node.id,
+                        node_title=node.title,
                         statement=node.statement,
+                        lean_name=node.lean_name,
+                        lean_statement=node.lean_statement,
                         proof=proof.proof,
                     ),
                     suppress=True,
