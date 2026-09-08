@@ -13,6 +13,18 @@ decomposition_attempts: 3
 rlcr_rounds: 20
 comparator_timeout: 21600
 
+# Exactly one leaderboard problem is fetched in a dedicated agent session before
+# planning. Leave blank to derive the id from an explicit problem URL, the
+# workspace README's `Problem ID`, or the workspace directory name.
+problem_id: ""
+problem_fetch_attempts: 3
+
+# All three reference repositories are downloaded here before problem fetching.
+# The private Hugging Face source reads its token from this environment variable;
+# never put the token value in this YAML file.
+reference_dir: .humanize/math-reference-library
+huggingface_token_env: HF_TOKEN
+
 # Set this to the repository's candidate Lean file when it has one.
 lean_target: ""
 

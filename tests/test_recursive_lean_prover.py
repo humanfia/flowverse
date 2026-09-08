@@ -42,6 +42,19 @@ def git(cwd: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
+def reference_use() -> list[dict[str, Any]]:
+    """Minimal complete reference ledger for structured test fixtures."""
+    return [
+        {
+            "source": source,
+            "queries": ["fixture query"],
+            "files": [f"/references/{source}/README.md"],
+            "conclusion": "fixture source was consulted",
+        }
+        for source in ("TauCeti", "lean-pool", "mathlib-internal")
+    ]
+
+
 class FakeSession:
     def __init__(self, cwd: Path) -> None:
         self.cwd = cwd
@@ -78,6 +91,20 @@ class FakeAgent:
 
 
 class WorktreeTests(unittest.TestCase):
+    def test_public_recursive_lean_flow_contract(self) -> None:
+        base = FLOW / "__init__.py"
+
+        self.assertEqual(drives(base), ("worker", "reviewer"))
+        self.assertTrue(resumes(base))
+        config = configures(base)
+        self.assertIsNotNone(config)
+        self.assertEqual(config.__name__, "Config")
+        self.assertEqual([flow.name for flow in held(base)], ["", "worktree-rlcr"])
+        self.assertEqual(
+            [skill.name for skill in brought(FLOW)], ["recursive-lean-proof"]
+        )
+        self.assertIn("recursive_lean_prover", offered(FLOW.parent))
+
     def test_nested_rlcr_does_not_enable_generic_code_review(self) -> None:
         config = WorktreeRlcrConfig(
             plan_file="/tmp/immutable-plan.md",
@@ -98,20 +125,6 @@ class WorktreeTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "too old"):
                 _require_explicit_rlcr_review_skip()
-
-    def test_public_recursive_lean_flow_contract(self) -> None:
-        base = FLOW / "__init__.py"
-
-        self.assertEqual(drives(base), ("worker", "reviewer"))
-        self.assertTrue(resumes(base))
-        config = configures(base)
-        self.assertIsNotNone(config)
-        self.assertEqual(config.__name__, "Config")
-        self.assertEqual([flow.name for flow in held(base)], ["", "worktree-rlcr"])
-        self.assertEqual(
-            [skill.name for skill in brought(FLOW)], ["recursive-lean-proof"]
-        )
-        self.assertIn("recursive_lean_prover", offered(FLOW.parent))
 
     def test_proved_and_accepted_nodes_reject_regressive_transitions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -223,6 +236,7 @@ class WorktreeTests(unittest.TestCase):
                 plan = project / "plan.md"
                 plan.write_text("# Plan\n")
                 with (
+                    patch.dict(os.environ, {"HF_TOKEN": "bootstrap-only-secret"}),
                     patch(
                         "_recursive_lean.runtime.shutil.which",
                         return_value="/usr/bin/hmz",
@@ -241,6 +255,7 @@ class WorktreeTests(unittest.TestCase):
                 self.assertTrue(passed)
                 self.assertTrue(log.is_file())
                 self.assertEqual(launched.call_args.kwargs["cwd"], worktree)
+                self.assertNotIn("HF_TOKEN", launched.call_args.kwargs["env"])
                 command = launched.call_args.args[0]
                 self.assertIn(":worktree-rlcr", command[3])
                 self.assertEqual(command[-1], "prove the node")
@@ -805,6 +820,69 @@ class WorktreeTests(unittest.TestCase):
             finally:
                 os.chdir(original)
 
+    def test_empty_cherry_pick_after_lean_union_is_accepted(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "empty_union_problem"
+            project.mkdir()
+            git(project, "init", "-b", "main")
+            git(project, "config", "user.name", "Flow Test")
+            git(project, "config", "user.email", "flow-test@example.invalid")
+            (project / ".gitignore").write_text(".humanize/\n.lake/\n")
+            (project / "Submission.lean").write_text("theorem value : Nat := 0\n")
+            git(project, "add", ".gitignore", "Submission.lean")
+            git(project, "commit", "-m", "test: initialize empty-union fixture")
+
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                )
+                runtime = Runtime(None, "empty-union fixture", config, {})
+                worktree = runtime._node_worktree(
+                    NodeRecord(
+                        id="root.union_duplicate-a1",
+                        title="Union duplicate",
+                        statement="True",
+                        attempts=1,
+                    )
+                )
+                (worktree / "Submission.lean").write_text(
+                    "theorem value : Nat := 1\n"
+                )
+                git(worktree, "add", "Submission.lean")
+                git(worktree, "commit", "-m", "feat: candidate value")
+                candidate = runtime._git_head(worktree)
+
+                (project / "Submission.lean").write_text(
+                    "theorem value : Nat := 2\n"
+                )
+                git(project, "add", "Submission.lean")
+                git(project, "commit", "-m", "feat: canonical value")
+
+                def keep_canonical(integration: Path) -> tuple[bool, str]:
+                    git(integration, "checkout", "--ours", "Submission.lean")
+                    git(integration, "add", "Submission.lean")
+                    return True, "kept already-integrated canonical Lean source"
+
+                with patch.object(
+                    runtime, "_union_lean_conflicts", side_effect=keep_canonical
+                ):
+                    applied, unioned, feedback = runtime._apply_candidate_commits(
+                        project, [candidate]
+                    )
+
+                self.assertTrue(applied, feedback)
+                self.assertTrue(unioned)
+                self.assertEqual(
+                    (project / "Submission.lean").read_text(),
+                    "theorem value : Nat := 2\n",
+                )
+                self.assertTrue(runtime._git_clean(project))
+            finally:
+                os.chdir(original)
+
     def test_parallel_same_file_leaf_additions_are_union_integrated(self) -> None:
         original = Path.cwd()
         with tempfile.TemporaryDirectory() as temporary:
@@ -905,6 +983,7 @@ class WorktreeTests(unittest.TestCase):
                     statement="True",
                 )
                 decomposition = Decomposition(
+                    reference_use=reference_use(),
                     should_split=True,
                     rationale="three-node dependency fixture",
                     subproblems=[
@@ -987,6 +1066,7 @@ class WorktreeTests(unittest.TestCase):
                 child.status = "proved"
                 child.theorems = ["Submission.stable_lemma"]
                 decomposition = Decomposition(
+                    reference_use=reference_use(),
                     should_split=True,
                     rationale="retry with the same theorem identity",
                     subproblems=[
@@ -1068,6 +1148,7 @@ class WorktreeTests(unittest.TestCase):
                 accepted.candidate_commit = "candidate"
                 accepted.theorems = ["Submission.accepted_child"]
                 decomposition = Decomposition(
+                    reference_use=reference_use(),
                     should_split=True,
                     rationale="one accepted prerequisite and its dependent",
                     subproblems=[

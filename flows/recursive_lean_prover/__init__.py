@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
-from _recursive_lean.runtime import Runtime
 from hmz.flows import Agent, Moment, configures, flow, load
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from _recursive_lean.runtime import Runtime
 
 MIN_RECURSIVE_NODES = 3
 
@@ -103,6 +105,19 @@ class Config(BaseModel):
         ge=1,
         description="seconds allowed for each independent comparator run",
     )
+    problem_id: str = Field(
+        default="",
+        description=(
+            "one Lean-Eval problem id; blank derives it from the task URL, workspace "
+            "README, or workspace directory"
+        ),
+    )
+    problem_fetch_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        description="attempts in one dedicated session to fetch one valid problem page",
+    )
     artifact_dir: str = Field(
         default=".humanize/recursive-lean-prover",
         description="untracked directory for plans, proofs, DAGs, logs, and run state",
@@ -110,6 +125,17 @@ class Config(BaseModel):
     wiki_dir: str = Field(
         default=".humanize/math-wiki",
         description="Markdown wiki receiving every comparator-approved theorem",
+    )
+    reference_dir: str = Field(
+        default=".humanize/math-reference-library",
+        description="untracked cache for the three mandatory reference repositories",
+    )
+    huggingface_token_env: str = Field(
+        default="HF_TOKEN",
+        description=(
+            "environment variable holding the Hugging Face read token; the value is "
+            "never written to config, prompts, manifests, or subprocess arguments"
+        ),
     )
     lean_target: str = Field(
         default="",
@@ -130,7 +156,7 @@ class Config(BaseModel):
         description="block a parent when any required subproblem exhausts its attempts",
     )
 
-    @field_validator("artifact_dir", "wiki_dir")
+    @field_validator("artifact_dir", "wiki_dir", "reference_dir")
     @classmethod
     def _local_state(cls, value: str) -> str:
         """Keep orchestration output out of RLCR's git-clean gate."""
@@ -139,6 +165,33 @@ class Config(BaseModel):
             raise ValueError("must be a relative path below .humanize/")
         if ".." in normalized.split("/"):
             raise ValueError("must not contain '..'")
+        return normalized
+
+    @field_validator("problem_id")
+    @classmethod
+    def _problem_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", normalized
+        ):
+            raise ValueError("must be blank or one Lean-Eval problem id")
+        return normalized
+
+    @field_validator("huggingface_token_env")
+    @classmethod
+    def _token_environment_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized):
+            raise ValueError("must be an environment-variable name")
+        if normalized.casefold() in {
+            "codex_home",
+            "home",
+            "path",
+            "pwd",
+            "shell",
+            "user",
+        }:
+            raise ValueError("must not repurpose a common system environment variable")
         return normalized
 
     @field_validator("lean_target")
@@ -221,7 +274,10 @@ def _require_explicit_rlcr_review_skip() -> None:
 
 @flow(
     resumable=True,
-    about="Recursive Lean proving with RLCR plans, comparator gates, a live DAG, and a wiki",
+    about=(
+        "Fetch one Lean-Eval problem, then recursively prove it with three reference "
+        "corpora, RLCR, comparator gates, a live DAG, and a wiki"
+    ),
 )
 def run(
     agents: Agents,

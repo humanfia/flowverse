@@ -7,6 +7,31 @@ description: Prove a mathematical statement in natural language before Lean, fac
 
 Keep the mathematical statement fixed. A proof is not a proof of a nearby easier theorem.
 
+Before planning, the controller must complete both preflight gates. First, download or reuse exact
+Git snapshots of TauCeti, lean-pool, and `humanfia-lab/mathlib-internal`, recording their commits in
+the first reference manifest and exposing them as read-only evidence. Reuse is allowed only when
+origin, clean status, HEAD, sentinels, and read-only permissions still match that manifest. The
+Hugging Face token must come only from the configured environment
+variable and must never appear in a task, prompt, config value, manifest, log, subprocess argument,
+or remote URL. Second, resolve one Lean-Eval problem id before opening a dedicated fresh acquisition
+session. That session may fetch only the matching canonical problem page and JSON and returns one
+structured object. Independently retain the v2 site-data JSON and compare the agent's identity,
+title, revision, module, and generation timestamp with it. Deterministically render all official
+Markdown sections from that complete frozen JSON, then freeze exactly one validated `problem.md`;
+never let the model choose an arbitrary catalog entry, combine problems, start a second acquisition
+session after an interrupted first one, or replace the artifact on resume.
+
+At every subsequent agent stage—direct planning, natural-proof authoring and review,
+decomposition and review, Lean RLCR implementation and its reviews, and integration-only repair
+and review—read the frozen problem artifact and consult all three local reference snapshots.
+Search every corpus separately. Record exact queries and local files plus the relevant conclusion;
+an explicit no-relevant-match result is valid, silently omitting a corpus is not. Structured stage
+responses must contain exactly one `reference_use` entry for each of `TauCeti`, `lean-pool`, and
+`mathlib-internal`. Markdown plans and RLCR summaries must contain the equivalent `Reference use`
+section. References are evidence and examples: the local Challenge declarations and configured
+comparator remain the theorem authority, and material from a different toolchain or problem must
+not be copied without compatibility and provenance checks.
+
 Before writing new or revised Lean:
 
 1. Give a numbered natural-language proof.

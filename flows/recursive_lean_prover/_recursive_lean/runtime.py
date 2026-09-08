@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -14,23 +15,39 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
+import fcntl
 from hmz.flows import Stopped, load
 
 from .models import (
     Decomposition,
     DecompositionAudit,
+    FetchedProblem,
     LeanAudit,
     NaturalAudit,
     NaturalProof,
     NodeRecord,
     ProvedTheorem,
+    ReferenceUse,
     SolveResult,
     Subproblem,
+)
+from .preflight import (
+    PROBLEM_COLLECTION_URL,
+    PROBLEM_DATA_URL,
+    PROBLEM_PAGE_URL,
+    REFERENCE_SOURCES,
+    ReferenceBundle,
+    ReferenceLibrary,
+    infer_problem_id,
+    problem_context as render_problem_context,
 )
 from .prompts import (
     DECOMPOSE,
     DECOMPOSITION_AUDIT,
+    FETCH_ONE_PROBLEM,
     INTEGRATION_AUDIT,
     INTEGRATION_REPAIR,
     LEAN_AUDIT,
@@ -151,6 +168,9 @@ class Runtime:
             self.project / self.config.wiki_dir,
             self.task,
         )
+        self.problem_id = ""
+        self.problem_path = self.run_root / "problem.md"
+        self.reference_bundle: ReferenceBundle | None = None
 
     def execute(self) -> None:
         """Validate the host project, solve the root, and retain state only if unfinished."""
@@ -158,12 +178,39 @@ class Runtime:
             raise ValueError("recursive_lean_prover needs a mathematical problem")
         self._require_git()
         self._require_comparator()
+        run_relative = str(self.run_root.relative_to(self.project))
+        identity = {
+            "version": 1,
+            "task_digest": self._task_digest(),
+            "run_dir": run_relative,
+            "created_at": now(),
+        }
+        atomic_text(self.run_root / "run.json", json.dumps(identity, indent=2) + "\n")
+        # Record the resume identity before any network operation. The on-disk identity
+        # lets a restarted supervisor reuse this run even if HMZ state was not flushed.
+        self.state.update(identity)
         latest = self.project / self.config.artifact_dir / "LATEST"
-        atomic_text(latest, str(self.run_root.relative_to(self.project)) + "\n")
+        atomic_text(latest, run_relative + "\n")
+        task_pointer = (
+            self.project
+            / self.config.artifact_dir
+            / "runs-by-task"
+            / f"{self._task_digest()}.run"
+        )
+        atomic_text(task_pointer, run_relative + "\n")
+        problem = self._bootstrap()
+        self.store.problem_artifact = str(self.problem_path)
+        if self.reference_bundle is not None:
+            self.store.reference_manifest = str(self.reference_bundle.manifest)
         self.state.update(
             version=1,
             task_digest=self._task_digest(),
             run_dir=str(self.run_root.relative_to(self.project)),
+            problem_id=problem.problem_id,
+            problem_file=str(self.problem_path.relative_to(self.project)),
+            reference_manifest=str(self.reference_bundle.manifest.relative_to(self.project))
+            if self.reference_bundle is not None
+            else "",
         )
         root = self.store.ensure(
             "root",
@@ -178,6 +225,9 @@ class Runtime:
                 "root", "interrupted", "resuming an interrupted root node"
             )
         print(f"Live DAG: {self.run_root / 'DAG.md'}")
+        print(f"Fetched problem: {self.problem_path}")
+        if self.reference_bundle is not None:
+            print(f"Reference snapshots: {self.reference_bundle.manifest}")
         print(f"Theorem wiki: {self.project / self.config.wiki_dir / 'README.md'}")
         result = (
             self._resume_existing_dag(root)
@@ -197,6 +247,479 @@ class Runtime:
             last_failure=result.feedback,
         )
         print(f"Root theorem not accepted: {result.feedback}")
+
+    def _bootstrap(self) -> FetchedProblem:
+        """Prepare references and fetch exactly one problem before planning."""
+        self._preflight_status(
+            "downloading-references",
+            "preparing TauCeti, lean-pool, and mathlib-internal",
+        )
+        reference_root = self.project / getattr(
+            self.config,
+            "reference_dir",
+            ".humanize/math-reference-library",
+        )
+        askpass = Path(__file__).resolve().parent.parent / "scripts/hf-git-askpass.sh"
+        self.reference_bundle = ReferenceLibrary(
+            reference_root,
+            huggingface_token_env=getattr(
+                self.config, "huggingface_token_env", "HF_TOKEN"
+            ),
+            askpass_script=askpass,
+        ).prepare()
+        # Authentication is a bootstrap-only capability. Later agent sessions,
+        # comparators, and nested RLCR processes receive only the downloaded paths.
+        os.environ.pop(
+            getattr(self.config, "huggingface_token_env", "HF_TOKEN"),
+            None,
+        )
+        self._preflight_status(
+            "fetching-problem",
+            "three reference snapshots ready; starting isolated one-problem session",
+        )
+        self.problem_id = infer_problem_id(
+            self.project,
+            getattr(self.config, "problem_id", ""),
+            self.task,
+        )
+        fetched = self._fetched_problem()
+        self._preflight_status(
+            "ready",
+            f"problem {fetched.problem_id} frozen; planning may start",
+        )
+        return fetched
+
+    def _fetched_problem(self) -> FetchedProblem:
+        """Reuse or create the sole Markdown problem artifact for this run."""
+        lock_path = self.run_root / ".problem-acquisition.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                return self._fetched_problem_locked()
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _fetched_problem_locked(self) -> FetchedProblem:
+        """Run or restore acquisition while holding the per-run process lock."""
+        site_data = self._problem_site_data()
+        record_path = self.run_root / "problem.json"
+        if record_path.is_file() or self.problem_path.is_file():
+            try:
+                source = (
+                    record_path
+                    if record_path.is_file()
+                    else self.run_root / "problem-candidate.json"
+                )
+                fetched = FetchedProblem.model_validate_json(
+                    source.read_text(encoding="utf-8")
+                )
+                if self.problem_path.is_file():
+                    markdown = self.problem_path.read_text(encoding="utf-8")
+                else:
+                    markdown = fetched.markdown.rstrip() + "\n"
+                    fetched.markdown = markdown
+                    atomic_text(self.problem_path, markdown)
+            except (OSError, ValueError) as error:
+                raise RuntimeError(
+                    "invalid problem acquisition checkpoint; refusing to select another problem"
+                ) from error
+            if fetched.problem_id != self.problem_id or markdown != fetched.markdown:
+                raise RuntimeError(
+                    "frozen problem checkpoint does not match the selected problem id"
+                )
+            feedback = self._problem_authority_feedback(fetched, site_data)
+            if feedback:
+                raise RuntimeError(
+                    "frozen problem checkpoint disagrees with authoritative site data: "
+                    + feedback
+                )
+            canonical = self._render_problem_markdown(site_data)
+            if fetched.markdown != canonical or markdown != canonical:
+                raise RuntimeError(
+                    "frozen problem Markdown differs from the authoritative rendering"
+                )
+            if not record_path.is_file():
+                atomic_text(record_path, fetched.model_dump_json(indent=2) + "\n")
+            return fetched
+
+        candidate_path = self.run_root / "problem-candidate.json"
+        session_path = self.run_root / "problem-session.json"
+        if candidate_path.is_file():
+            try:
+                fetched = FetchedProblem.model_validate_json(
+                    candidate_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError) as error:
+                raise RuntimeError(
+                    "invalid saved acquisition candidate; refusing a second agent session"
+                ) from error
+        else:
+            if session_path.exists():
+                raise RuntimeError(
+                    "the one permitted acquisition session was interrupted before a valid "
+                    "candidate was saved; refusing to start a second session"
+                )
+            worker_config = getattr(self.agents.worker, "config", None)
+            if not getattr(worker_config, "web_search", False):
+                raise RuntimeError(
+                    "the problem-fetch agent requires web_search=on to read lean-lang.org"
+                )
+            atomic_text(
+                session_path,
+                json.dumps(
+                    {
+                        "problem_id": self.problem_id,
+                        "status": "started",
+                        "started_at": now(),
+                    },
+                    indent=2,
+                )
+                + "\n",
+            )
+            fetcher = self.agents.worker.clone(name="lean-eval-single-problem-fetcher")
+            session = fetcher.new(self.project)
+            feedback = "None."
+            attempts = getattr(self.config, "problem_fetch_attempts", 3)
+            fetched = None
+            for _ in range(attempts):
+                response = session(
+                    FETCH_ONE_PROBLEM.format(
+                        collection_url=PROBLEM_COLLECTION_URL,
+                        problem_id=self.problem_id,
+                        problem_url=PROBLEM_PAGE_URL.format(
+                            problem_id=self.problem_id
+                        ),
+                        problem_data_url=PROBLEM_DATA_URL.format(
+                            problem_id=self.problem_id
+                        ),
+                        request=self.task,
+                    )
+                    + f"\n\nValidation feedback from the previous response: {feedback}",
+                    suppress=True,
+                    schema=FetchedProblem,
+                )
+                if response is None:
+                    feedback = "No valid structured single-problem record was returned."
+                    continue
+                feedback = self._problem_authority_feedback(response, site_data)
+                if feedback:
+                    continue
+                fetched = response
+                break
+            if fetched is None:
+                raise RuntimeError(
+                    f"single-problem acquisition failed after {attempts} attempt(s): "
+                    f"{feedback}"
+                )
+            fetched = FetchedProblem.model_validate(
+                fetched.model_dump()
+                | {"markdown": self._render_problem_markdown(site_data)}
+            )
+            atomic_text(candidate_path, fetched.model_dump_json(indent=2) + "\n")
+            atomic_text(
+                session_path,
+                json.dumps(
+                    {
+                        "problem_id": self.problem_id,
+                        "status": "candidate-saved",
+                        "completed_at": now(),
+                    },
+                    indent=2,
+                )
+                + "\n",
+            )
+
+        feedback = self._problem_authority_feedback(fetched, site_data)
+        if feedback:
+            raise RuntimeError(
+                "saved acquisition candidate disagrees with authoritative site data: "
+                + feedback
+            )
+        fetched = FetchedProblem.model_validate(
+            fetched.model_dump() | {"markdown": self._render_problem_markdown(site_data)}
+        )
+        atomic_text(self.problem_path, fetched.markdown.rstrip() + "\n")
+        # Normalize the structured copy to the exact bytes frozen in problem.md.
+        fetched.markdown = self.problem_path.read_text(encoding="utf-8")
+        atomic_text(record_path, fetched.model_dump_json(indent=2) + "\n")
+        return fetched
+
+    def _problem_site_data(self) -> dict[str, Any]:
+        """Download once and validate the controller's authoritative v2 JSON copy."""
+        path = self.run_root / "problem-site-data.json"
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError("invalid frozen Lean-Eval site-data JSON") from error
+            self._validate_problem_site_data(data)
+            return data
+        url = PROBLEM_DATA_URL.format(problem_id=self.problem_id)
+        try:
+            with urlopen(
+                Request(url, headers={"User-Agent": "math-lean-flow/1"}),
+                timeout=60,
+            ) as response:
+                raw = response.read(5_000_001)
+        except (HTTPError, URLError, TimeoutError, OSError) as error:
+            raise RuntimeError(f"could not fetch authoritative problem JSON: {url}") from error
+        if len(raw) > 5_000_000:
+            raise RuntimeError("authoritative problem JSON exceeds the 5 MB safety limit")
+        try:
+            data = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("authoritative problem endpoint returned invalid JSON") from error
+        self._validate_problem_site_data(data)
+        atomic_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        return data
+
+    def _validate_problem_site_data(self, data: Any) -> None:
+        """Fail closed unless the endpoint describes exactly the selected problem."""
+        if not isinstance(data, dict) or data.get("schema_version") != 2:
+            raise RuntimeError("authoritative problem JSON is not schema version 2")
+        generated_at = data.get("generated_at")
+        problem = data.get("problem")
+        if not isinstance(generated_at, str) or not generated_at.strip():
+            raise RuntimeError("authoritative problem JSON has no generation timestamp")
+        if not isinstance(problem, dict) or problem.get("id") != self.problem_id:
+            raise RuntimeError("authoritative problem JSON has the wrong problem id")
+        if problem.get("stable_url") != f"problems/{self.problem_id}/":
+            raise RuntimeError("authoritative problem JSON has the wrong stable URL")
+        if not isinstance(problem.get("title"), str) or not problem["title"].strip():
+            raise RuntimeError("authoritative problem JSON has no title")
+        revision = problem.get("statement_revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise RuntimeError("authoritative problem JSON has no valid statement revision")
+        if not isinstance(problem.get("module"), str) or not problem["module"].strip():
+            raise RuntimeError("authoritative problem JSON has no module")
+
+    def _problem_authority_feedback(
+        self,
+        fetched: FetchedProblem,
+        data: dict[str, Any],
+    ) -> str:
+        """Compare agent output with independently downloaded authoritative fields."""
+        problem = data["problem"]
+        expected = {
+            "problem_id": problem["id"],
+            "title": problem["title"],
+            "source_url": PROBLEM_PAGE_URL.format(problem_id=self.problem_id),
+            "data_url": PROBLEM_DATA_URL.format(problem_id=self.problem_id),
+            "generated_at": data["generated_at"],
+            "statement_revision": problem["statement_revision"],
+            "module": problem["module"],
+        }
+        mismatches = [
+            f"{field} must be {wanted!r}, got {getattr(fetched, field)!r}"
+            for field, wanted in expected.items()
+            if getattr(fetched, field) != wanted
+        ]
+        return "; ".join(mismatches)
+
+    def _render_problem_markdown(self, data: dict[str, Any]) -> str:
+        """Render every official section from the controller-frozen v2 record."""
+        problem = data["problem"]
+
+        def json_block(value: Any) -> str:
+            payload = json.dumps(value, ensure_ascii=False, indent=2).replace("/", "\\/")
+            longest = max((len(run) for run in re.findall(r"`+", payload)), default=0)
+            fence = "`" * max(3, longest + 1)
+            return f"{fence}json\n{payload}\n{fence}"
+
+        tags = ", ".join(str(tag) for tag in problem.get("tags", [])) or "None"
+        submitter = problem.get("submitter") or "Not supplied"
+        rows = [
+            f"# {problem['title']}",
+            "",
+            "> Source: [Lean AI formalization leaderboard]"
+            f"({PROBLEM_PAGE_URL.format(problem_id=self.problem_id)})",
+            f"> Crawled from controller-frozen v2 data: {data['generated_at']}",
+            f"> Leaderboard data generated: {data['generated_at']}",
+            "",
+            "## Leaderboard entry",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            f"| Problem id | `{problem['id']}` |",
+            f"| Group | `{problem.get('group', 'Not supplied')}` |",
+            f"| Status | `{problem.get('current_status', 'Not supplied')}` |",
+            f"| Visible | `{problem.get('visible', 'Not supplied')}` |",
+            f"| Statement revision | `{problem['statement_revision']}` |",
+            f"| Author | `{submitter}` |",
+            f"| Module | `{problem['module']}` |",
+            f"| Tags | `{tags}` |",
+            "",
+            "## Problem",
+            "",
+            "The official problem record follows. JSON strings preserve the source text exactly.",
+            "",
+            "### Official statement metadata",
+            "",
+            json_block(problem),
+            "",
+            "### Lifecycle",
+            "",
+            json_block(data.get("lifecycle", {})),
+            "",
+            "### Frozen sets",
+            "",
+            json_block(data.get("sets", [])),
+            "",
+            "### Solutions and replay comparison",
+            "",
+            json_block(data.get("solutions", [])),
+            "",
+            "## Trusted local Lean contract",
+            "",
+            "The repository's `Challenge.lean`, `config.json`, `README.md`, configured submission "
+            "target, and comparator are the formal acceptance authority. The leaderboard record "
+            "is problem context and does not weaken those local declarations.",
+            "",
+            "## Data limitations",
+            "",
+            "- This page is a deterministic view of the controller-frozen v2 JSON stored beside "
+            "it as `problem-site-data.json`.",
+            "- Missing or null fields mean the Lean-Eval endpoint did not supply that datum.",
+            "- Self-reported solution metadata remains self-reported; replay fields retain the "
+            "endpoint's availability status.",
+            "",
+            "### Additional authoritative v2 fields",
+            "",
+            json_block(
+                {
+                    key: value
+                    for key, value in data.items()
+                    if key
+                    not in {
+                        "schema_version",
+                        "generated_at",
+                        "problem",
+                        "lifecycle",
+                        "sets",
+                        "solutions",
+                    }
+                }
+            ),
+            "",
+        ]
+        return "\n".join(rows)
+
+    def _reference_context(self) -> str:
+        """Return mandatory local source instructions for every agent stage."""
+        if self.reference_bundle is not None:
+            return self.reference_bundle.prompt_context()
+        root = self.project / getattr(
+            self.config,
+            "reference_dir",
+            ".humanize/math-reference-library",
+        )
+        provisional = ReferenceBundle(
+            root=root.resolve(),
+            manifest=(root / "manifest.json").resolve(),
+            paths={
+                source.name: (root / source.directory).resolve()
+                for source in REFERENCE_SOURCES
+            },
+            commits={
+                source.name: "controller-preflight-required"
+                for source in REFERENCE_SOURCES
+            },
+        )
+        return provisional.prompt_context()
+
+    def _problem_context(self) -> str:
+        """Return the one-problem provenance block shared by every stage."""
+        if not self.problem_id:
+            return (
+                "The controller must freeze exactly one Lean-Eval problem at "
+                f"`{self.problem_path}` before this stage."
+            )
+        return render_problem_context(
+            self.problem_path,
+            self.problem_id,
+        )
+
+    def _append_reference_context(self, path: Path) -> None:
+        """Ensure the frozen planner artifact retains the mandatory source contract."""
+        content = path.read_text(encoding="utf-8").rstrip()
+        atomic_text(
+            path,
+            content
+            + "\n\n## Mandatory reference context\n\n"
+            + self._reference_context()
+            + "\n",
+        )
+
+    @staticmethod
+    def _reference_use_markdown(records: list[ReferenceUse]) -> str:
+        """Render structured retrieval evidence into human-readable checkpoints."""
+        blocks: list[str] = []
+        for record in records:
+            blocks.extend(
+                [
+                    f"### {record.source}",
+                    "",
+                    "Queries:",
+                    *[f"- `{query}`" for query in record.queries],
+                    "",
+                    "Files inspected:",
+                    *[f"- `{inspected}`" for inspected in record.files],
+                    "",
+                    record.conclusion,
+                    "",
+                ]
+            )
+        return "\n".join(blocks).rstrip()
+
+    def _reference_use_problem(self, answer: Any) -> str:
+        """Reject claimed source evidence that is not inside the prepared snapshots."""
+        if answer is None:
+            return ""
+        records = getattr(answer, "reference_use", None)
+        if records is None:
+            return "structured stage omitted its mandatory reference-use ledger"
+        if self.reference_bundle is None:
+            return "reference-use ledger cannot be checked before reference preflight"
+        for record in records:
+            root = self.reference_bundle.paths[record.source].resolve()
+            valid_path = False
+            for reported in record.files:
+                candidate = Path(reported)
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+                if resolved == root or resolved.is_relative_to(root):
+                    valid_path = True
+                    break
+            if not valid_path:
+                return (
+                    f"reference-use entry for {record.source} did not cite an existing "
+                    f"path inside {root}"
+                )
+        return ""
+
+    def _preflight_status(self, status: str, message: str) -> None:
+        """Persist observable bootstrap progress without creating a theorem node."""
+        atomic_text(
+            self.run_root / "preflight.json",
+            json.dumps(
+                {
+                    "updated_at": now(),
+                    "status": status,
+                    "message": message,
+                    "required_references": [
+                        source.name for source in REFERENCE_SOURCES
+                    ],
+                    "problem_id": self.problem_id or None,
+                },
+                indent=2,
+            )
+            + "\n",
+        )
+        print(f"[PREFLIGHT] {status} — {message}")
 
     def _solve(self, node: NodeRecord) -> SolveResult:
         """Solve one node; child calls use this same method and can split again."""
@@ -285,6 +808,8 @@ class Runtime:
             draft = node_dir / f"plan-draft-v{version}.md"
             output = node_dir / f"plan-v{version}.md"
             body = PLAN_DRAFT.format(
+                problem_context=self._problem_context(),
+                reference_context=self._reference_context(),
                 statement=node.statement,
                 node_id=node.id,
                 lean_name=node.lean_name or "to be chosen",
@@ -354,6 +879,7 @@ class Runtime:
                     plan=str(draft.relative_to(self.project)),
                 )
                 return draft
+            self._append_reference_context(output)
             self.store.update(
                 node.id,
                 "natural-proof",
@@ -384,6 +910,8 @@ class Runtime:
                 )
                 proof = self.agents.worker.clone().new()(
                     NATURAL_PROOF.format(
+                        problem_context=self._problem_context(),
+                        reference_context=self._reference_context(),
                         statement=node.statement,
                         plan=plan,
                         feedback=feedback,
@@ -416,6 +944,14 @@ class Runtime:
                 # is exhausted. A theorem must not become terminal merely because its
                 # natural-language proof needed more review iterations.
                 prior_proof = proof.proof
+                reference_problem = self._reference_use_problem(proof)
+                if reference_problem:
+                    feedback = reference_problem
+                    atomic_text(
+                        self._node_dir(node) / f"natural-feedback-v{version}.txt",
+                        feedback + "\n",
+                    )
+                    continue
                 if proof.unresolved:
                     feedback = "Unresolved proof gaps: " + "; ".join(proof.unresolved)
                     atomic_text(
@@ -429,7 +965,12 @@ class Runtime:
                     f"natural-language RLCR reviewer round {version}",
                 )
                 audit = self.agents.reviewer.clone()(
-                    NATURAL_AUDIT.format(statement=node.statement, proof=proof.proof),
+                    NATURAL_AUDIT.format(
+                        problem_context=self._problem_context(),
+                        reference_context=self._reference_context(),
+                        statement=node.statement,
+                        proof=proof.proof,
+                    ),
                     suppress=True,
                     schema=NaturalAudit,
                 )
@@ -438,7 +979,8 @@ class Runtime:
                         self._node_dir(node) / f"natural-audit-v{version}.json",
                         audit.model_dump_json(indent=2) + "\n",
                     )
-                if audit is not None and audit.passed:
+                reference_problem = self._reference_use_problem(audit)
+                if audit is not None and audit.passed and not reference_problem:
                     path = self._node_dir(node) / f"natural-proof-v{version}.md"
                     atomic_text(
                         path,
@@ -448,6 +990,8 @@ class Runtime:
                             f"{at}. {step}"
                             for at, step in enumerate(proof.key_steps, 1)
                         )
+                        + "\n\n## Reference use\n\n"
+                        + self._reference_use_markdown(proof.reference_use)
                         + "\n",
                     )
                     self.store.update(
@@ -457,7 +1001,7 @@ class Runtime:
                         natural_proof=str(path.relative_to(self.project)),
                     )
                     return proof
-                feedback = self._natural_feedback(audit)
+                feedback = reference_problem or self._natural_feedback(audit)
                 atomic_text(
                     self._node_dir(node) / f"natural-feedback-v{version}.txt",
                     feedback + "\n",
@@ -475,6 +1019,7 @@ class Runtime:
         """Ask for a bounded DAG after the prose proof, validating dependencies locally."""
         if node.depth >= self.config.max_depth:
             return Decomposition(
+                reference_use=proof.reference_use,
                 should_split=False,
                 rationale="configured recursion depth reached",
                 subproblems=[],
@@ -489,6 +1034,8 @@ class Runtime:
             try:
                 made = self.agents.worker.clone()(
                     DECOMPOSE.format(
+                        problem_context=self._problem_context(),
+                        reference_context=self._reference_context(),
                         max_children=self.config.max_children,
                         depth=node.depth,
                         max_depth=self.config.max_depth,
@@ -511,6 +1058,11 @@ class Runtime:
                 feedback = "No valid structured decomposition was returned."
                 self.store.update(node.id, "decomposing", feedback)
                 continue
+            reference_problem = self._reference_use_problem(made)
+            if reference_problem:
+                feedback = reference_problem
+                self.store.update(node.id, "decomposing", feedback)
+                continue
             atomic_text(
                 self._node_dir(node) / f"decomposition-v{attempt}.json",
                 made.model_dump_json(indent=2) + "\n",
@@ -529,6 +1081,8 @@ class Runtime:
             try:
                 audit = self.agents.reviewer.clone()(
                     DECOMPOSITION_AUDIT.format(
+                        problem_context=self._problem_context(),
+                        reference_context=self._reference_context(),
                         statement=node.statement,
                         proof=proof.proof,
                         decomposition=made.model_dump_json(indent=2),
@@ -548,6 +1102,11 @@ class Runtime:
             audited_keys = [one.key for one in audit.nodes] if audit is not None else []
             if audit is None:
                 feedback = "The reviewer returned no decomposition audit."
+                self.store.update(node.id, "decomposing", feedback)
+                continue
+            reference_problem = self._reference_use_problem(audit)
+            if reference_problem:
+                feedback = reference_problem
                 self.store.update(node.id, "decomposing", feedback)
                 continue
             atomic_text(
@@ -873,7 +1432,18 @@ class Runtime:
             proof = natural_path.read_text(encoding="utf-8").strip()
         except OSError as error:
             return SolveResult(ok=False, node_id=node.id, feedback=str(error))
+        reference_use = self._accepted_reference_use(node)
+        if reference_use is None:
+            return SolveResult(
+                ok=False,
+                node_id=node.id,
+                feedback=(
+                    "accepted natural proof lacks the mandatory three-source "
+                    "reference-use ledger"
+                ),
+            )
         natural = NaturalProof(
+            reference_use=reference_use,
             proof=proof,
             key_steps=["Use the preserved independently accepted natural proof."],
             unresolved=[],
@@ -1232,6 +1802,8 @@ class Runtime:
             proof_base_commit=before,
         )
         task = RLCR_LEAN_TASK.format(
+            problem_context=self._problem_context(),
+            reference_context=self._reference_context(),
             node_id=node.id,
             plan_path=plan_path,
             natural_path=natural_path,
@@ -1301,6 +1873,8 @@ class Runtime:
         )
         audit = _WorkspaceAgent(self.agents.reviewer.clone(), worktree)(
             LEAN_AUDIT.format(
+                problem_context=self._problem_context(),
+                reference_context=self._reference_context(),
                 node_id=node.id,
                 statement=node.statement,
                 lean_statement=node.lean_statement
@@ -1320,11 +1894,12 @@ class Runtime:
                 self._node_dir(node) / f"lean-audit-v{audit_version}.json",
                 audit.model_dump_json(indent=2) + "\n",
             )
-        if audit is None or not audit.passed:
+        reference_problem = self._reference_use_problem(audit)
+        if audit is None or not audit.passed or reference_problem:
             return SolveResult(
                 ok=False,
                 node_id=node.id,
-                feedback=self._lean_feedback(audit),
+                feedback=reference_problem or self._lean_feedback(audit),
             )
         self.store.update(
             node.id,
@@ -1380,12 +1955,20 @@ class Runtime:
         rendered = self._render_command(node, lean_files)
         argv = shlex.split(rendered)
         environment = os.environ.copy()
+        environment.pop(
+            getattr(self.config, "huggingface_token_env", "HF_TOKEN"),
+            None,
+        )
         environment.update(
             HUMANIZE_NODE_ID=node.id,
             HUMANIZE_NODE_STATEMENT=node.statement,
             HUMANIZE_LEAN_FILES=os.pathsep.join(lean_files),
             HUMANIZE_RUN_DIR=str(self.run_root),
             HUMANIZE_WIKI_DIR=str(self.store.wiki),
+            HUMANIZE_PROBLEM_MARKDOWN=str(self.problem_path),
+            HUMANIZE_REFERENCE_MANIFEST=str(self.reference_bundle.manifest)
+            if self.reference_bundle is not None
+            else "",
         )
         try:
             completed = subprocess.run(
@@ -1438,11 +2021,20 @@ class Runtime:
 
     def _review_command(self, node: NodeRecord, lean_files: list[str]) -> str:
         """Render the comparator with explicit controller paths for isolated worktrees."""
+        token_environment = getattr(
+            self.config, "huggingface_token_env", "HF_TOKEN"
+        )
         environment = (
             f"HUMANIZE_RUN_DIR={shlex.quote(str(self.run_root))} "
-            f"HUMANIZE_WIKI_DIR={shlex.quote(str(self.store.wiki))}"
+            f"HUMANIZE_WIKI_DIR={shlex.quote(str(self.store.wiki))} "
+            f"HUMANIZE_PROBLEM_MARKDOWN={shlex.quote(str(self.problem_path))} "
+            "HUMANIZE_REFERENCE_MANIFEST="
+            f"{shlex.quote(str(self.reference_bundle.manifest) if self.reference_bundle else '')}"
         )
-        return f"env {environment} {self._render_command(node, lean_files)}"
+        return (
+            f"env -u {shlex.quote(token_environment)} {environment} "
+            f"{self._render_command(node, lean_files)}"
+        )
 
     def _run_rlcr_process(
         self,
@@ -1496,10 +2088,22 @@ class Runtime:
             task,
         ]
         log_path = node_dir / f"rlcr-process-v{node.attempts}.log"
+        environment = os.environ.copy()
+        environment.pop(
+            getattr(self.config, "huggingface_token_env", "HF_TOKEN"),
+            None,
+        )
+        environment.update(
+            HUMANIZE_PROBLEM_MARKDOWN=str(self.problem_path),
+            HUMANIZE_REFERENCE_MANIFEST=str(self.reference_bundle.manifest)
+            if self.reference_bundle is not None
+            else "",
+        )
         with log_path.open("w", encoding="utf-8") as output:
             completed = subprocess.run(
                 command,
                 cwd=worktree,
+                env=environment,
                 stdout=output,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1970,6 +2574,8 @@ class Runtime:
                 ),
             )
             prompt = INTEGRATION_REPAIR.format(
+                problem_context=self._problem_context(),
+                reference_context=self._reference_context(),
                 node_id=node.id,
                 statement=node.statement,
                 lean_statement=node.lean_statement
@@ -2012,6 +2618,8 @@ class Runtime:
                 continue
             audit = _WorkspaceAgent(self.agents.reviewer.clone(), integration)(
                 INTEGRATION_AUDIT.format(
+                    problem_context=self._problem_context(),
+                    reference_context=self._reference_context(),
                     node_id=node.id,
                     statement=node.statement,
                     lean_statement=node.lean_statement
@@ -2034,8 +2642,9 @@ class Runtime:
                     / f"integration-lean-audit-v{audit_version}.json",
                     audit.model_dump_json(indent=2) + "\n",
                 )
-            if audit is None or not audit.passed:
-                feedback = self._lean_feedback(audit)
+            reference_problem = self._reference_use_problem(audit)
+            if audit is None or not audit.passed or reference_problem:
+                feedback = reference_problem or self._lean_feedback(audit)
                 continue
             if not self._git_clean(integration):
                 feedback = "integration reviewer modified the reviewed worktree"
@@ -2293,19 +2902,94 @@ class Runtime:
                 raise ValueError(f"comparator script not found: {argv[1]}")
 
     def _run_root(self) -> Path:
+        """Select one digest-keyed run while serializing concurrent supervisors."""
+        artifact_root = (self.project / self.config.artifact_dir).resolve()
+        lock_root = artifact_root / ".run-selection"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_root / f"{self._task_digest()}.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                return self._run_root_locked(artifact_root)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _run_root_locked(self, artifact_root: Path) -> Path:
+        """Restore or create the digest run while holding the selection lock."""
         digest = self._task_digest()
-        previous = self.state.get("run_dir")
+
+        def validated(relative: Any) -> Path | None:
+            if not isinstance(relative, str) or not relative.strip():
+                return None
+            relative = relative.strip()
+            if Path(relative).is_absolute():
+                return None
+            candidate = (self.project / relative).resolve()
+            if not candidate.is_relative_to(artifact_root) or not candidate.is_dir():
+                return None
+            try:
+                identity = json.loads(
+                    (candidate / "run.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return None
+            if not isinstance(identity, dict):
+                return None
+            if (
+                identity.get("version") != 1
+                or identity.get("task_digest") != digest
+                or identity.get("run_dir") != relative
+            ):
+                return None
+            return candidate
+
         if (
             self.state.get("version") == 1
             and self.state.get("task_digest") == digest
-            and isinstance(previous, str)
-            and (self.project / previous).is_dir()
         ):
-            return (self.project / previous).resolve()
+            candidate = validated(self.state.get("run_dir"))
+            if candidate is not None:
+                return candidate
+        pointers = (
+            artifact_root / "runs-by-task" / f"{digest}.run",
+            artifact_root / "LATEST",
+        )
+        for pointer in pointers:
+            try:
+                candidate = validated(pointer.read_text(encoding="utf-8"))
+            except OSError:
+                candidate = None
+            if candidate is not None:
+                return candidate
+        runs = artifact_root / "runs"
+        if runs.is_dir():
+            identities = sorted(
+                runs.glob("*/run.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for identity in identities:
+                candidate = validated(str(identity.parent.relative_to(self.project)))
+                if candidate is not None:
+                    return candidate
         stamp = now().replace(":", "").replace("-", "")
-        return (
+        candidate = (
             self.project / self.config.artifact_dir / "runs" / f"{stamp}-{digest[:10]}"
         )
+        candidate.mkdir(parents=True, exist_ok=True)
+        relative = str(candidate.relative_to(self.project))
+        identity = {
+            "version": 1,
+            "task_digest": digest,
+            "run_dir": relative,
+            "created_at": now(),
+        }
+        atomic_text(candidate / "run.json", json.dumps(identity, indent=2) + "\n")
+        atomic_text(
+            artifact_root / "runs-by-task" / f"{digest}.run",
+            relative + "\n",
+        )
+        return candidate.resolve()
 
     def _node_dir(self, node: NodeRecord) -> Path:
         path = self.run_root / "nodes" / slug(node.id)
@@ -2323,6 +3007,14 @@ class Runtime:
         """Give nested RLCR only the work it can finish before returning control."""
         path = self._node_dir(node) / f"rlcr-plan-v{node.attempts}.md"
         content = f"""# Implement Lean DAG node `{node.id}`
+
+## Frozen problem acquisition
+
+{self._problem_context()}
+
+## Mandatory research sources
+
+{self._reference_context()}
 
 ## Authoritative selected-node contract
 
@@ -2373,7 +3065,13 @@ not blockers for completion of this implementation-only plan.
         return path
 
     def _task_digest(self) -> str:
-        return hashlib.sha256(self.task.encode()).hexdigest()
+        configured_problem = getattr(self.config, "problem_id", "").strip()
+        material = (
+            f"{configured_problem}\0{self.task}"
+            if configured_problem
+            else self.task
+        )
+        return hashlib.sha256(material.encode()).hexdigest()
 
     def _root_lean_name(self) -> str:
         if self.config.lean_target:
@@ -2444,6 +3142,20 @@ not blockers for completion of this implementation-only plan.
         except OSError:
             feedback = "Continue from this latest preserved draft."
         return proof, feedback or "Continue from this latest preserved draft."
+
+    def _accepted_reference_use(self, node: NodeRecord) -> list[ReferenceUse] | None:
+        """Load the source-use ledger paired with an accepted natural proof."""
+        if not node.natural_proof:
+            return None
+        match = re.search(r"natural-proof-v(\d+)\.md$", node.natural_proof)
+        if match is None:
+            return None
+        record = self._node_dir(node) / f"natural-proof-draft-v{match.group(1)}.json"
+        try:
+            proof = NaturalProof.model_validate_json(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return proof.reference_use
 
     def _preserved_plan(self, node: NodeRecord) -> Path | None:
         """Return the best existing immutable scaffold after an interrupted run.

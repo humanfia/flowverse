@@ -1,6 +1,78 @@
 """Prompts whose invariants are enforced again by structured flow gates."""
 
+FETCH_ONE_PROBLEM = """You are the dedicated problem-acquisition session for one Lean-Eval run.
+Start from this catalog page, but do not enumerate, summarize, or select any other entry:
+{collection_url}
+
+The controller has already resolved the only permitted problem id: `{problem_id}`.
+Fetch only these two representations of that same problem:
+
+- Canonical page: {problem_url}
+- Canonical JSON: {problem_data_url}
+
+Use the local repository only to confirm that this id is the current experiment. Return one
+structured object, never a list. Its `problem_id`, `source_url`, and `data_url` must exactly match
+the values above. Copy `title`, `generated_at`, `problem.statement_revision`, and `problem.module`
+exactly from the JSON into their matching structured fields. Its `markdown` must be a faithful
+single-problem page, not a proof and not a multi-problem digest. It must follow this shape,
+preserving available leaderboard metadata, lifecycle, frozen sets, solution/replay entries,
+self-reported metadata, and data limitations:
+
+# <exact problem title>
+
+> Source: [Lean AI formalization leaderboard](<canonical problem URL>)
+> Crawled: <UTC date/time>
+> Leaderboard data generated: <timestamp from JSON>
+
+## Leaderboard entry
+
+| Field | Value |
+| --- | --- |
+| Problem id | `<the fixed problem id>` |
+| Group | ... |
+| Status | ... |
+| Statement revision | `<exact integer from JSON>` |
+| Author | ... |
+| Module | `<exact module from JSON>` |
+
+## Problem
+
+Include the official notes, source, and published informal guidance for this problem only.
+
+### Lifecycle
+...
+
+### Frozen sets
+...
+
+### Solutions and replay comparison
+...
+
+## Trusted local Lean contract
+
+Identify `Challenge.lean`, `config.json`, the repository `README.md`, and the configured submission
+target when present. State that the local challenge declarations and comparator remain the formal
+acceptance authority.
+
+## Data limitations
+...
+
+Do not write or edit files. The controller cross-checks your response against its independent v2
+download and atomically writes a canonical Markdown rendering of that complete record.
+
+User experiment request (selection context only):
+{request}
+"""
+
 PLAN_DRAFT = """# Recursive Lean theorem node
+
+## Frozen problem acquisition
+
+{problem_context}
+
+## Required research sources
+
+{reference_context}
 
 ## Mathematical task
 
@@ -65,6 +137,10 @@ is true, and show exactly how the lemmas imply the requested result. Named lemma
 become child DAG nodes, but they are not excuses for a gap: give their mathematical proofs here.
 Do not write Lean code and do not edit files.
 
+{problem_context}
+
+{reference_context}
+
 Theorem:
 {statement}
 
@@ -93,6 +169,10 @@ and later child workers formalize them. Do not reject this proof solely because 
 artifacts are absent. Do reject a missing mathematical hypothesis, proof, or non-circular
 dependency in the prose itself.
 
+{problem_context}
+
+{reference_context}
+
 Theorem:
 {statement}
 
@@ -113,6 +193,10 @@ before child proof work begins. This type is frozen and later becomes the indepe
 side of the child comparator. Dependencies must be acyclic.
 Return no children when the theorem is already atomic or depth {depth} reached the limit
 {max_depth}. Do not use `sorry`, placeholders, or circular restatements of the parent.
+
+{problem_context}
+
+{reference_context}
 
 Parent theorem:
 {statement}
@@ -137,6 +221,10 @@ a full declaration, proof, placeholder, post-hoc alias type, or type that depend
 being implemented already. For a split, return exactly one node audit for every key. For an
 atomic theorem, return an empty node list and judge the no-split rationale.
 
+{problem_context}
+
+{reference_context}
+
 Parent theorem:
 {statement}
 
@@ -149,6 +237,10 @@ Proposed decomposition:
 
 RLCR_LEAN_TASK = """Formalize DAG node `{node_id}` only, following the accepted plan at
 `{plan_path}` and the natural-language proof at `{natural_path}`.
+
+{problem_context}
+
+{reference_context}
 
 Exact theorem:
 {statement}
@@ -201,6 +293,10 @@ diff and the named Lean files. Check for weakened statements, changed challenge 
 extra axioms, `sorry`/`admit`, declaration shadowing, or any mismatch with the mathematical
 statement. List every new or completed theorem belonging to this node for the wiki.
 
+{problem_context}
+
+{reference_context}
+
 Node: {node_id}
 Mathematical statement:
 {statement}
@@ -238,6 +334,10 @@ Lean histories. The mathematical plan, natural-language proof, frozen theorem st
 isolated Lean candidate are accepted checkpoints: do not regenerate, revise, or weaken any of
 them. Work only in the current integration worktree.
 
+{problem_context}
+
+{reference_context}
+
 Node: {node_id}
 Exact mathematical statement: {statement}
 Frozen expected Lean type (children only): {lean_statement}
@@ -265,6 +365,10 @@ theorem. You did not write the repair. Inspect the complete diff from the latest
 confirm that both accepted histories and the exact theorem remain present, and reject deletion,
 weakening, challenge changes, new axioms, `sorry`, `admit`, unsafe mechanisms, or prohibited
 imports. Do not edit files.
+
+{problem_context}
+
+{reference_context}
 
 Node: {node_id}
 Mathematical statement: {statement}

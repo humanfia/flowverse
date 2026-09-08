@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
+import tempfile
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -28,9 +30,21 @@ def slug(value: str, *, fallback: str = "theorem") -> str:
 def atomic_text(path: Path, content: str) -> None:
     """Replace one small control artifact without exposing a partial write."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(content, encoding="utf-8")
-    temporary.replace(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    temporary = path.parent / os.path.basename(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class Store:
@@ -40,6 +54,8 @@ class Store:
         self.root = root
         self.wiki = wiki
         self.task = task
+        self.problem_artifact = ""
+        self.reference_manifest = ""
         self.nodes: dict[str, NodeRecord] = {}
         self._lock = threading.RLock()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -138,6 +154,13 @@ class Store:
             payload = {
                 "updated_at": now(),
                 "task": self.task,
+                "problem_artifact": self.problem_artifact,
+                "reference_manifest": self.reference_manifest,
+                "required_references": [
+                    "TauCeti",
+                    "lean-pool",
+                    "mathlib-internal",
+                ],
                 "nodes": [one.model_dump(mode="json") for one in ordered],
             }
             atomic_text(
@@ -186,6 +209,12 @@ class Store:
                 "# Recursive Lean proof DAG",
                 "",
                 f"Updated: {payload['updated_at']}",
+                f"Fetched problem: `{self.problem_artifact or 'preflight pending'}`",
+                (
+                    "Mandatory references for every stage: TauCeti, lean-pool, and "
+                    "mathlib-internal"
+                ),
+                f"Reference manifest: `{self.reference_manifest or 'preflight pending'}`",
                 "",
                 "```mermaid",
                 diagram.rstrip(),
@@ -235,6 +264,9 @@ class Store:
 - Proof base commit: `{node.proof_base_commit or "not recorded"}`
 - Reviewed candidate commit: `{node.candidate_commit or "not recorded"}`
 - Integrated problem commit: `{node.integrated_commit or "not recorded"}`
+- Fetched problem artifact: `{self.problem_artifact or "not recorded"}`
+- Reference snapshot manifest: `{self.reference_manifest or "not recorded"}`
+- Mandatory reference corpora: `TauCeti`, `lean-pool`, `mathlib-internal`
 - Updated: {now()}
 
 ## Statement
