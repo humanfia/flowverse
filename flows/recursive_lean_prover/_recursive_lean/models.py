@@ -110,9 +110,9 @@ class FetchedProblem(BaseModel):
         if headings[0].strip() != self.title.strip():
             raise ValueError("problem Markdown heading must exactly match title")
         problem_rows = re.findall(r"(?m)^\| Problem id \| `([^`]+)` \|\s*$", self.markdown)
-        if problem_rows != [self.problem_id]:
+        if not problem_rows or any(row != self.problem_id for row in problem_rows):
             raise ValueError(
-                "problem Markdown must contain exactly one matching Problem id row"
+                "problem Markdown must contain Problem id rows that all match the selected problem"
             )
         leaf_urls = set(
             re.findall(
