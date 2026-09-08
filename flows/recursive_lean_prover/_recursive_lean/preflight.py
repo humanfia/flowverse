@@ -322,6 +322,30 @@ class ReferenceLibrary:
                 f"reference {source.name} is incomplete at {destination}; missing: "
                 + ", ".join(missing)
             )
+        if expected_commit is not None and require_read_only:
+            actual = ReferenceLibrary._commit(destination)
+            if actual != expected_commit:
+                raise RuntimeError(
+                    f"reference {source.name} HEAD differs from its pinned manifest"
+                )
+            boundaries = [
+                destination,
+                destination / ".git",
+                *(destination / one for one in source.sentinels),
+            ]
+            writable = next(
+                (
+                    path
+                    for path in boundaries
+                    if not path.is_symlink() and path.stat().st_mode & 0o222
+                ),
+                None,
+            )
+            if writable is not None:
+                raise RuntimeError(
+                    f"reference {source.name} is not read-only: {writable}"
+                )
+            return
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=destination,
@@ -331,12 +355,6 @@ class ReferenceLibrary:
         )
         if status.returncode != 0 or status.stdout.strip():
             raise RuntimeError(f"reference {source.name} is not a clean snapshot")
-        if expected_commit is not None:
-            actual = ReferenceLibrary._commit(destination)
-            if actual != expected_commit:
-                raise RuntimeError(
-                    f"reference {source.name} HEAD differs from its pinned manifest"
-                )
         if require_read_only:
             writable = ReferenceLibrary._writable_path(destination)
             if writable is not None:

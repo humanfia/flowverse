@@ -154,7 +154,7 @@ class PreflightTests(unittest.TestCase):
             FetchedProblem.model_validate(
                 baseline | {"markdown": problem_markdown() + "\n# A second problem\n"}
             )
-        with self.assertRaisesRegex(ValueError, "exactly one matching Problem id row"):
+        with self.assertRaisesRegex(ValueError, "Problem id rows that all match"):
             FetchedProblem.model_validate(
                 baseline
                 | {
@@ -206,8 +206,10 @@ class PreflightTests(unittest.TestCase):
             helper.chmod(0o700)
             clone_calls: list[tuple[list[str], dict[str, str]]] = []
             checkout_sources: dict[Path, Any] = {}
+            status_calls = 0
 
             def fake_run(arguments: list[str], **kwargs: Any) -> SimpleNamespace:
+                nonlocal status_calls
                 if "clone" in arguments:
                     destination = Path(arguments[-1])
                     destination.mkdir(parents=True)
@@ -235,6 +237,7 @@ class PreflightTests(unittest.TestCase):
                         stderr="",
                     )
                 if arguments[1:] == ["status", "--porcelain"]:
+                    status_calls += 1
                     return SimpleNamespace(returncode=0, stdout="", stderr="")
                 return SimpleNamespace(returncode=0, stdout="a" * 40 + "\n", stderr="")
 
@@ -253,6 +256,7 @@ class PreflightTests(unittest.TestCase):
             first_manifest = bundle.manifest.read_text()
             self.assertNotIn("top-secret-token", first_manifest)
             self.assertEqual(len(clone_calls), 3)
+            self.assertEqual(status_calls, 6)
             self.assertTrue(
                 all("top-secret-token" not in " ".join(call[0]) for call in clone_calls)
             )
@@ -281,6 +285,7 @@ class PreflightTests(unittest.TestCase):
                     askpass_script=helper,
                 ).prepare()
             self.assertEqual(resumed.commits, bundle.commits)
+            self.assertEqual(status_calls, 6)
             self.assertEqual(bundle.manifest.read_text(), first_manifest)
             context = bundle.prompt_context()
             for source in ("TauCeti", "lean-pool", "mathlib-internal"):
