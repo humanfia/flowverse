@@ -32,6 +32,12 @@ section. References are evidence and examples: the local Challenge declarations 
 comparator remain the theorem authority, and material from a different toolchain or problem must
 not be copied without compatibility and provenance checks.
 
+Files listed in `agent_hidden_files` are comparator-only sources. The controller removes them
+from the main checkout and every node or integration worktree before an agent session begins.
+Never recover or inspect them through Git objects/history, alternate worktrees, caches, parent
+directories, or comparator internals. Only the exact configured synchronous comparator may stage
+and consume their committed blobs, and it must remove them again before returning control.
+
 Before writing new or revised Lean:
 
 1. Give a numbered natural-language proof.

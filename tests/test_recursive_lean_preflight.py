@@ -495,6 +495,9 @@ class PreflightTests(unittest.TestCase):
     def test_child_formalization_removes_unproved_inherited_placeholders(self) -> None:
         self.assertIn("remove that placeholder declaration before comparison", RLCR_LEAN_TASK)
         self.assertIn("Never replace it with a fake", RLCR_LEAN_TASK)
+        self.assertIn(
+            "Do not recover or inspect them through Git objects/history", RLCR_LEAN_TASK
+        )
         for field in ("{node_id}", "{node_title}", "{lean_name}", "{lean_statement}"):
             self.assertIn(field, NATURAL_AUDIT)
 

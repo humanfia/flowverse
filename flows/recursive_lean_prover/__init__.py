@@ -141,6 +141,13 @@ class Config(BaseModel):
         default="",
         description="Lean file the worker must edit; blank lets it infer the project target",
     )
+    agent_hidden_files: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "tracked comparator-only files removed from the main checkout and every "
+            "agent worktree before any agent session starts"
+        ),
+    )
     comparator_command: str = Field(
         default="bash tools/check-with-comparator.sh",
         min_length=1,
@@ -204,6 +211,30 @@ class Config(BaseModel):
         if normalized and not normalized.endswith(".lean"):
             raise ValueError("must name a .lean file")
         return normalized
+
+    @field_validator("agent_hidden_files")
+    @classmethod
+    def _relative_hidden_files(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        """Accept only unique repository-relative file paths outside Git metadata."""
+        normalized: list[str] = []
+        for value in values:
+            one = value.strip().rstrip("/")
+            parts = Path(one).parts
+            if (
+                not one
+                or not parts
+                or Path(one).is_absolute()
+                or ".." in parts
+                or parts[0] == ".git"
+            ):
+                raise ValueError(
+                    "entries must be relative file paths inside the repository and "
+                    "outside .git"
+                )
+            if one in normalized:
+                raise ValueError("entries must be unique")
+            normalized.append(one)
+        return tuple(normalized)
 
     @model_validator(mode="after")
     def _tree_fits(self) -> Config:

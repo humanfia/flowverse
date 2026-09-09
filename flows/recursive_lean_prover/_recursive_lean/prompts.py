@@ -59,6 +59,9 @@ acceptance authority.
 
 Do not write or edit files. The controller cross-checks your response against its independent v2
 download and atomically writes a canonical Markdown rendering of that complete record.
+Do not inspect any comparator-only source that the controller has removed from the agent
+workspace, including through Git objects/history, alternate worktrees, caches, parent directories,
+or comparator internals.
 
 User experiment request (selection context only):
 {request}
@@ -280,6 +283,9 @@ Requirements:
   source-safety scan covers an inherited `sorry`/`admit` placeholder for a node that is not yet
   proved, remove that placeholder declaration before comparison. Never replace it with a fake
   proof, alter a trusted challenge file, or remove a comparator-approved declaration.
+- Comparator-only files deliberately absent from this worktree are outside the agent evidence
+  boundary. Do not recover or inspect them through Git objects/history, alternate worktrees,
+  caches, parent directories, or comparator internals.
 - No `sorry`, `admit`, new axioms, unsafe loopholes, or weakened replacement theorem.
 - Run `{comparator_command}` until it exits zero and contains `{comparator_success}`.
 - For a non-root node, that exact node comparator is the complete configured correctness gate.

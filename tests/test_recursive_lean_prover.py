@@ -21,6 +21,7 @@ FLOW = Path(__file__).parents[1] / "flows" / "recursive_lean_prover"
 sys.path.insert(0, str(FLOW))
 
 from __init__ import (
+    Config,
     WorktreeRlcrConfig,
     _nested_rlcr_config,
     _require_explicit_rlcr_review_skip,
@@ -117,6 +118,65 @@ class WorktreeTests(unittest.TestCase):
         self.assertEqual(forwarded["base_branch"], "")
         self.assertTrue(forwarded["skip_code_review"])
         self.assertFalse(forwarded["skip_impl"])
+
+    def test_agent_hidden_files_require_safe_unique_relative_paths(self) -> None:
+        self.assertEqual(
+            Config(agent_hidden_files=["Solution.lean"]).agent_hidden_files,
+            ("Solution.lean",),
+        )
+        for invalid in (["../Solution.lean"], ["/tmp/Solution.lean"], [".git/config"]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                Config(agent_hidden_files=invalid)
+        with self.assertRaises(ValueError):
+            Config(agent_hidden_files=["Solution.lean", "Solution.lean"])
+
+    def test_agent_hidden_file_is_absent_from_primary_and_node_worktrees(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "protected_problem"
+            project.mkdir()
+            git(project, "init", "-b", "main")
+            git(project, "config", "user.name", "Flow Test")
+            git(project, "config", "user.email", "flow-test@example.invalid")
+            (project / ".gitignore").write_text(".humanize/\n.lake/\n")
+            (project / "Solution.lean").write_text(
+                "theorem protected : True := by trivial\n"
+            )
+            (project / "Submission.lean").write_text(
+                "namespace Submission\nend Submission\n"
+            )
+            git(project, "add", ".gitignore", "Solution.lean", "Submission.lean")
+            git(project, "commit", "-m", "test: initialize protected fixture")
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    agent_hidden_files=("Solution.lean",),
+                )
+                runtime = Runtime(None, "fixture theorem", config, {})
+                runtime._seal_agent_workspace(project)
+
+                self.assertFalse((project / "Solution.lean").exists())
+                self.assertTrue(runtime._git_clean(project))
+                self.assertTrue(
+                    git(project, "ls-files", "-v", "Solution.lean").startswith("S ")
+                )
+
+                node = NodeRecord(
+                    id="root.leaf-a1",
+                    title="Leaf",
+                    statement="True",
+                    attempts=1,
+                )
+                worktree = runtime._node_worktree(node)
+                self.assertFalse((worktree / "Solution.lean").exists())
+                self.assertTrue(runtime._git_clean(worktree))
+                self.assertTrue(
+                    git(worktree, "ls-files", "-v", "Solution.lean").startswith("S ")
+                )
+            finally:
+                os.chdir(original)
 
     def test_nested_rlcr_refuses_an_official_flow_that_cannot_skip_review(self) -> None:
         with patch.dict(

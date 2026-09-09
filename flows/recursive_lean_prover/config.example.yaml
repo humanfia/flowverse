@@ -28,6 +28,11 @@ huggingface_token_env: HF_TOKEN
 # Set this to the repository's candidate Lean file when it has one.
 lean_target: ""
 
+# Optional tracked files that only the synchronous comparator may consume. The
+# controller removes them from the main checkout and every agent worktree while
+# retaining their committed blobs for the comparator's own private staging.
+agent_hidden_files: []
+
 # This is parsed as argv, not by a shell. Available placeholders:
 # {node_id}, {node_dir}, {run_dir}, {wiki_dir}, {lean_target}, {lean_files}
 # The command also receives HUMANIZE_NODE_* environment variables.

@@ -178,6 +178,7 @@ class Runtime:
             raise ValueError("recursive_lean_prover needs a mathematical problem")
         self._require_git()
         self._require_comparator()
+        self._seal_agent_workspace(self.project)
         run_relative = str(self.run_root.relative_to(self.project))
         identity = {
             "version": 1,
@@ -630,14 +631,26 @@ class Runtime:
     def _problem_context(self) -> str:
         """Return the one-problem provenance block shared by every stage."""
         if not self.problem_id:
-            return (
+            context = (
                 "The controller must freeze exactly one Lean-Eval problem at "
                 f"`{self.problem_path}` before this stage."
             )
-        return render_problem_context(
-            self.problem_path,
-            self.problem_id,
-        )
+        else:
+            context = render_problem_context(
+                self.problem_path,
+                self.problem_id,
+            )
+        hidden = tuple(getattr(self.config, "agent_hidden_files", ()))
+        if hidden:
+            paths = ", ".join(f"`{one}`" for one in hidden)
+            context += (
+                "\n\nComparator-only source boundary: "
+                f"{paths} are deliberately absent from every agent workspace. "
+                "Do not recover or inspect them through Git objects/history, alternate "
+                "worktrees, caches, parent directories, or comparator internals. The exact "
+                "configured comparator is the only authorized consumer."
+            )
+        return context
 
     def _append_reference_context(self, path: Path) -> None:
         """Ensure the frozen planner artifact retains the mandatory source contract."""
@@ -2141,13 +2154,13 @@ class Runtime:
             recorded is not None and self._git_toplevel(recorded) == recorded
         )
         if recorded_valid and len(str(recorded)) <= 180:
-            self._prepare_lake_workspace(recorded)
+            self._prepare_agent_worktree(recorded)
             return recorded
         path = self._node_worktree_path(node)
         if recorded_valid:
             if self._git_toplevel(path) == path:
                 node.worktree = str(path)
-                self._prepare_lake_workspace(path)
+                self._prepare_agent_worktree(path)
                 return path
             if path.exists() and any(path.iterdir()):
                 raise RuntimeError(
@@ -2166,11 +2179,11 @@ class Runtime:
                 detail = (moved.stderr or moved.stdout).strip()
                 raise RuntimeError(f"could not shorten node worktree path: {detail}")
             node.worktree = str(path)
-            self._prepare_lake_workspace(path)
+            self._prepare_agent_worktree(path)
             return path
         if self._git_toplevel(path) == path:
             node.worktree = str(path)
-            self._prepare_lake_workspace(path)
+            self._prepare_agent_worktree(path)
             return path
         if path.exists() and any(path.iterdir()):
             raise RuntimeError(
@@ -2243,8 +2256,66 @@ class Runtime:
         # commit the new worktree actually checked out, not a pre-lock snapshot of the
         # moving problem branch.
         node.proof_base_commit = self._git_head(path)
-        self._prepare_lake_workspace(path)
+        self._prepare_agent_worktree(path)
         return path
+
+    def _prepare_agent_worktree(self, path: Path) -> None:
+        """Apply the protected-source boundary before provisioning build inputs."""
+        self._seal_agent_workspace(path)
+        self._prepare_lake_workspace(path)
+
+    def _seal_agent_workspace(self, path: Path) -> None:
+        """Remove configured tracked comparator-only files without dirtying Git.
+
+        The committed blob remains available to a trusted synchronous comparator, while
+        ordinary agent reads in the checkout fail. Every worktree has its own index, so
+        this runs for the primary project, node worktrees, and integration worktrees.
+        """
+        hidden = tuple(getattr(self.config, "agent_hidden_files", ()))
+        for relative in hidden:
+            target = (path / relative).resolve(strict=False)
+            if not target.is_relative_to(path.resolve()):
+                raise RuntimeError(f"unsafe agent-hidden path: {relative}")
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", "--", relative],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if tracked.returncode:
+                raise RuntimeError(
+                    f"agent-hidden file is not tracked in this worktree: {relative}"
+                )
+            unchanged = subprocess.run(
+                ["git", "diff", "--quiet", "HEAD", "--", relative],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if unchanged.returncode:
+                raise RuntimeError(
+                    f"agent-hidden file differs from HEAD; refusing to conceal it: {relative}"
+                )
+            skipped = subprocess.run(
+                ["git", "update-index", "--skip-worktree", "--", relative],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if skipped.returncode:
+                detail = (skipped.stderr or skipped.stdout).strip()
+                raise RuntimeError(f"could not protect {relative}: {detail}")
+            if target.is_dir() and not target.is_symlink():
+                raise RuntimeError(f"agent-hidden path is not a file: {relative}")
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            if target.exists() or target.is_symlink():
+                raise RuntimeError(f"agent-hidden file remains visible: {relative}")
+        if hidden and not self._git_clean(path):
+            raise RuntimeError("protecting comparator-only files dirtied the Git worktree")
 
     def _node_worktree_path(self, node: NodeRecord) -> Path:
         """Choose a stable checkout path short enough for Humanize's epic key."""
@@ -2468,7 +2539,7 @@ class Runtime:
                     pass
                 return False, f"could not create integration recheck worktree: {detail}"
             try:
-                self._prepare_lake_workspace(integration)
+                self._prepare_agent_worktree(integration)
                 applied, unioned, detail = self._apply_candidate_commits(
                     integration, commits
                 )

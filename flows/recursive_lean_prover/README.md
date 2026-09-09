@@ -202,6 +202,9 @@ The settings most often changed are:
 - `reference_dir`: ignored cache containing all three pinned reference checkouts.
 - `huggingface_token_env`: name of the environment variable carrying the private dataset token.
 - `lean_target`: project-relative candidate `.lean` file.
+- `agent_hidden_files`: tracked comparator-only files removed from the main checkout and every
+  node/integration worktree before agents start. The comparator may stage their committed blobs
+  synchronously, but prompts prohibit recovering them through Git history or other worktrees.
 - `comparator_command`: argv-style command; it is not evaluated by a shell.
 
 Then run both worker and reviewer on Codex:
