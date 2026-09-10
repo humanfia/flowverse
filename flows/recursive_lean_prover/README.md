@@ -120,8 +120,8 @@ hmz check user/recursive_lean_prover
 
 First create a task file such as `PROBLEM.md`. It should state the exact theorem(s), the Lean file
 that may be edited, any files that must not be inspected or changed, and any project-specific
-acceptance rules. Internet access is enabled by the agent arguments below, but a task may impose a
-narrower source policy.
+acceptance rules. Both roles may read the internet, which is what a place that declares nothing
+else runs at, but a task may impose a narrower source policy.
 
 Provide a project-specific comparator wrapper. It must return a nonzero status on rejection and
 print the configured marker only after every required check succeeds. Adapt this outline to the
@@ -160,14 +160,19 @@ Then run both worker and reviewer on Codex:
 
 ```sh
 hmz exec -f user/recursive_lean_prover -c recursive-proof.yaml \
-  -a cli=codex,model=gpt-5.6-sol,effort=max,permission=auto,web_search=on \
-  -a cli=codex,model=gpt-5.6-sol,effort=max,permission=auto,web_search=on \
+  -a cli=codex,model=gpt-5.6-sol,effort=max \
+  -a cli=codex,model=gpt-5.6-sol,effort=max \
   "$(cat PROBLEM.md)"
 ```
 
-Both roles use `permission=auto`: RLCR's plan-integrity guards operate on permission requests,
-and a Lean comparator may need to write build artifacts. The reviewer prompt forbids edits and
-the reviewer remains a separate Codex agent with independent sessions.
+The line says which CLI, model and effort each role runs; it does not say what either role is
+allowed to do. That is the flow's, written as an `AgentDefaults(permission="auto")` beside each
+place it declares, and settled onto whichever agent fills the place before its first turn --
+including the isolated node process, which is the same two places again. Both roles are `auto`
+because RLCR's plan-integrity guards operate on permission requests, so a worker nothing asks
+about is a worker they never see, and because a Lean comparator may need to write build
+artifacts. The reviewer prompt forbids edits and the reviewer remains a separate Codex agent
+with independent sessions.
 
 Use `Ctrl-C` to stop only this foreground supervisor. To resume, run the same `hmz exec` command
 with the same task text, config, and repository. The flow reuses the durable run, accepted proof

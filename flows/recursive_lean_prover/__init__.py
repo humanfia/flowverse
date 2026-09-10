@@ -8,17 +8,26 @@ from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
 from _recursive_lean.runtime import Runtime
-from hmz.flows import Agent, Moment, flow, load
+from hmz.flows import Agent, AgentDefaults, Moment, flow, load
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 MIN_RECURSIVE_NODES = 3
 
 
 class Agents(NamedTuple):
-    """Two independent Codex roles; the worker writes and the reviewer only judges."""
+    """Two independent Codex roles; the worker writes and the reviewer only judges.
 
-    worker: Annotated[Agent, Moment.PERMISSION_REQUEST]
-    reviewer: Agent
+    Both run at `auto`, which is the flow's to say and not the line that starts it: RLCR's
+    plan-integrity guards are hooks on the moment a tool is asked about, so a worker nothing
+    asks about is a worker they never see, and a Lean comparator may need to write build
+    artifacts. The reviewer prompt forbids edits; what keeps it from making them is that it
+    is a separate agent with sessions of its own, not a rung.
+    """
+
+    worker: Annotated[
+        Agent, Moment.PERMISSION_REQUEST, AgentDefaults(permission="auto")
+    ]
+    reviewer: Annotated[Agent, AgentDefaults(permission="auto")]
 
 
 class Config(BaseModel):

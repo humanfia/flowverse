@@ -1509,15 +1509,19 @@ class Runtime:
 
     @staticmethod
     def _agent_spec(agent: Any) -> str:
-        """Serialize a parent Humanize agent for an isolated ``hmz exec`` child."""
+        """Serialize a parent Humanize agent for an isolated ``hmz exec`` child.
+
+        What the agent may do and whether it may read the internet are not written here.
+        They are the flow's to say rather than the line that runs it, and the child is the
+        same two places this one declares: ``worktree-rlcr`` carries the ``AgentDefaults``
+        beside them, so the child process settles ``auto`` on both without being told.
+        """
         config = agent.config
         fields = [
             f"cli={agent.backend}",
             f"model={config.model}",
             f"effort={config.effort}",
             f"service_tier={config.service_tier}",
-            f"permission={config.permission}",
-            f"web_search={'on' if config.web_search else 'off'}",
         ]
         if config.provider:
             fields.append(f"provider={config.provider}")

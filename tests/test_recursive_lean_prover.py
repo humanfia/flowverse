@@ -232,7 +232,15 @@ class WorktreeTests(unittest.TestCase):
                 command = launched.call_args.args[0]
                 self.assertIn(":worktree-rlcr", command[3])
                 self.assertEqual(command[-1], "prove the node")
-                self.assertTrue(any("web_search=on" in part for part in command))
+                spec = command[command.index("-a") + 1]
+                self.assertEqual(
+                    spec,
+                    "cli=codex,model=gpt-5.6-sol,effort=max,service_tier=default",
+                )
+                # What the agent may do and whether it reads the internet belong to the
+                # child flow's own places now; an `-a` that wrote either is refused.
+                self.assertFalse(any("permission=" in part for part in command))
+                self.assertFalse(any("web_search=" in part for part in command))
                 rlcr_config = json.loads(
                     (
                         runtime._node_dir(node)
