@@ -254,7 +254,11 @@ def test_permanent_review_failure_is_bounded_and_returns_the_candidate(
         turn_retries=1,
     )
 
-    assert calls == 4  # two analysis attempts, then two review attempts
+    # Two analysis attempts, then two review attempts -- each costing two calls, because
+    # humanize reads `service unavailable` as a gateway that went away and takes the turn
+    # again once beneath the flow. The flow's own bound is unchanged: four attempts, and it
+    # still comes back with the candidate rather than going round.
+    assert calls == 8
     assert "Final Status: `partially_converged`" in plan.read_text()
 
 
