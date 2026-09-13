@@ -563,7 +563,7 @@ class WorktreeTests(unittest.TestCase):
                     id="root.stable-base-a1",
                     title="Stable base",
                     statement="True",
-                    implementation_base_commit="abc123",
+                    proof_base_commit="abc123",
                 )
 
                 rendered = runtime._review_command(node, ["Submission.lean"])
