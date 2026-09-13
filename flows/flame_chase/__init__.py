@@ -33,7 +33,7 @@ from typing import Any
 from hmz.flows import Agent, Allowance, flow
 
 
-@flow(budget=Allowance(tokens=10.0), resumable=True)
+@flow(budget=Allowance(tokens=33.550336), resumable=True)
 def run(
     agents: tuple[Agent, Agent],
     task: str,
