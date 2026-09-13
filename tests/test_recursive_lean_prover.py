@@ -178,6 +178,50 @@ class WorktreeTests(unittest.TestCase):
             finally:
                 os.chdir(original)
 
+    def test_resealing_preserves_preexisting_participant_changes(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "dirty_participant_worktree"
+            project.mkdir()
+            git(project, "init", "-b", "main")
+            git(project, "config", "user.name", "Flow Test")
+            git(project, "config", "user.email", "flow-test@example.invalid")
+            (project / ".gitignore").write_text(".humanize/\n.lake/\n")
+            (project / "Solution.lean").write_text(
+                "theorem protected : True := by trivial\n"
+            )
+            (project / "Submission.lean").write_text(
+                "namespace Submission\nend Submission\n"
+            )
+            git(project, "add", ".gitignore", "Solution.lean", "Submission.lean")
+            git(project, "commit", "-m", "test: initialize dirty fixture")
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    agent_hidden_files=("Solution.lean",),
+                )
+                runtime = Runtime(None, "fixture theorem", config, {})
+                (project / "Submission.lean").write_text(
+                    "namespace Submission\ntheorem work : True := by trivial\nend Submission\n"
+                )
+                (project / "Submission").mkdir()
+                (project / "Submission" / "Work.lean").write_text(
+                    "namespace Submission\ntheorem moreWork : True := by trivial\nend Submission\n"
+                )
+                status_before = runtime._git_status_snapshot(project)
+
+                runtime._seal_agent_workspace(project)
+
+                self.assertEqual(runtime._git_status_snapshot(project), status_before)
+                self.assertFalse((project / "Solution.lean").exists())
+                self.assertTrue(
+                    git(project, "ls-files", "-v", "Solution.lean").startswith("S ")
+                )
+            finally:
+                os.chdir(original)
+
     def test_nested_rlcr_refuses_an_official_flow_that_cannot_skip_review(self) -> None:
         with patch.dict(
             _require_explicit_rlcr_review_skip.__globals__,

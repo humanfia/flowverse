@@ -2272,6 +2272,7 @@ class Runtime:
         this runs for the primary project, node worktrees, and integration worktrees.
         """
         hidden = tuple(getattr(self.config, "agent_hidden_files", ()))
+        status_before = self._git_status_snapshot(path) if hidden else b""
         for relative in hidden:
             target = (path / relative).resolve(strict=False)
             if not target.is_relative_to(path.resolve()):
@@ -2314,8 +2315,24 @@ class Runtime:
                 target.unlink()
             if target.exists() or target.is_symlink():
                 raise RuntimeError(f"agent-hidden file remains visible: {relative}")
-        if hidden and not self._git_clean(path):
+        if hidden and self._git_status_snapshot(path) != status_before:
             raise RuntimeError("protecting comparator-only files dirtied the Git worktree")
+
+    @staticmethod
+    def _git_status_snapshot(cwd: Path) -> bytes:
+        """Return an exact status snapshot, including every untracked path."""
+        completed = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=cwd,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode:
+            detail = (completed.stderr or completed.stdout).decode(
+                errors="replace"
+            ).strip()
+            raise RuntimeError(f"could not inspect Git worktree status: {detail}")
+        return completed.stdout
 
     def _node_worktree_path(self, node: NodeRecord) -> Path:
         """Choose a stable checkout path short enough for Humanize's epic key."""
