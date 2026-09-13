@@ -1855,6 +1855,7 @@ class Runtime:
             worktree=str(worktree),
             proof_branch=self._node_branch(node),
             proof_base_commit=before,
+            implementation_base_commit=review_base,
         )
         task = RLCR_LEAN_TASK.format(
             problem_context=self._problem_context(),
@@ -2018,6 +2019,7 @@ class Runtime:
             HUMANIZE_NODE_ID=node.id,
             HUMANIZE_NODE_STATEMENT=node.statement,
             HUMANIZE_LEAN_FILES=os.pathsep.join(lean_files),
+            HUMANIZE_CANDIDATE_BASE_COMMIT=node.implementation_base_commit,
             HUMANIZE_RUN_DIR=str(self.run_root),
             HUMANIZE_WIKI_DIR=str(self.store.wiki),
             HUMANIZE_PROBLEM_MARKDOWN=str(self.problem_path),
@@ -2080,6 +2082,8 @@ class Runtime:
             self.config, "huggingface_token_env", "HF_TOKEN"
         )
         environment = (
+            "HUMANIZE_CANDIDATE_BASE_COMMIT="
+            f"{shlex.quote(node.implementation_base_commit)} "
             f"HUMANIZE_RUN_DIR={shlex.quote(str(self.run_root))} "
             f"HUMANIZE_WIKI_DIR={shlex.quote(str(self.store.wiki))} "
             f"HUMANIZE_PROBLEM_MARKDOWN={shlex.quote(str(self.problem_path))} "

@@ -442,6 +442,7 @@ class NodeRecord(BaseModel):
     worktree: str = ""
     proof_branch: str = ""
     proof_base_commit: str = ""
+    implementation_base_commit: str = ""
     candidate_commit: str = ""
     integrated_commit: str = ""
     children: list[str] = Field(default_factory=list)

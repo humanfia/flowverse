@@ -130,8 +130,11 @@ offline-reproducible and prevents Lake from trying to update shared read-only Gi
 
 The comparator is called once by the flow before review, then the reviewer is required to run
 it again. It receives `HUMANIZE_NODE_ID`, `HUMANIZE_NODE_STATEMENT`,
-`HUMANIZE_LEAN_FILES`, `HUMANIZE_RUN_DIR`, and `HUMANIZE_WIKI_DIR`. A repository that needs a
-different comparator target for each generated lemma should use these values in its wrapper.
+`HUMANIZE_LEAN_FILES`, `HUMANIZE_CANDIDATE_BASE_COMMIT`, `HUMANIZE_RUN_DIR`, and
+`HUMANIZE_WIKI_DIR`. `HUMANIZE_CANDIDATE_BASE_COMMIT` is the immutable post-overlay commit from
+which the node implementation started, so project wrappers can attribute diagnostics across every
+RLCR round rather than only the final commit. A repository that needs a different comparator target
+for each generated lemma should use these values in its wrapper.
 
 ## Install
 

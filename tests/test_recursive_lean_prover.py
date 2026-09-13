@@ -543,6 +543,57 @@ class WorktreeTests(unittest.TestCase):
             finally:
                 os.chdir(original)
 
+    def test_comparator_commands_receive_stable_candidate_base(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "comparator_base_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    lean_target="Submission.lean",
+                    comparator_command="bash exact-comparator.sh {node_id}",
+                    comparator_success="Your solution is okay!",
+                    comparator_timeout=60,
+                )
+                runtime = Runtime(None, "comparator base fixture", config, {})
+                node = NodeRecord(
+                    id="root.stable-base-a1",
+                    title="Stable base",
+                    statement="True",
+                    implementation_base_commit="abc123",
+                )
+
+                rendered = runtime._review_command(node, ["Submission.lean"])
+
+                self.assertIn(
+                    "HUMANIZE_CANDIDATE_BASE_COMMIT=abc123", rendered
+                )
+                self.assertIn("exact-comparator.sh root.stable-base-a1", rendered)
+                with patch(
+                    "_recursive_lean.runtime.subprocess.run"
+                ) as launched:
+                    launched.return_value = SimpleNamespace(
+                        returncode=0,
+                        stdout="Your solution is okay!\n",
+                        stderr="",
+                    )
+                    passed, _, _ = runtime._compare(
+                        node, ["Submission.lean"], project
+                    )
+
+                self.assertTrue(passed)
+                self.assertEqual(
+                    launched.call_args.kwargs["env"][
+                        "HUMANIZE_CANDIDATE_BASE_COMMIT"
+                    ],
+                    "abc123",
+                )
+            finally:
+                os.chdir(original)
+
     def test_nested_plan_cannot_reopen_accepted_decomposition(self) -> None:
         original = Path.cwd()
         with tempfile.TemporaryDirectory() as temporary:
