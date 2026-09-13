@@ -780,6 +780,17 @@ class Runtime:
                 break
             natural = self._accepted_natural_proof(node, plan, feedback)
             if natural is None:
+                if node.status == "failed":
+                    feedback = node.message or (
+                        "Independent review rejected the frozen child contract."
+                    )
+                    if node.parent:
+                        self._revise_parent(node, feedback)
+                    return SolveResult(
+                        ok=False,
+                        node_id=node.id,
+                        feedback=feedback,
+                    )
                 feedback = "No complete natural-language proof survived review."
                 continue
             decomposition = self._decompose(node, natural)
@@ -997,6 +1008,33 @@ class Runtime:
                         audit.model_dump_json(indent=2) + "\n",
                     )
                 reference_problem = self._reference_use_problem(audit)
+                if (
+                    audit is not None
+                    and audit.requires_parent_revision
+                    and node.parent is not None
+                    and not reference_problem
+                ):
+                    feedback = "; ".join(
+                        part
+                        for part in (
+                            audit.contract_contradiction.strip(),
+                            self._natural_feedback(audit),
+                        )
+                        if part
+                    )
+                    atomic_text(
+                        self._node_dir(node) / f"natural-feedback-v{version}.txt",
+                        feedback + "\n",
+                    )
+                    self.store.update(
+                        node.id,
+                        "failed",
+                        (
+                            "independent reviewer certified a contradiction in the "
+                            f"frozen child contract: {feedback}"
+                        ),
+                    )
+                    return None
                 if audit is not None and audit.passed and not reference_problem:
                     path = self._node_dir(node) / f"natural-proof-v{version}.md"
                     atomic_text(

@@ -26,7 +26,14 @@ from __init__ import (
     _nested_rlcr_config,
     _require_explicit_rlcr_review_skip,
 )
-from _recursive_lean.models import Decomposition, NodeRecord, SolveResult, Subproblem
+from _recursive_lean.models import (
+    Decomposition,
+    NaturalAudit,
+    NaturalProof,
+    NodeRecord,
+    SolveResult,
+    Subproblem,
+)
 from _recursive_lean.prompts import RLCR_LEAN_TASK
 from _recursive_lean.runtime import Runtime, _WorkspaceAgent
 from _recursive_lean.store import Store
@@ -91,7 +98,167 @@ class FakeAgent:
         return FakeAgent()
 
 
+class ScriptedAgent:
+    """Minimal clone/new-compatible agent returning one structured fixture."""
+
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self.calls = 0
+
+    def clone(self, **_: Any) -> ScriptedAgent:
+        return self
+
+    def new(self, *_: Any) -> ScriptedAgent:
+        return self
+
+    def __call__(
+        self, prompt: str, *, suppress: bool = False, schema: Any = None
+    ) -> Any:
+        del prompt, suppress, schema
+        self.calls += 1
+        return self.response
+
+
 class WorktreeTests(unittest.TestCase):
+    def test_child_contract_contradiction_returns_to_parent(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "contradicted_child_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    natural_proof_attempts=1,
+                )
+                proof = NaturalProof(
+                    reference_use=reference_use(),
+                    proof=(
+                        "1. Assume the frozen affirmative statement.\n"
+                        "2. The explicit fixture contradicts that statement."
+                    ),
+                    key_steps=["Construct the explicit fixture."],
+                    unresolved=[],
+                )
+                audit = NaturalAudit(
+                    reference_use=reference_use(),
+                    acceptable=False,
+                    first_invalid_step=(
+                        "Before Step 1: the exact frozen child proposition is false."
+                    ),
+                    required_changes=["Revise the parent decomposition."],
+                    requires_parent_revision=True,
+                    contract_contradiction=(
+                        "For the explicit fixture x, the frozen conclusion says x = 0, "
+                        "while direct evaluation gives x = 1."
+                    ),
+                )
+                worker = ScriptedAgent(proof)
+                reviewer = ScriptedAgent(audit)
+                runtime = Runtime(
+                    SimpleNamespace(worker=worker, reviewer=reviewer),
+                    "fixture theorem",
+                    config,
+                    {},
+                )
+                node = runtime.store.ensure(
+                    "root.false_child-a1",
+                    parent="root",
+                    depth=1,
+                    title="False child",
+                    statement="Every fixture is zero",
+                    lean_name="false_child",
+                    lean_statement="∀ x : Nat, x = 0",
+                )
+                plan = project / "plan.md"
+                plan.write_text("# Accepted plan\n")
+
+                with patch.object(
+                    runtime, "_reference_use_problem", return_value=""
+                ):
+                    accepted = runtime._accepted_natural_proof(node, plan)
+
+                self.assertIsNone(accepted)
+                self.assertEqual(node.status, "failed")
+                self.assertIn("frozen child contract", node.message)
+                self.assertIn("direct evaluation gives x = 1", node.message)
+                self.assertEqual(worker.calls, 1)
+                self.assertEqual(reviewer.calls, 1)
+            finally:
+                os.chdir(original)
+
+    def test_failed_child_natural_gate_unwinds_solve(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "parent_backtrack_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                )
+                runtime = Runtime(None, "fixture theorem", config, {})
+                node = runtime.store.ensure(
+                    "root.false_child-a1",
+                    parent="root",
+                    depth=1,
+                    title="False child",
+                    statement="False child statement",
+                )
+                plan = project / "accepted-plan.md"
+                plan.write_text("# Accepted plan\n")
+                node.plan = plan.name
+
+                def reject_contract(*_: Any) -> None:
+                    runtime.store.update(
+                        node.id,
+                        "failed",
+                        "reviewer-certified child contradiction",
+                    )
+                    return None
+
+                with (
+                    patch.object(
+                        runtime,
+                        "_accepted_natural_proof",
+                        side_effect=reject_contract,
+                    ),
+                    patch.object(runtime, "_revise_parent") as revise_parent,
+                ):
+                    result = runtime._solve(node)
+
+                self.assertFalse(result.ok)
+                self.assertEqual(result.node_id, node.id)
+                self.assertIn("child contradiction", result.feedback)
+                revise_parent.assert_called_once_with(node, node.message)
+            finally:
+                os.chdir(original)
+
+    def test_parent_revision_certificate_requires_concrete_contradiction(self) -> None:
+        fixture = dict(
+            reference_use=reference_use(),
+            acceptable=False,
+            first_invalid_step="The child target is false.",
+            required_changes=["Revise the parent decomposition."],
+            requires_parent_revision=True,
+        )
+
+        with self.assertRaises(ValueError):
+            NaturalAudit(**fixture)
+
+        with self.assertRaises(ValueError):
+            NaturalAudit(
+                **(
+                    fixture
+                    | {
+                        "acceptable": True,
+                        "contract_contradiction": "A purported contradiction.",
+                    }
+                )
+            )
+
     def test_public_recursive_lean_flow_contract(self) -> None:
         base = FLOW / "__init__.py"
 

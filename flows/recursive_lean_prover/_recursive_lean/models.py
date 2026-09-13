@@ -173,6 +173,41 @@ class NaturalAudit(ReferenceAware):
     required_changes: list[str] = Field(
         description="repairs required before Lean formalization",
     )
+    requires_parent_revision: bool = Field(
+        default=False,
+        description=(
+            "true only when a non-root child's exact frozen proposition is "
+            "mathematically false or inconsistent, as established by a concrete "
+            "counterexample or contradiction; never for a hard proof, missing "
+            "library theorem, or incomplete argument"
+        ),
+    )
+    contract_contradiction: str = Field(
+        default="",
+        description=(
+            "complete counterexample or contradiction certifying why the exact "
+            "frozen child proposition cannot be proved; empty unless "
+            "requires_parent_revision is true"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_parent_revision_certificate(self) -> NaturalAudit:
+        """Require concrete, internally consistent evidence before backtracking."""
+        if self.requires_parent_revision:
+            if self.acceptable:
+                raise ValueError(
+                    "a proof cannot be acceptable while requiring parent revision"
+                )
+            if not self.contract_contradiction.strip():
+                raise ValueError(
+                    "requires_parent_revision needs a concrete contract contradiction"
+                )
+        elif self.contract_contradiction.strip():
+            raise ValueError(
+                "contract_contradiction requires requires_parent_revision=true"
+            )
+        return self
 
     @property
     def passed(self) -> bool:

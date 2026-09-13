@@ -183,6 +183,13 @@ The official problem record below supplies provenance and root-level context. Wh
 is not `root`, do not replace the exact child target above with the parent/root theorem and do not
 demand proof of sibling or downstream conclusions. Audit precisely the displayed node target.
 
+Set `requires_parent_revision` true only if this is a non-root child and you establish, with a
+complete concrete counterexample or contradiction in `contract_contradiction`, that the exact
+frozen child proposition itself is mathematically false or inconsistent. Never use that escape
+for a difficult proof, an incomplete submitted argument, a missing Mathlib/library theorem, or a
+formalization obstacle. For those ordinary failures, leave it false and request proof repairs.
+For the root node, always leave it false because there is no parent decomposition to revisit.
+
 {problem_context}
 
 {reference_context}
