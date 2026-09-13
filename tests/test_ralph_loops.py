@@ -6,12 +6,22 @@ from typing import Any
 import pytest
 import ralph_loop
 import stateful_ralph
-from hmz.flows import Usage, configures, drives, held, offered, resumes
+from hmz.flows import (
+    Allowance,
+    Stopped,
+    Usage,
+    configures,
+    declared,
+    drives,
+    held,
+    offered,
+    resumes,
+)
 
 FLOWS = Path(__file__).parents[1] / "flows"
 
-#: What one turn that landed is said to have come out with, which is a millionth of a budget
-#: written in millions -- so a budget of 3 is three rounds of this agent.
+#: What one turn that landed is said to have come out with, which is a millionth of an
+#: allowance written in millions -- so an allowance of 3 is three rounds of this agent.
 EACH = 1_000_000.0
 
 
@@ -21,6 +31,10 @@ class FakeSession:
         self.prompts: list[str] = []
 
     def __call__(self, prompt: str, *, suppress: bool = False) -> Any:
+        # Before the turn, as `SessionBase` reads it: a turn taken once the run's allowance
+        # is spent raises rather than answering, and `Stopped` is not a failed turn, so
+        # `suppress` does not swallow it. Which is the whole of what ends these loops now.
+        self.agent.allowed()
         self.prompts.append(prompt)
         return self.agent.answer()
 
@@ -29,14 +43,24 @@ class FakeAgent:
     """A turn that costs a million output tokens, or answers with nothing and costs nothing.
 
     A turn that could not be taken is what `answers` says: under `suppress` it comes back
-    empty and spends nothing, which is the case the budget cannot end a loop on.
+    empty and spends nothing, which is the case an allowance in tokens cannot end a loop on.
+
+    It stands in for the seam as well as for the backend: `allowance` is what the run was
+    given, and a turn taken once it is spent raises exactly where a real session would.
     """
 
-    def __init__(self, answers: list[Any] | None = None) -> None:
+    def __init__(
+        self, answers: list[Any] | None = None, allowance: Allowance | None = None
+    ) -> None:
         self.answers = answers
+        self.allowance = allowance or Allowance()
         self.sessions: list[FakeSession] = []
         self.turns = 0
         self.landed = 0
+
+    def allowed(self) -> None:
+        if self.allowance.over(output=self.spent().output):
+            raise Stopped(self.allowance.over(output=self.spent().output))
 
     def answer(self) -> Any:
         if self.answers is None:
@@ -74,49 +98,51 @@ def said(capsys: pytest.CaptureFixture[str]) -> list[str]:
 
 
 @pytest.mark.parametrize("name", ["ralph_loop", "stateful_ralph"])
-def test_a_loop_is_one_agent_resumable_and_budgeted(name: str) -> None:
+def test_a_loop_is_one_agent_resumable_and_holds_itself_to_nothing(name: str) -> None:
     base = FLOWS / name / "__init__.py"
 
     assert drives(base) == ("",)
     assert resumes(base)
-    config = configures(base)
-    assert config is not None
-    assert set(config.model_fields) == {"budget"}
-    assert config().budget == 10.0
+    # Nothing to set up any more: what a run of it may spend is the run's setting rather
+    # than the flow's, and the budget was the only thing this flow ever took.
+    assert configures(base) is None
+    # What it declares is the default it has always come with, which whoever runs it
+    # overrides -- and which the flow itself never holds itself to.
+    assert declared(base) == Allowance(tokens=10.0)
     assert [flow.name for flow in held(base)] == [""]
     assert name in offered(FLOWS)
 
 
-def test_a_ralph_loop_opens_a_session_a_round_and_stops_on_its_budget(
+def test_a_ralph_loop_opens_a_session_a_round_and_stops_on_the_runs_allowance(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    agent = FakeAgent()
+    agent = FakeAgent(allowance=Allowance(tokens=3))
     kept: dict[str, Any] = {}
 
-    ralph_loop.run((agent,), "do the thing", ralph_loop.Config(budget=3), kept)
+    # Raised out of the flow rather than caught by it: a run stopped for having spent what
+    # it was given is a run that stopped, and `Runner` files it as one.
+    with pytest.raises(Stopped):
+        ralph_loop.run((agent,), "do the thing", kept)
 
-    assert len(agent.sessions) == 3  # nothing carries over, so a session a round
-    assert said(capsys) == [
-        "round 1",
-        "round 2",
-        "round 3",
-        "stopping: 3.00M output tokens of 3M",
-    ]
-    # Emptied rather than left: a loop that spent what it was given is over, and the next
-    # run here opens at round one on a budget of its own.
-    assert kept == {}
+    assert len(agent.sessions) == 4  # nothing carries over, so a session a round
+    assert said(capsys) == ["round 1", "round 2", "round 3", "round 4"]
+    # Left rather than emptied: a run stopped by its allowance is one to pick up, under a
+    # fresh allowance, rather than one that is over.
+    assert kept == {"rounds": 4}
 
 
-def test_a_loop_picked_up_carries_the_round_it_reached_and_what_it_spent(
+def test_a_loop_picked_up_carries_the_round_it_reached(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    kept: dict[str, Any] = {"rounds": 40, "output": 2 * EACH}
+    kept: dict[str, Any] = {"rounds": 40}
 
-    ralph_loop.run((FakeAgent(),), "do the thing", ralph_loop.Config(budget=3), kept)
+    with pytest.raises(Stopped):
+        ralph_loop.run((FakeAgent(allowance=Allowance(tokens=1)),), "do the thing", kept)
 
-    # One round is what was left of the budget, and it is round 41 rather than round 1.
-    assert said(capsys) == ["round 41", "stopping: 3.00M output tokens of 3M"]
-    assert kept == {}
+    # It is round 41 rather than round 1, and the allowance is this run's own rather than
+    # what every run of it here has spent between them.
+    assert said(capsys) == ["round 41", "round 42"]
+    assert kept == {"rounds": 42}
 
 
 def test_a_loop_whose_rounds_all_answer_with_nothing_gives_up(
@@ -124,8 +150,8 @@ def test_a_loop_whose_rounds_all_answer_with_nothing_gives_up(
 ) -> None:
     kept: dict[str, Any] = {}
 
-    # The budget cannot end this one: a round that failed spends nothing to be counted.
-    ralph_loop.run((FakeAgent([]),), "do the thing", ralph_loop.Config(budget=0), kept)
+    # A token allowance cannot end this one: a round that failed spends nothing to count.
+    ralph_loop.run((FakeAgent([]),), "do the thing", kept)
 
     assert said(capsys) == [
         "round 1",
@@ -134,7 +160,7 @@ def test_a_loop_whose_rounds_all_answer_with_nothing_gives_up(
         "stopping: 3 rounds in a row answered with nothing",
     ]
     # Stopped rather than over: what stopped it is a thing to fix and carry on from.
-    assert kept == {"rounds": ralph_loop.STALLED, "output": 0.0}
+    assert kept == {"rounds": ralph_loop.STALLED}
 
 
 def test_a_round_that_answered_puts_the_run_of_empty_ones_back(
@@ -143,7 +169,7 @@ def test_a_round_that_answered_puts_the_run_of_empty_ones_back(
     # Three in a row rather than three in all, so it is rounds four to six that end it.
     agent = FakeAgent([None, None, "worked"])
 
-    ralph_loop.run((agent,), "do the thing", ralph_loop.Config(budget=0), {})
+    ralph_loop.run((agent,), "do the thing", {})
 
     assert said(capsys) == [
         *(f"round {each}" for each in range(1, 7)),
@@ -154,19 +180,16 @@ def test_a_round_that_answered_puts_the_run_of_empty_ones_back(
 def test_stateful_ralph_holds_one_session_for_every_round(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    agent = FakeAgent()
+    agent = FakeAgent(allowance=Allowance(tokens=2))
     kept: dict[str, Any] = {}
 
-    stateful_ralph.run((agent,), "do the thing", stateful_ralph.Config(budget=2), kept)
+    with pytest.raises(Stopped):
+        stateful_ralph.run((agent,), "do the thing", kept)
 
-    (session,) = agent.sessions  # one conversation, both rounds of it
+    (session,) = agent.sessions  # one conversation, every round of it
     assert session.prompts == ["do the thing", "do the thing"]
-    assert said(capsys) == [
-        "round 1",
-        "round 2",
-        "stopping: 2.00M output tokens of 2M",
-    ]
-    assert kept == {}
+    assert said(capsys) == ["round 1", "round 2", "round 3"]
+    assert kept == {"rounds": 3}
 
 
 def test_stateful_ralph_gives_up_on_a_run_of_nothing_too(
@@ -174,9 +197,7 @@ def test_stateful_ralph_gives_up_on_a_run_of_nothing_too(
 ) -> None:
     kept: dict[str, Any] = {}
 
-    stateful_ralph.run(
-        (FakeAgent([]),), "do the thing", stateful_ralph.Config(budget=0), kept
-    )
+    stateful_ralph.run((FakeAgent([]),), "do the thing", kept)
 
     assert said(capsys) == [
         "round 1",
@@ -184,10 +205,11 @@ def test_stateful_ralph_gives_up_on_a_run_of_nothing_too(
         "round 3",
         "stopping: 3 rounds in a row answered with nothing",
     ]
-    assert kept == {"rounds": stateful_ralph.STALLED, "output": 0.0}
+    assert kept == {"rounds": stateful_ralph.STALLED}
 
 
-@pytest.mark.parametrize("module", [ralph_loop, stateful_ralph])
-def test_a_budget_below_nothing_is_refused(module: Any) -> None:
-    with pytest.raises(ValueError, match="greater than or equal to 0"):
-        module.Config(budget=-1)
+@pytest.mark.parametrize("said_", [{"hours": -1}, {"tokens": -1}, {"dollars": -1}])
+def test_an_allowance_below_nothing_is_refused(said_: dict[str, float]) -> None:
+    """Where it is written, rather than as a run that stops before it has started."""
+    with pytest.raises(ValueError, match="less than nothing"):
+        Allowance(**said_)
