@@ -36,7 +36,7 @@ from _recursive_lean.models import (
 )
 from _recursive_lean.prompts import RLCR_LEAN_TASK
 from _recursive_lean.runtime import Runtime, _WorkspaceAgent
-from _recursive_lean.store import Store
+from _recursive_lean.store import Store, slug
 
 
 def git(cwd: Path, *arguments: str) -> str:
@@ -641,6 +641,54 @@ class WorktreeTests(unittest.TestCase):
                 self.assertIn("do not reopen planning or decomposition", RLCR_LEAN_TASK)
                 self.assertIn("Frozen proof-base commit", RLCR_LEAN_TASK)
                 self.assertIn("empty list does not ban proof-base helpers", RLCR_LEAN_TASK)
+            finally:
+                os.chdir(original)
+
+    def test_long_node_identities_do_not_collide(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "identity_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                )
+                runtime = Runtime(None, "identity fixture", config, {})
+                prefix = "root." + "shared_collision_segment_" * 5
+                left = NodeRecord(
+                    id=prefix + "nontrivial-a1",
+                    title="Left",
+                    statement="True",
+                    attempts=1,
+                )
+                right = NodeRecord(
+                    id=prefix + "torsion-a1",
+                    title="Right",
+                    statement="True",
+                    attempts=1,
+                )
+
+                self.assertEqual(slug(left.id), slug(right.id))
+                self.assertNotEqual(
+                    runtime._node_branch(left), runtime._node_branch(right)
+                )
+                self.assertNotEqual(
+                    runtime._node_dir(left), runtime._node_dir(right)
+                )
+                self.assertLessEqual(len(runtime._node_dir(left).name), 80)
+                self.assertLessEqual(len(runtime._node_dir(right).name), 80)
+
+                legacy_node = NodeRecord(
+                    id=prefix + "legacy-a1",
+                    title="Legacy",
+                    statement="True",
+                    attempts=1,
+                )
+                legacy = runtime.run_root / "nodes" / slug(legacy_node.id)
+                legacy.mkdir(parents=True)
+                self.assertEqual(runtime._node_dir(legacy_node), legacy)
             finally:
                 os.chdir(original)
 

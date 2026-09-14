@@ -74,6 +74,17 @@ INTEGRATION_GIT = (
 )
 
 
+def _node_identity_slug(value: str) -> str:
+    """Keep long node identities distinct while retaining readable components."""
+    made = (
+        re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-") or "theorem"
+    )
+    if len(made) <= 80:
+        return made
+    digest = hashlib.sha256(value.encode()).hexdigest()[:10]
+    return f"{made[:69]}-{digest}"
+
+
 class _WorkspaceAgent:
     """Run every session cloned from one Humanize agent in a fixed worktree."""
 
@@ -2381,7 +2392,7 @@ class Runtime:
             self.project.parent
             / ".recursive-lean-node-worktrees"
             / self.run_root.name
-            / slug(node.id)
+            / _node_identity_slug(node.id)
             / f"attempt-{max(node.attempts, 1)}"
             / self.project.name
         )
@@ -2462,7 +2473,7 @@ class Runtime:
         return (
             "humanize-recursive/"
             f"{slug(self.project.name)}/{slug(self.run_root.name)}/"
-            f"{slug(node.id)}-a{max(node.attempts, 1)}"
+            f"{_node_identity_slug(node.id)}-a{max(node.attempts, 1)}"
         )
 
     def _integrate_reviewed_candidate(
@@ -3125,7 +3136,16 @@ class Runtime:
         return candidate.resolve()
 
     def _node_dir(self, node: NodeRecord) -> Path:
-        path = self.run_root / "nodes" / slug(node.id)
+        legacy = self.run_root / "nodes" / slug(node.id)
+        identity = self.run_root / "nodes" / _node_identity_slug(node.id)
+        # Preserve artifact paths for runs created before collision-safe identities.
+        # New runs never create the truncated legacy directory, so long IDs that share
+        # an 80-character prefix receive separate hash-suffixed directories.
+        path = (
+            identity
+            if identity == legacy or identity.exists() or not legacy.exists()
+            else legacy
+        )
         path.mkdir(parents=True, exist_ok=True)
         return path
 
