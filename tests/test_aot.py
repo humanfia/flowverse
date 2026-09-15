@@ -7,8 +7,6 @@ a good draft lands whole, a refused one is handed back word for word, an ask not
 is refused before anything is written, and a name already taken is not written over.
 """
 
-# ruff: noqa: D103, PLR2004, S101
-
 from __future__ import annotations
 
 import json
@@ -17,7 +15,7 @@ import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from hmz.agents import AgentBase, AgentConfig, Event, HumanAgent, SessionBase
+from hmz.coganchor.agents import AgentBase, AgentConfig, Event, HumanAgent, SessionBase
 from hmz.flows import checked, configures, drives, resumes
 from hmz.flows.skills import brought
 
@@ -25,7 +23,7 @@ ROOT = Path(__file__).parents[1]
 FLOW = ROOT / "flows" / "aot"
 sys.path[:0] = [str(FLOW), str(FLOW.parent)]
 
-import aot  # noqa: E402
+import aot
 
 if TYPE_CHECKING:
     import os
@@ -47,21 +45,24 @@ def spec(name: str = "pair_loop", needs: tuple[str, ...] = ()) -> dict[str, obje
         ],
         "settings": [
             {
-                "name": "budget",
+                "name": "rounds",
                 "kind": "number",
-                "default": "1.0",
-                "about": "millions of output tokens before the loop stops",
+                "default": "6",
+                "about": "maximum rounds before the loop stops",
             }
         ],
         "endings": [
-            {"by": "verdict", "bound": "the reviewer says done, under the budget"}
+            {
+                "by": "verdict",
+                "bound": "the reviewer says done, within the six-round cap",
+            }
         ],
         "needs": list(needs),
-        "plan": "the actor works, the reviewer reads it fresh, the budget backstops",
+        "plan": "the actor works, the reviewer reads it fresh, the round cap backstops",
     }
 
 
-#: A draft that passes every gate: a verdict exit with a budget backstop beside it.
+#: A draft that passes every gate: a verdict exit with a round cap beside it.
 GOOD = {
     "pair_loop/__init__.py": '''
     """Two agents take turns until a reviewer says it is done.
@@ -69,14 +70,14 @@ GOOD = {
     hmz exec -f local/pair_loop -a claude/MODEL:high -a codex/MODEL:high "the task"
 
     The actor works in its own turn and a fresh reviewer reads the repository; what ends
-    the loop is the reviewer saying so, and the budget is the backstop for a reviewer
-    that never does.
+    the loop is the reviewer saying so, and the round cap is the backstop for a reviewer
+    that never does. The run allowance is the external token backstop.
     """
 
     import time
     from typing import NamedTuple
 
-    from hmz.flows import Agent, flow
+    from hmz.flows import Agent, Allowance, flow
     from pydantic import BaseModel, Field
 
 
@@ -88,10 +89,10 @@ GOOD = {
     class Config(BaseModel):
         model_config = {"extra": "forbid"}
 
-        budget: float = Field(
-            default=1.0,
-            ge=0,
-            description="millions of output tokens before the loop stops",
+        rounds: int = Field(
+            default=6,
+            ge=1,
+            description="maximum rounds before the loop stops",
         )
 
 
@@ -101,23 +102,22 @@ GOOD = {
         done: bool = Field(description="whether the task is completely done")
 
 
-    @flow
+    @flow(budget=Allowance(tokens=10.0))
     def run(agents: Agents, task: str, config: Config | None = None) -> None:
         held = config or Config()
-        while True:
+        for round_ in range(held.rounds):
             agents.actor(task, suppress=True)
             review = agents.reviewer(task, suppress=True, schema=Review)
             if review is not None and review.done:
                 print("the reviewer says it is done")
                 return
-            if held.budget and agents.actor.spent().output >= held.budget * 1_000_000:
-                print("stopping: the budget is spent")
-                return
+            print(f"round {round_ + 1}/{held.rounds}")
             time.sleep(5)
     ''',
 }
 
-#: A first draft the checker refuses outright: a loop nothing inside can end.
+#: A first draft the checker warns about: the compiler refuses an unbounded loop even though
+#: the run allowance would eventually stop its agent turn.
 DEAD = {
     "pair_loop/__init__.py": '''
     """A loop nothing can end."""
@@ -263,7 +263,7 @@ def test_a_good_draft_lands_whole(
     assert len(writer.asked) == 1
     out = capsys.readouterr().out
     assert "compiled: pair_loop" in out
-    assert 'hmz exec -f local/pair_loop -a CLI/MODEL:EFFORT -a CLI/MODEL:EFFORT' in out
+    assert "hmz exec -f local/pair_loop -a CLI/MODEL:EFFORT -a CLI/MODEL:EFFORT" in out
     assert "ends:     by verdict" in out
 
 
@@ -274,8 +274,8 @@ def test_a_refused_draft_is_handed_back_word_for_word(
     assert (tmp_path / ".humanize" / "flows" / "pair_loop" / "__init__.py").is_file()
     assert len(writer.asked) == 2
     # The second prompt is a repair, carrying the checker's own finding.
-    assert "dead-loop" in writer.asked[1]
-    assert "cannot end" in writer.asked[1]
+    assert "unbounded-loop" in writer.asked[1]
+    assert "nothing inside this loop ends it" in writer.asked[1]
 
 
 def test_the_stubs_catch_what_the_static_reading_trusts(
@@ -295,11 +295,11 @@ def test_the_critics_veto_is_a_repair_round(
         tmp_path,
         monkeypatch,
         trees=[GOOD, GOOD],
-        reviews=[{"approved": False, "notes": "the budget knob wants a ceiling"}],
+        reviews=[{"approved": False, "notes": "the round cap needs a ceiling"}],
     )
     assert (tmp_path / ".humanize" / "flows" / "pair_loop" / "__init__.py").is_file()
     assert len(writer.asked) == 2
-    assert "the budget knob wants a ceiling" in writer.asked[1]
+    assert "the round cap needs a ceiling" in writer.asked[1]
 
 
 def test_an_ask_nothing_serves_is_refused_before_anything_is_written(
@@ -357,7 +357,7 @@ def test_a_person_may_take_the_draft_the_repairs_ran_out_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     person = HumanAgent()
-    person.ask = lambda question: "yes"  # noqa: ARG005 -- every gate answered yes
+    person.ask = lambda question: "yes"
     writer = compiled(
         tmp_path,
         monkeypatch,
@@ -365,10 +365,10 @@ def test_a_person_may_take_the_draft_the_repairs_ran_out_on(
         human=person,
         config=aot.Config(repairs=0, seconds=30.0),
     )
-    # The draft lands as it stands, dead loop and all: the person said so.
+    # The draft lands as it stands, unbounded loop and all: the person said so.
     landed = tmp_path / ".humanize" / "flows" / "pair_loop"
     assert (landed / "__init__.py").is_file()
-    assert [one.code for one in checked(landed)] == ["dead-loop"]
+    assert [one.code for one in checked(landed)] == ["unbounded-loop"]
     assert len(writer.asked) == 1
 
 

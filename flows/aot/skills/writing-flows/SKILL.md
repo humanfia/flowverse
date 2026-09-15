@@ -37,8 +37,8 @@ from pydantic import BaseModel, Field
 
 
 class Agents(NamedTuple):
-    actor: Agent          # one field per agent, named for what it is for
-    human: Person         # only if the flow talks to the person at the prompt
+    actor: Agent  # one field per agent, named for what it is for
+    human: Person  # only if the flow talks to the person at the prompt
 
 
 @flow
@@ -54,26 +54,25 @@ def run(agents: Agents, task: str, config: Config | None = None) -> None: ...
   run needs (a round counter, spent tokens), and `state.clear()` when the run is over --
   what is over is not picked up.
 
-## Every loop is bounded
+## Every generated loop has its own bound
 
-The rule refusals come from most. A loop must be endable by something inside it, and a
-verdict alone is not a bound -- an agent may never say it. So every `while True:` carries a
-backstop besides any verdict exit:
+The run's allowance is humanize's and is declared with `@flow(budget=Allowance(...))`; it is
+not a loop setting for a generated flow to implement. A turn taken once that allowance is
+spent raises `Stopped`, which ends the run, but the compiler still refuses an
+`unbounded-loop` warning. Give every generated loop an explicit bound of its own, normally a
+round cap:
 
 ```python
-while True:
+for round_ in range(held.rounds):
+    print(f"round {round_ + 1}")
     agent(task, suppress=True)
-    kept["output"] = spent = before + agent.spent().output
-    if held.budget and spent >= held.budget * 1_000_000:
-        print(f"stopping: {spent / 1e6:.2f}M output tokens")
-        return
     time.sleep(5)
 ```
 
-- A budget reads `agent.spent().output` against a limit from the config. Default the budget
-  to at most 10 million output tokens -- a run that wants more says so.
+- Declare a run allowance with `@flow(budget=Allowance(tokens=10.0))` when the flow needs a
+  default, and let the run or its caller override it.
 - A round cap is `for round_ in range(held.rounds):` -- a `for` over a `range` is bounded by
-  construction.
+  construction and is the preferred backstop for AOT-generated loops.
 - A loop that only sleeps, or has no `break`/`return`/`raise` at all, is refused outright.
 
 ## Every shaped answer is guarded
@@ -104,10 +103,10 @@ A flow that takes settings declares a pydantic model:
 class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
-    budget: float = Field(
-        default=10.0,
-        ge=0,
-        description="millions of output tokens the loop may spend before it stops",
+    rounds: int = Field(
+        default=6,
+        ge=1,
+        description="maximum rounds before the loop stops",
     )
 ```
 

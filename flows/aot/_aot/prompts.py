@@ -20,7 +20,7 @@ building around it silently.
 flow talks to them. A seat's `moments` names only moments from the briefing's \
 "only some backends" list that the seat truly hangs hooks on.
 - `endings` must hold at least one, and a `verdict` ending never stands alone: it travels \
-with a budget or a round cap, because an agent may never say the verdict.
+with a run allowance or a round cap, because an agent may never say the verdict.
 - `name` is snake_case, short, and says what the flow does.
 
 The briefing:
@@ -50,9 +50,11 @@ The compiler will read the draft without running it, drive it with stubs against
 worlds there are -- a reviewer that never says done, turns that always fail -- and hand it \
 to a fresh critic. Three rules decide most refusals:
 
-- Every loop is bounded. Even where the spec ends by verdict, the loop also ends by budget \
-(`agent.spent().output` against a limit) or by a round cap (`for` over a `range`). A loop \
-whose only way out is an agent's verdict is refused, always.
+- Every generated loop has a bound of its own. Even where the spec ends by verdict, add an \
+explicit round cap (`for` over a `range`) or another deterministic bound. The run's allowance \
+is declared with `@flow(budget=Allowance(...))` and stops spent turns, but it is not a loop \
+setting to implement with `agent.spent()`. A loop that earns the checker's `unbounded-loop` \
+warning is refused by this compiler, always.
 - Every shaped answer is guarded. A turn taken with `suppress=True, schema=...` answers \
 None when it fails; test it before reading a field off it.
 - One import of humanize's: `from hmz.flows import ...`, and only names it offers.
@@ -70,8 +72,8 @@ gates said it:
 {refused}
 
 Fix the draft in place -- edit the files at {draft} -- addressing every line above. Keep to \
-the writing-flows contract: every loop bounded, every shaped answer guarded, one import of \
-humanize's. End by saying what you changed."""
+the writing-flows contract: every loop has its own bound, every shaped answer guarded, one \
+import of humanize's. End by saying what you changed."""
 
 #: The critic's whole turn: fresh eyes, the spec, and the draft on disk.
 REVIEW = """You are the critic half of a compiler that turns a description into a humanize \
@@ -84,8 +86,9 @@ with your tools. Judge it against this spec:
 
 {spec}
 
-Hold it to the writing-flows contract: every loop bounded even where an ending is a \
-verdict; every shaped answer guarded before a field is read; settings as a frozen or \
+Hold it to the writing-flows contract: every loop has its own bound even where an ending is a \
+verdict; the run allowance is declared rather than implemented with `agent.spent()`; every \
+shaped answer is guarded before a field is read; settings as a frozen or \
 extra-forbidding pydantic model with a described field apiece; a docstring whose first \
 line says what the flow does, with the `hmz exec` line under it; prints that say where a \
 long run has got to. Approve only what you would run on a repository of your own. Answer \

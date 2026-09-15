@@ -1,7 +1,5 @@
 """The official plan flow is bounded and independent of either role's backend."""
 
-# ruff: noqa: D103, PLR2004, S101
-
 from __future__ import annotations
 
 import json
@@ -13,13 +11,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from hmz.agents import AgentBase, AgentConfig, Event, Failed, SessionBase
+from hmz.coganchor.agents import AgentBase, AgentConfig, Event, Failed, SessionBase
 
 ROOT = Path(__file__).parents[1]
 FLOW = ROOT / "flows" / "humanize1"
 sys.path[:0] = [str(FLOW), str(FLOW.parent)]
 
-import humanize1  # noqa: E402
+import humanize1
 
 if TYPE_CHECKING:
     import os
@@ -433,4 +431,4 @@ def test_the_templates_own_unfilled_status_line_counts_as_undecided() -> None:
         "  - Decision Status: `PENDING` or `<User's final decision>`\n"
     )
 
-    assert humanize1._undecided(held) == ["DEC-2"]  # noqa: SLF001
+    assert humanize1._undecided(held) == ["DEC-2"]

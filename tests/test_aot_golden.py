@@ -11,8 +11,6 @@ reads clean under the checker, and -- the point of the whole compiler -- ends un
 reviewer that never says done.
 """
 
-# ruff: noqa: D103, PLR2004, S101
-
 from __future__ import annotations
 
 import os
@@ -22,18 +20,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-
-from hmz.agents import HumanAgent, driver
+from hmz.coganchor.agents import HumanAgent, driver
 from hmz.flows import NEVER_DONE, carries, checked, configures, load, proved, wanted
 
 ROOT = Path(__file__).parents[1]
 FLOW = ROOT / "flows" / "aot"
 sys.path[:0] = [str(FLOW), str(FLOW.parent)]
 
-import aot  # noqa: E402
+import aot
 
 if TYPE_CHECKING:
-    from hmz.agents import AgentBase
+    from hmz.coganchor.agents import AgentBase
 
 WRITER = os.environ.get("AOT_WRITER", "")
 CRITIC = os.environ.get("AOT_CRITIC", "") or WRITER
@@ -68,7 +65,9 @@ def compiled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task: str) -> Path
     return flows[0]
 
 
-def equivalent(at: Path, *, drives_count: int, person: bool, takes_config: bool) -> None:
+def equivalent(
+    at: Path, *, drives_count: int, person: bool, takes_config: bool
+) -> None:
     """The structural bar every compiled flow is held to."""
     entry = at / "__init__.py"
     places = wanted(entry)
@@ -85,7 +84,7 @@ def equivalent(at: Path, *, drives_count: int, person: bool, takes_config: bool)
     assert proof.outcomes[0].finished, proof.outcomes
 
 
-def _all_places(entry: Path):  # noqa: ANN202
+def _all_places(entry: Path):
     from hmz.flows.driving import declares
 
     return declares(entry)[1]
@@ -97,13 +96,13 @@ def test_flame_chase_from_one_line(
     at = compiled(
         tmp_path,
         monkeypatch,
-        "two agents take turns on the same task, one after the other, until a budget "
-        "of output tokens is spent",
+        "two agents take turns on the same task, one after the other, for a bounded "
+        "number of rounds under the run's allowance",
     )
     equivalent(at, drives_count=2, person=False, takes_config=True)
-    # The golden's shape: both agents take turns, and the budget is what ends it.
+    # The golden's shape: both agents take turns, and the round cap is what bounds it.
     source = (at / "__init__.py").read_text()
-    assert "spent()" in source
+    assert "range(" in source
 
 
 def test_gen_idea_from_its_description(
@@ -134,7 +133,7 @@ def test_gen_plan_from_its_description(
     )
     equivalent(at, drives_count=2, person=False, takes_config=True)
     source = (at / "__init__.py").read_text()
-    assert "range(" in source or "spent()" in source  # the backstop is real
+    assert "range(" in source  # the loop has a bound of its own
 
 
 def test_rlcr_from_its_description(
@@ -144,7 +143,7 @@ def test_rlcr_from_its_description(
     equivalent(at, drives_count=2, person=False, takes_config=True)
     source = (at / "__init__.py").read_text()
     assert "schema=" in source  # the review is read off a shape, not a marker
-    assert "spent()" in source or "range(" in source
+    assert "range(" in source
 
 
 #: The rlcr loop, described the way somebody would describe it.
@@ -155,7 +154,7 @@ RLCR = (
     "nothing left to do, and the findings to hand the builder next, written as its next "
     "prompt with the important ones marked [P0] to [P9]; the findings go to the builder "
     "word for word; the loop ends when the reviewer says there is nothing left, and a "
-    "budget of output tokens backstops a reviewer that never does"
+    "bounded round cap backstops a reviewer that never does"
 )
 
 
