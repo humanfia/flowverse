@@ -999,20 +999,41 @@ class Runtime:
                     "natural-review",
                     f"natural-language RLCR reviewer round {version}",
                 )
-                audit = self.agents.reviewer.clone()(
-                    NATURAL_AUDIT.format(
-                        problem_context=self._problem_context(),
-                        reference_context=self._reference_context(),
-                        node_id=node.id,
-                        node_title=node.title,
-                        statement=node.statement,
-                        lean_name=node.lean_name,
-                        lean_statement=node.lean_statement,
-                        proof=proof.proof,
-                    ),
-                    suppress=True,
-                    schema=NaturalAudit,
-                )
+                audit = None
+                for review_attempt in range(1, self.config.natural_proof_attempts + 1):
+                    if review_attempt > 1:
+                        self.store.update(
+                            node.id,
+                            "natural-review",
+                            (
+                                "natural-language RLCR reviewer round "
+                                f"{version} retry {review_attempt - 1}"
+                            ),
+                        )
+                    audit = self.agents.reviewer.clone()(
+                        NATURAL_AUDIT.format(
+                            problem_context=self._problem_context(),
+                            reference_context=self._reference_context(),
+                            node_id=node.id,
+                            node_title=node.title,
+                            statement=node.statement,
+                            lean_name=node.lean_name,
+                            lean_statement=node.lean_statement,
+                            proof=proof.proof,
+                        ),
+                        suppress=True,
+                        schema=NaturalAudit,
+                    )
+                    if audit is not None:
+                        break
+                    atomic_text(
+                        self._node_dir(node)
+                        / (
+                            f"natural-review-null-v{version}-"
+                            f"attempt-{review_attempt}.txt"
+                        ),
+                        "The reviewer returned no structured natural-proof audit.\n",
+                    )
                 if audit is not None:
                     atomic_text(
                         self._node_dir(node) / f"natural-audit-v{version}.json",
