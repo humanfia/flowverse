@@ -1001,6 +1001,16 @@ class Runtime:
                 )
                 audit = None
                 for review_attempt in range(1, self.config.natural_proof_attempts + 1):
+                    review_prompt = NATURAL_AUDIT.format(
+                        problem_context=self._problem_context(),
+                        reference_context=self._reference_context(),
+                        node_id=node.id,
+                        node_title=node.title,
+                        statement=node.statement,
+                        lean_name=node.lean_name,
+                        lean_statement=node.lean_statement,
+                        proof=proof.proof,
+                    )
                     if review_attempt > 1:
                         self.store.update(
                             node.id,
@@ -1010,17 +1020,15 @@ class Runtime:
                                 f"{version} retry {review_attempt - 1}"
                             ),
                         )
+                        review_prompt += (
+                            "\n\nThe previous reviewer call returned no valid "
+                            "NaturalAudit object. Return a concise audit matching the "
+                            "requested schema exactly. Keep `first_invalid_step` and each "
+                            "`required_changes` item focused; do not repeat the proof."
+                        )
+                        time.sleep(min(30.0, 15.0 * (review_attempt - 1)))
                     audit = self.agents.reviewer.clone()(
-                        NATURAL_AUDIT.format(
-                            problem_context=self._problem_context(),
-                            reference_context=self._reference_context(),
-                            node_id=node.id,
-                            node_title=node.title,
-                            statement=node.statement,
-                            lean_name=node.lean_name,
-                            lean_statement=node.lean_statement,
-                            proof=proof.proof,
-                        ),
+                        review_prompt,
                         suppress=True,
                         schema=NaturalAudit,
                     )

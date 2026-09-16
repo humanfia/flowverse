@@ -125,12 +125,14 @@ class SequencedAgent(ScriptedAgent):
     def __init__(self, responses: list[Any]) -> None:
         super().__init__(None)
         self.responses = iter(responses)
+        self.prompts: list[str] = []
 
     def __call__(
         self, prompt: str, *, suppress: bool = False, schema: Any = None
     ) -> Any:
-        del prompt, suppress, schema
+        del suppress, schema
         self.calls += 1
+        self.prompts.append(prompt)
         return next(self.responses)
 
 
@@ -182,14 +184,18 @@ class WorktreeTests(unittest.TestCase):
                 plan = project / "plan.md"
                 plan.write_text("# Accepted plan\n")
 
-                with patch.object(
-                    runtime, "_reference_use_problem", return_value=""
+                with (
+                    patch.object(runtime, "_reference_use_problem", return_value=""),
+                    patch("_recursive_lean.runtime.time.sleep") as pause,
                 ):
                     accepted = runtime._accepted_natural_proof(node, plan)
 
                 self.assertIs(accepted, proof)
                 self.assertEqual(worker.calls, 1)
                 self.assertEqual(reviewer.calls, 2)
+                self.assertNotIn("previous reviewer call", reviewer.prompts[0])
+                self.assertIn("previous reviewer call", reviewer.prompts[1])
+                pause.assert_called_once_with(15.0)
                 self.assertEqual(node.status, "decomposing")
                 node_dir = runtime._node_dir(node)
                 self.assertTrue(
