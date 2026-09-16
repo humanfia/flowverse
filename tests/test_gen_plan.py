@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from hmz.agents import AgentBase, AgentConfig, Event, Failed, SessionBase
+from hmz.coganchor.agents import AgentBase, AgentConfig, Event, Failed, SessionBase
 
 ROOT = Path(__file__).parents[1]
 FLOW = ROOT / "flows" / "humanize1"

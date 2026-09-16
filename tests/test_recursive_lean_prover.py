@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+from hmz.coganchor.backends import read
 from hmz.flows import configures, drives, held, offered, resumes
 from hmz.flows.skills import brought
 
@@ -233,9 +234,16 @@ class WorktreeTests(unittest.TestCase):
                 self.assertIn(":worktree-rlcr", command[3])
                 self.assertEqual(command[-1], "prove the node")
                 spec = command[command.index("-a") + 1]
+                self.assertEqual(spec, "codex/gpt-5.6-sol:max")
+                # And read back with humanize's own reader rather than compared only with
+                # a string: the form this used to send -- `cli=codex,model=...` -- also
+                # matched a string somebody had copied out of the code, and went on
+                # matching it long after `hmz exec` had stopped accepting it. A spec is
+                # right when the thing that parses it says so.
+                place, profile, model, effort, provider = read(spec)
                 self.assertEqual(
-                    spec,
-                    "cli=codex,model=gpt-5.6-sol,effort=max,service_tier=default",
+                    (place, profile.name, model, effort, provider),
+                    ("", "codex", "gpt-5.6-sol", "max", ""),
                 )
                 # What the agent may do and whether it reads the internet belong to the
                 # child flow's own places now; an `-a` that wrote either is refused.

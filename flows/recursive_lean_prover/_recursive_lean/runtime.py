@@ -1511,24 +1511,34 @@ class Runtime:
     def _agent_spec(agent: Any) -> str:
         """Serialize a parent Humanize agent for an isolated ``hmz exec`` child.
 
+        Written the one way ``-a`` still reads: ``CLI[@PROVIDER]/MODEL:EFFORT``. The
+        written-out form this used to emit -- ``cli=codex,model=...,effort=...`` -- is a
+        spelling humanize has taken away, and taken away loudly: ``=`` now names the place
+        an agent fills, so ``cli=`` reads as a place this flow never declared, and the
+        commas separate agents, so the old line asked for four of them. Every nested RLCR
+        process launched with it died on its own command line before taking a turn.
+
         What the agent may do and whether it may read the internet are not written here.
         They are the flow's to say rather than the line that runs it, and the child is the
         same two places this one declares: ``worktree-rlcr`` carries the ``AgentDefaults``
         beside them, so the child process settles ``auto`` on both without being told.
+
+        The service tier the parent runs at, and any setting carried on a backend's own
+        config, do not cross with it either -- the line has nowhere left to put them, and a
+        file of agents is not what ``-c`` takes. A nested proof therefore runs at whatever
+        tier its CLI serves by default, which is a turn taken a little slower rather than a
+        turn not taken at all.
+
+        Args:
+          agent: The parent's agent, whose backend, account, model and effort the child is
+            to be started on.
+
+        Returns:
+          The one ``-a`` that starts it.
         """
         config = agent.config
-        fields = [
-            f"cli={agent.backend}",
-            f"model={config.model}",
-            f"effort={config.effort}",
-            f"service_tier={config.service_tier}",
-        ]
-        if config.provider:
-            fields.append(f"provider={config.provider}")
-        fields.extend(
-            f"config.{key}={value}" for key, value in getattr(config, "overrides", ())
-        )
-        return ",".join(fields)
+        account = f"@{config.provider}" if config.provider else ""
+        return f"{agent.backend}{account}/{config.model}:{config.effort}"
 
     def _node_worktree(self, node: NodeRecord) -> Path:
         """Create or reuse a durable Git branch and worktree for one node attempt."""
