@@ -205,6 +205,74 @@ class WorktreeTests(unittest.TestCase):
             finally:
                 os.chdir(original)
 
+    def test_null_natural_audit_uses_json_transport_fallback(self) -> None:
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "natural_review_json_fallback_problem"
+            project.mkdir()
+            try:
+                os.chdir(project)
+                config = SimpleNamespace(
+                    artifact_dir=".humanize/recursive-lean-prover",
+                    wiki_dir=".humanize/math-wiki",
+                    natural_proof_attempts=2,
+                )
+                proof = NaturalProof(
+                    reference_use=reference_use(),
+                    proof=(
+                        "1. Establish the required intermediate lemma.\n"
+                        "2. Apply it to prove the exact frozen theorem."
+                    ),
+                    key_steps=["Establish and apply the intermediate lemma."],
+                    unresolved=[],
+                )
+                audit = NaturalAudit(
+                    reference_use=reference_use(),
+                    acceptable=True,
+                    first_invalid_step="",
+                    required_changes=[],
+                )
+                worker = ScriptedAgent(proof)
+                reviewer = SequencedAgent(
+                    [None, None, f"```json\n{audit.model_dump_json()}\n```"]
+                )
+                runtime = Runtime(
+                    SimpleNamespace(worker=worker, reviewer=reviewer),
+                    "fixture theorem",
+                    config,
+                    {},
+                )
+                node = runtime.store.ensure(
+                    "root",
+                    parent=None,
+                    depth=0,
+                    title="Recover reviewer JSON",
+                    statement="True",
+                    lean_name="recover_reviewer_json",
+                    lean_statement="True",
+                )
+                plan = project / "plan.md"
+                plan.write_text("# Accepted plan\n")
+
+                with (
+                    patch.object(runtime, "_reference_use_problem", return_value=""),
+                    patch("_recursive_lean.runtime.time.sleep") as pause,
+                ):
+                    accepted = runtime._accepted_natural_proof(node, plan)
+
+                self.assertIs(accepted, proof)
+                self.assertEqual(worker.calls, 1)
+                self.assertEqual(reviewer.calls, 3)
+                self.assertIn("JSON Schema", reviewer.prompts[-1])
+                pause.assert_called_once_with(15.0)
+                self.assertEqual(node.status, "decomposing")
+                node_dir = runtime._node_dir(node)
+                self.assertTrue((node_dir / "natural-audit-v1.json").is_file())
+                marker = node_dir / "natural-review-json-fallback-v1.txt"
+                self.assertIn("produced a valid", marker.read_text())
+            finally:
+                os.chdir(original)
+
     def test_child_contract_contradiction_returns_to_parent(self) -> None:
         original = Path.cwd()
         with tempfile.TemporaryDirectory() as temporary:

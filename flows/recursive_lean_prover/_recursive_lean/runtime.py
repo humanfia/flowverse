@@ -1042,6 +1042,41 @@ class Runtime:
                         ),
                         "The reviewer returned no structured natural-proof audit.\n",
                     )
+                if audit is None:
+                    self.store.update(
+                        node.id,
+                        "natural-review",
+                        (
+                            "natural-language RLCR reviewer round "
+                            f"{version} JSON transport fallback"
+                        ),
+                    )
+                    fallback_prompt = (
+                        review_prompt
+                        + "\n\nThe strict structured-output transport did not return a "
+                        "valid object. Return exactly one JSON object and no Markdown or "
+                        "commentary. It must validate against this JSON Schema:\n"
+                        + json.dumps(NaturalAudit.model_json_schema(), indent=2)
+                    )
+                    fallback_answer = self.agents.reviewer.clone()(
+                        fallback_prompt,
+                        suppress=True,
+                    )
+                    audit = self._natural_audit_from_text(fallback_answer)
+                    marker = (
+                        "The JSON-only transport fallback produced a valid "
+                        "natural-proof audit.\n"
+                        if audit is not None
+                        else (
+                            "The JSON-only transport fallback returned no valid "
+                            "natural-proof audit.\n"
+                        )
+                    )
+                    atomic_text(
+                        self._node_dir(node)
+                        / f"natural-review-json-fallback-v{version}.txt",
+                        marker,
+                    )
                 if audit is not None:
                     atomic_text(
                         self._node_dir(node) / f"natural-audit-v{version}.json",
@@ -1109,6 +1144,37 @@ class Runtime:
                     f"draft {version}"
                 ),
             )
+
+    @staticmethod
+    def _natural_audit_from_text(answer: Any) -> NaturalAudit | None:
+        """Recover a reviewer audit from a JSON-only transport fallback."""
+        if isinstance(answer, NaturalAudit):
+            return answer
+        if not isinstance(answer, str) or not answer.strip():
+            return None
+        stripped = answer.strip()
+        candidates = [stripped]
+        candidates.extend(
+            block.strip()
+            for block in re.findall(
+                r"```(?:json)?\s*(.*?)```",
+                stripped,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        )
+        first, last = stripped.find("{"), stripped.rfind("}")
+        if 0 <= first < last:
+            candidates.append(stripped[first : last + 1])
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                return NaturalAudit.model_validate_json(candidate)
+            except ValueError:
+                continue
+        return None
 
     def _decompose(self, node: NodeRecord, proof: NaturalProof) -> Decomposition | None:
         """Ask for a bounded DAG after the prose proof, validating dependencies locally."""
