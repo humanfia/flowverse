@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hmz.flows import configures, drives, held, offered, resumes
-from hmz.flows.skills import brought
+from hmz.runtime.flowing import configures, drives, held, offered, resumes
+from hmz.runtime.flowing.skills import brought
 
 
 def test_public_flow_declares_fixed_seven_agent_topology() -> None:

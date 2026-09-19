@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hmz.flows import configures, drives, offered, resumes
-from hmz.flows.skills import brought
+from hmz.runtime.flowing import configures, drives, offered, resumes
+from hmz.runtime.flowing.skills import brought
 
 
 def test_only_canonical_git_pr_lite_is_offered() -> None:

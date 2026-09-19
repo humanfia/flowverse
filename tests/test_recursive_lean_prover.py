@@ -15,8 +15,8 @@ from typing import Any
 from unittest.mock import patch
 
 from hmz.coganchor.backends import read
-from hmz.flows import configures, drives, held, offered, resumes
-from hmz.flows.skills import brought
+from hmz.runtime.flowing import configures, drives, held, offered, resumes
+from hmz.runtime.flowing.skills import brought
 
 FLOW = Path(__file__).parents[1] / "flows" / "recursive_lean_prover"
 sys.path.insert(0, str(FLOW))

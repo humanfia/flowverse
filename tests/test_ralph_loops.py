@@ -6,17 +6,8 @@ from typing import Any
 import pytest
 import ralph_loop
 import stateful_ralph
-from hmz.flows import (
-    Allowance,
-    Stopped,
-    Usage,
-    configures,
-    declared,
-    drives,
-    held,
-    offered,
-    resumes,
-)
+from hmz.flows import Allowance, Stopped, Usage
+from hmz.runtime.flowing import configures, declared, drives, held, offered, resumes
 
 FLOWS = Path(__file__).parents[1] / "flows"
 
