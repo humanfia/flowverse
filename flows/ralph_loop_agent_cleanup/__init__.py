@@ -10,7 +10,8 @@ the second configured agent gets a fresh cleaning session in the same workspace,
 exactly as flame_chase_agent_cleanup runs its cleaner: the tree is saved aside, the
 cleaner decides what task work is worth keeping, the flow measures and repairs, runs the
 optional check, replaces the history with one commit and archives the history it
-replaced under the run root. An interrupted epoch puts the tree back.
+replaced in the workspace's shared history.git, large files left out. An interrupted
+epoch puts the tree back.
 
 What ends the run is its allowance, which is humanize's; this flow declares ten million
 output tokens by default, and `budget:` in the file passed with -c says otherwise.

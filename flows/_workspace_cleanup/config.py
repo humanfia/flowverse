@@ -90,6 +90,14 @@ class Config(BaseModel):
         ge=0,
         description="minutes after the wrap-up request before the turn is cut off",
     )
+    max_tracked_file_mb: float = Field(
+        default=10.0,
+        gt=0,
+        description=(
+            "files over this many MB are never committed: the flow leaves them out and"
+            " the repository's pre-commit hook refuses them"
+        ),
+    )
     confirm_large_workspace_copies: bool = Field(
         default=True,
         description=(

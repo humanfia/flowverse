@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import threading
 import time
@@ -125,7 +127,7 @@ def _cleaned(*_args: Any) -> Cleaned:
 
 
 def test_an_epoch_replaces_history_and_archives_the_one_it_replaced(
-    repo: Path, store: Path
+    repo: Path, store: Path, tmp_path: Path
 ) -> None:
     manifest = set(tree.listed(repo))
     original = _git(repo, "rev-parse", "HEAD")
@@ -148,30 +150,48 @@ def test_an_epoch_replaces_history_and_archives_the_one_it_replaced(
     assert (repo / ".venv" / "lib" / "site.py").exists()
     assert not (store / "revert").exists()
 
-    archive = store / "history" / "epoch-001.git"
-    at = ("--git-dir", str(archive))
-    assert _git(repo, *at, "log", "--format=%s") == (
+    at = ("--git-dir", str(tmp_path / "history.git"))
+    ref = "refs/runs/store/epoch-001"
+    assert _git(repo, *at, "log", "--format=%s", ref) == (
         "epoch 1: the tree before cleaning\ntask"
     )
-    assert _git(repo, *at, "rev-parse", "HEAD~1") == original
-    before = _git(repo, *at, "show", "HEAD:src/main.py")
+    assert _git(repo, *at, "rev-parse", f"{ref}~1") == original
+    assert _git(repo, *at, "rev-parse", f"{ref}.refs/heads/main") == original
+    before = _git(repo, *at, "show", f"{ref}:src/main.py")
     assert before == "value = 2  # tried 3 variants"
-    assert _git(repo, *at, "show", "HEAD:scratch.txt") == "notes from turn 2"
+    assert _git(repo, *at, "show", f"{ref}:scratch.txt") == "notes from turn 2"
+    assert _git(repo, *at, "log", "--format=%s", f"{ref}.distilled") == (
+        "epoch 1: distilled tree\nepoch 1: the tree before cleaning\ntask"
+    )
+    assert _git(repo, *at, "rev-parse", f"{ref}.distilled") == _git(
+        repo, "rev-parse", "HEAD"
+    )
 
 
-def test_a_second_epoch_archives_the_first_epochs_repository(
-    repo: Path, store: Path
+def test_the_archive_reads_as_one_history_across_epochs_and_runs(
+    repo: Path, tmp_path: Path
 ) -> None:
     manifest = set(tree.listed(repo))
     held = Config(work_paths=("src",))
-    for epoch in (1, 2):
-        (repo / "src" / "main.py").write_text(f"value = {epoch}\n")
+    first, second = tmp_path / "run-a", tmp_path / "run-b"
+    first.mkdir()
+    second.mkdir()
+    for store, epoch in ((first, 1), (first, 2), (second, 1)):
+        (repo / "src" / "main.py").write_text(f"value = {store.name} {epoch}\n")
         cleaning.clean_epoch(Scripted(_cleaned), held, repo, manifest, store, epoch)
 
-    second = ("--git-dir", str(store / "history" / "epoch-002.git"))
-    assert _git(repo, *second, "log", "--format=%s") == (
-        "epoch 2: the tree before cleaning\nepoch 1: distilled tree"
+    at = ("--git-dir", str(tmp_path / "history.git"))
+    assert _git(
+        repo, *at, "log", "--format=%s", "refs/runs/run-a/epoch-002.distilled"
+    ) == (
+        "epoch 2: distilled tree\n"
+        "epoch 2: the tree before cleaning\n"
+        "epoch 1: distilled tree\n"
+        "epoch 1: the tree before cleaning\n"
+        "task"
     )
+    assert _git(repo, *at, "rev-parse", "--verify", "refs/runs/run-b/epoch-001")
+    assert not (tmp_path / "run-a" / "history").exists()
 
 
 def test_an_interrupted_epoch_puts_the_tree_back(repo: Path, store: Path) -> None:
@@ -192,7 +212,7 @@ def test_an_interrupted_epoch_puts_the_tree_back(repo: Path, store: Path) -> Non
     assert not (repo / "half.txt").exists()
     assert _git(repo, "rev-parse", "HEAD") == head
     assert not (store / "revert").exists()
-    assert not (store / "history").exists()
+    assert not tree.history_repo(store).exists()
 
 
 def test_a_failed_check_reverts_the_cleaning_and_keeps_its_log(
@@ -210,7 +230,105 @@ def test_a_failed_check_reverts_the_cleaning_and_keeps_its_log(
     assert (repo / "src" / "main.py").read_text() == "value = 1\n"
     assert _git(repo, "rev-list", "--count", "HEAD") == "1"
     assert "checking" in (store / "checks" / "epoch-001.log").read_text()
-    assert (store / "history" / "epoch-001.git").is_dir()
+    assert _git(
+        repo,
+        "--git-dir",
+        str(tree.history_repo(store)),
+        "rev-parse",
+        "--verify",
+        "refs/runs/store/epoch-001",
+    )
+
+
+def test_epochs_store_what_they_share_once(repo: Path, store: Path) -> None:
+    (repo / "data").mkdir()
+    for index in range(50):
+        (repo / "data" / f"{index}.bin").write_bytes(os.urandom(8192))
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "data")
+    manifest = set(tree.listed(repo))
+    held = Config(work_paths=("src",))
+    for epoch in (1, 2, 3):
+        (repo / "src" / "main.py").write_text(f"value = {epoch}\n")
+        cleaning.clean_epoch(Scripted(_cleaned), held, repo, manifest, store, epoch)
+
+    counted = _git(
+        repo, "--git-dir", str(tree.history_repo(store)), "count-objects", "-v"
+    )
+    sizes = dict(line.split(": ") for line in counted.splitlines())
+    stored = int(sizes["size"]) + int(sizes["size-pack"])
+    assert stored < 2 * 50 * 8
+
+
+def test_a_check_log_keeps_only_its_end(
+    repo: Path, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tree, "CHECK_LOG_BYTES", 100)
+    log = store / "checks" / "epoch-001.log"
+
+    assert tree.run_check(repo, "seq 1 1000", log)
+
+    kept = log.read_text()
+    assert kept.startswith("[earlier output cut]")
+    assert kept.endswith("1000\n")
+    assert len(kept) < 130
+
+
+def test_large_files_and_nested_repositories_stay_out_of_git(
+    repo: Path, store: Path, tmp_path: Path
+) -> None:
+    manifest = set(tree.listed(repo))
+    (repo / "src" / "weights.bin").write_bytes(b"\0" * (2 * tree.MIB))
+    (repo / "src" / "deps").mkdir()
+    _git(repo / "src" / "deps", "init", "-q")
+    held = Config(work_paths=("src",), max_tracked_file_mb=1)
+
+    cleaning.clean_epoch(Scripted(_cleaned), held, repo, manifest, store, 1)
+
+    tracked = _git(repo, "ls-files").splitlines()
+    assert "src/weights.bin" not in tracked
+    assert not any(path.startswith("src/deps") for path in tracked)
+    assert (repo / "src" / "weights.bin").exists()
+    assert _git(repo, "status", "--porcelain") == ""
+    at = ("--git-dir", str(tmp_path / "history.git"))
+    ref = "refs/runs/store/epoch-001"
+    archived = _git(repo, *at, "ls-tree", "-r", "--name-only", ref).splitlines()
+    assert "src/weights.bin" not in archived
+    assert "src/main.py" in archived
+    assert "src/weights.bin (2.0 MB)" in _git(
+        repo, *at, "log", "-1", "--format=%B", ref
+    )
+
+    (repo / "src" / "big.dat").write_bytes(b"\1" * (2 * tree.MIB))
+    _git(repo, "add", "src/big.dat")
+    agent = ("-c", "user.name=a", "-c", "user.email=a@a", "commit", "-qm", "big")
+    refused = subprocess.run(
+        ["git", *agent], cwd=repo, capture_output=True, text=True, check=False
+    )
+    assert refused.returncode
+    assert "refused: src/big.dat" in refused.stderr
+    _git(repo, "reset", "-q")
+    (repo / "src" / "small.py").write_text("value = 3\n")
+    _git(repo, "add", "src/small.py")
+    _git(repo, *agent)
+    assert "src/small.py" in _git(repo, "ls-files")
+
+
+def test_an_unreadable_history_is_kept_whole(
+    repo: Path, store: Path, tmp_path: Path
+) -> None:
+    manifest = set(tree.listed(repo))
+    shutil.rmtree(repo / ".git")
+    (repo / ".git").mkdir()
+    (repo / ".git" / "HEAD").write_text("not a repository\n")
+
+    cleaning.clean_epoch(
+        Scripted(_cleaned), Config(work_paths=("src",)), repo, manifest, store, 1
+    )
+
+    assert (tmp_path / "unreadable-store-epoch-001.git" / "HEAD").exists()
+    at = ("--git-dir", str(tmp_path / "history.git"))
+    assert _git(repo, *at, "rev-list", "--count", "refs/runs/store/epoch-001") == "1"
 
 
 def test_measured_overages_go_back_as_repairs_then_the_flow_cuts(

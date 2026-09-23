@@ -2,7 +2,8 @@
 
 Every file the flow reasons about is a file git would add: `.gitignore` is honoured, so
 ignored build outputs, virtual environments and secrets are never counted as strays, never
-copied into a revert point and never committed.
+copied into a revert point and never committed. Nor is a file over the tracking limit, or
+a nested repository: those stay on disk, and out of git.
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ _COMMITTING = (
     "commit.gpgsign=false",
 )
 CHECK_SECONDS = 3600
+CHECK_LOG_BYTES = 1024**2
+MIB = 1024**2
 
 
 class Measure(NamedTuple):
@@ -61,12 +64,20 @@ class Footprint(NamedTuple):
     bytes: int
 
 
-def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _git(
+    *args: str,
+    cwd: Path | None = None,
+    index: Path | None = None,
+    stdin: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
         env=env,
+        input=stdin,
         check=False,
         capture_output=True,
         text=True,
@@ -394,6 +405,56 @@ def drop_saved(saved: Path) -> None:
 
 # -- git -----------------------------------------------------------------------------
 
+_HOOK = """#!/bin/sh
+# Installed by the workspace-cleanup flows: files over {limit} bytes stay out of git.
+git diff --cached --name-only --diff-filter=AM -z | xargs -0 -r sh -c '
+status=0
+for path do
+  size=$(git cat-file -s ":$path")
+  if [ "$size" -gt {limit} ]; then
+    echo "refused: $path is $size bytes, over the {mb:g} MB this repository tracks;" \\
+      "delete it or leave it untracked" >&2
+    status=1
+  fi
+done
+exit $status' sh
+"""
+NOTED = 20
+
+
+def left_out(root: Path, entries: list[str], limit: int) -> dict[str, str]:
+    """Listed entries that are never committed, and why: too large, or a repository."""
+    out: dict[str, str] = {}
+    for rel in entries:
+        path = root / rel
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            out[rel] = "a nested repository"
+        elif (size := _size(path)) > limit:
+            out[rel] = f"{size / MIB:,.1f} MB"
+    return out
+
+
+def _noted(out: dict[str, str], limit: int) -> str:
+    if not out:
+        return ""
+    lines = [f"- {rel} ({why})" for rel, why in list(out.items())[:NOTED]]
+    if len(out) > NOTED:
+        lines.append(f"- and {len(out) - NOTED} more")
+    return (
+        f"\n\nLeft out of git, over {limit / MIB:g} MB or a repository:\n"
+        + "\n".join(lines)
+    )
+
+
+def _pattern(rel: str) -> str:
+    """An exclude pattern matching exactly this path from the repository's root."""
+    escaped = "".join("\\" + ch if ch in "\\*?[" else ch for ch in rel)
+    if escaped.endswith(" "):
+        escaped = escaped[:-1] + "\\ "
+    return "/" + escaped
+
 
 def _remove_git_entry(root: Path) -> bool:
     """Remove .git whether directory, gitfile, or symlink; True once it is gone."""
@@ -404,27 +465,107 @@ def _remove_git_entry(root: Path) -> bool:
     return not os.path.lexists(root / ".git")
 
 
-def erase_history(root: Path, epoch: int) -> bool:
+def history_repo(store: Path) -> Path:
+    """The one repository every run in this workspace archives its history into."""
+    return store.parent / "history.git"
+
+
+def epoch_ref(store: Path, epoch: int) -> str:
+    return f"refs/runs/{store.name}/epoch-{epoch:03d}"
+
+
+def _open_history(store: Path) -> Path:
+    history = history_repo(store)
+    if history.is_symlink():
+        raise RuntimeError(f"history repository is a symlink: {history}")
+    if not (history / "HEAD").exists():
+        made = _git("init", "--quiet", "--bare", str(history))
+        if made.returncode:
+            raise RuntimeError(f"could not create {history}: {made.stderr.strip()}")
+    return history
+
+
+def _commit_tree(
+    history: Path, work_tree: Path, entries: list[str], message: str, parent: str = ""
+) -> str:
+    """Commit exactly these entries of work_tree into history; the commit, or "".
+
+    Written straight into the history repository, so a file it already holds -- from an
+    earlier epoch or an earlier run -- is not stored again.
+    """
+    at = f"--git-dir={history}"
+    with tempfile.TemporaryDirectory(prefix="cleanup-index-") as scratch:
+        index = Path(scratch) / "index"
+        if entries:
+            added = _git(
+                "--literal-pathspecs",
+                at,
+                f"--work-tree={work_tree}",
+                "add",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+                index=index,
+                stdin="\0".join(entries),
+            )
+            if added.returncode:
+                return ""
+        tree = _git(at, "write-tree", index=index)
+    if tree.returncode:
+        return ""
+    parents = ("-p", parent) if parent else ()
+    made = _git(
+        at, *_COMMITTING, "commit-tree", tree.stdout.strip(), *parents, "-m", message
+    )
+    return "" if made.returncode else made.stdout.strip()
+
+
+def erase_history(root: Path, store: Path, epoch: int, limit: int) -> bool:
     """Replace root's history with one commit of the cleaned tree.
 
-    The history it replaces is not lost: the revert point still holds it, and
-    `archive_history` moves it into the run's history once this has succeeded.
+    The commit is made in the history repository and fetched into a fresh repository in
+    root, so the two share it and later epochs archive only what is new. What is left out
+    of it is excluded in the new repository, and its pre-commit hook refuses any file
+    over the limit an agent tries to commit later. Run only once `archive_history` has
+    kept the history this replaces, so what it commits is mostly stored there already.
     """
+    history = _open_history(store)
     if not _remove_git_entry(root):
         print("the .git entry could not be removed; git was not run")
         return False
+    if _git("-c", "init.defaultBranch=main", "init", "-q", cwd=root).returncode:
+        return False
+    entries = listed(root)
+    out = left_out(root, entries, limit)
+    git = root / ".git"
+    try:
+        (git / "info").mkdir(exist_ok=True)
+        with (git / "info" / "exclude").open("a", encoding="utf-8") as exclude:
+            exclude.writelines(_pattern(rel) + "\n" for rel in out if "\n" not in rel)
+        (git / "hooks").mkdir(exist_ok=True)
+        hook = git / "hooks" / "pre-commit"
+        hook.write_text(_HOOK.format(limit=limit, mb=limit / MIB), encoding="utf-8")
+        hook.chmod(0o755)
+    except OSError:
+        return False
+    message = f"epoch {epoch}: distilled tree" + _noted(out, limit)
+    commit = _commit_tree(
+        history, root, [rel for rel in entries if rel not in out], message
+    )
+    if not commit:
+        return False
+    ref = f"{epoch_ref(store, epoch)}.distilled"
     steps = (
-        ("-c", "init.defaultBranch=main", "init", "-q"),
-        ("add", "-A"),
+        (f"--git-dir={history}", "update-ref", ref, commit),
+        ("config", "core.hooksPath", ".git/hooks"),
         (
-            *_COMMITTING,
-            "commit",
+            "fetch",
             "-q",
-            "--allow-empty",
-            "--no-verify",
-            "-m",
-            f"epoch {epoch}: distilled tree",
+            "--no-tags",
+            "--update-head-ok",
+            str(history),
+            f"{ref}:refs/heads/main",
         ),
+        ("reset", "-q"),
     )
     for step in steps:
         try:
@@ -433,51 +574,67 @@ def erase_history(root: Path, epoch: int) -> bool:
             return False
         if done.returncode:
             return False
+    if out:
+        print(
+            f"epoch {epoch}: {len(out)} entr(ies) left out of git:{_noted(out, limit)}"
+        )
     return True
 
 
-def archive_history(saved: Path, store: Path, epoch: int) -> Path:
-    """Keep the history an epoch replaced, plus the tree the coding turns left.
+def archive_history(saved: Path, store: Path, epoch: int, limit: int) -> str | None:
+    """Keep the history an epoch replaced, and the tree the coding turns left.
 
-    The .git the revert point holds moves into ``history/epoch-NNN.git`` under the run
-    root, and a last commit records the tree as the coding turns left it, uncommitted
-    work included -- so each epoch's archive ends where the next epoch's repository
-    begins, and the runs can be stitched back into one history. A .git that was a
-    gitfile or a symlink pointed at history that was never deleted, so its archive
-    starts empty.
+    Every ref of the replaced repository -- branches, tags, remotes -- is fetched into
+    the workspace's shared history repository under ``<epoch ref>.refs/``. A commit of
+    the tree the coding turns left, uncommitted work included and large files left out,
+    goes on top of the replaced HEAD as the epoch ref itself. Returns that ref, or None
+    if it could not be written; the fetched history is kept either way.
     """
-    history = store / "history"
-    history.mkdir(exist_ok=True)
-    archive = history / f"epoch-{epoch:03d}.git"
-    again = 1
-    while os.path.lexists(archive):
-        archive = history / f"epoch-{epoch:03d}-{again}.git"
-        again += 1
-    old = saved / ".git"
-    if old.is_dir() and not old.is_symlink():
-        os.replace(old, archive)
-    else:
-        made = _git("init", "--quiet", "--bare", str(archive))
-        if made.returncode:
-            raise RuntimeError(f"could not archive epoch {epoch}: {made.stderr}")
-    where = (f"--git-dir={archive}", f"--work-tree={saved}")
-    added = _git(*where, "add", "-A")
-    committed = _git(
-        *where,
-        *_COMMITTING,
-        "commit",
-        "-q",
-        "--allow-empty",
-        "--no-verify",
-        "-m",
-        f"epoch {epoch}: the tree before cleaning",
+    history = _open_history(store)
+    at = f"--git-dir={history}"
+    ref = epoch_ref(store, epoch)
+    parent = ""
+    if os.path.lexists(saved / ".git"):
+        refs = _git(at, "fetch", "-q", "--no-tags", str(saved), f"+refs/*:{ref}.refs/*")
+        head = _git(at, "fetch", "-q", "--no-tags", str(saved), f"+HEAD:{ref}.head")
+        if not head.returncode:
+            parent = _git(at, "rev-parse", f"{ref}.head").stdout.strip()
+        elif refs.returncode:
+            # A history git cannot read is kept whole rather than dropped.
+            kept = history.parent / f"unreadable-{store.name}-epoch-{epoch:03d}.git"
+            _remove(kept)
+            _copy(saved / ".git", kept)
+            print(
+                f"epoch {epoch}: git could not read the replaced history; kept at {kept}"
+            )
+    entries = listed(saved)
+    out = left_out(saved, entries, limit)
+    message = f"epoch {epoch}: the tree before cleaning" + _noted(out, limit)
+    commit = _commit_tree(
+        history, saved, [rel for rel in entries if rel not in out], message, parent
     )
-    if added.returncode or committed.returncode:
-        print(
-            f"epoch {epoch}: the tree before cleaning could not be committed to"
-            f" {archive}; its history is archived without it"
-        )
-    return archive
+    if not commit or _git(at, "update-ref", ref, commit).returncode:
+        print(f"epoch {epoch}: the tree before cleaning could not be archived")
+        return None
+    return ref
+
+
+def link_history(store: Path, epoch: int) -> None:
+    """Chain the epoch's distilled commit onto its archived tree before cleaning.
+
+    So one `git log` in the history repository reads the whole run -- the original
+    history, then each epoch's tree before and after cleaning -- with nothing to stitch
+    by hand. The working repository's own history stays one commit long.
+    """
+    history = history_repo(store)
+    at = f"--git-dir={history}"
+    ref = epoch_ref(store, epoch)
+    grafted = _git(at, "replace", "-f", "--graft", f"{ref}.distilled", ref)
+    if grafted.returncode:
+        print(f"epoch {epoch}: the distilled commit could not be chained to {ref}")
+    # Pack what this epoch wrote loose, and nothing else; gc joins packs as they gather.
+    _git(at, "repack", "-d", "-q")
+    _git(at, "gc", "--auto", "--quiet")
 
 
 # -- the check -----------------------------------------------------------------------
@@ -516,7 +673,22 @@ def run_check(root: Path, command: str, log: Path) -> bool:
             proc.wait(timeout=60)
         except (OSError, subprocess.SubprocessError):
             pass
+    _cap(log)
     return ok
+
+
+def _cap(log: Path) -> None:
+    """Keep only the end of a check log that grew past CHECK_LOG_BYTES."""
+    try:
+        size = log.stat().st_size
+        if size <= CHECK_LOG_BYTES:
+            return
+        with log.open("rb") as held:
+            held.seek(size - CHECK_LOG_BYTES)
+            end = held.read()
+        log.write_bytes(b"[earlier output cut]\n" + end)
+    except OSError:
+        pass
 
 
 def tail(log: Path, lines: int = 20) -> str:

@@ -20,10 +20,12 @@ lines under the work paths to comment_lines. What is over goes back to the same 
 up to repairs times before the flow deletes strays and truncates NEXT.md itself (a
 comment overage is only printed). A configured check_command then runs for at most an
 hour; a failure restores the tree from the revert point. Last, the repository's history
-is replaced by one commit of the cleaned tree, and the history it replaces -- with a
-last commit of the tree the coding turns left -- is archived as
-``history/epoch-NNN.git`` under the run root, so the epochs can be stitched back into
-one history. An epoch interrupted for any reason puts the tree back before the run ends.
+is replaced by one commit of the cleaned tree. The history it replaces -- with a last
+commit of the tree the coding turns left -- goes into one ``history.git`` shared by every
+run in the workspace, chained to the commit that replaced it, so one `git log` there
+reads the whole run. Files over max_tracked_file_mb and nested repositories are never
+committed, and the new repository's pre-commit hook refuses large files. An epoch
+interrupted for any reason puts the tree back before the run ends.
 
 What ends the run is its allowance, which is humanize's: hours, millions of output
 tokens and dollars, across both chasers and the cleaner. This flow declares ten million

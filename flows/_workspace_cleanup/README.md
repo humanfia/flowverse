@@ -23,6 +23,7 @@ check_command: ""                    # correctness check after cleaning; empty s
 session_timeout_minutes: 240         # per turn, then a wrap-up request
 stop_grace_minutes: 10               # after the request, the turn is cut off
 idle_timeout_minutes: 20             # without token progress, a reminder
+max_tracked_file_mb: 10              # larger files are never committed
 confirm_large_workspace_copies: true # ask before cleaning a large workspace
 budget:                              # the run's allowance, held by humanize
   tokens: 10                         # millions of output tokens (the flows' default)
@@ -56,38 +57,50 @@ Every `cleanup_turns` counted turns, between turns:
    repository when the run first started count as strays. Anything over is handed back to
    the cleaner up to `repairs` times, summarized by directory. After that, the flow deletes
    strays and truncates `NEXT.md` itself.
-4. `check_command`, if set, runs for at most an hour. Its output goes to `checks/epoch-NNN.log`
-   in the run root. A failure restores the tree from the revert point.
-5. The repository's history is replaced by one commit, `epoch N: distilled tree`.
+4. `check_command`, if set, runs for at most an hour. The last 1 MiB of its output goes
+   to `checks/epoch-NNN.log` in the run root. A failure restores the tree from the revert
+   point.
+5. The repository's history is replaced by one commit, `epoch N: distilled tree`, and the
+   history it replaces is archived.
 
 An epoch interrupted for any reason (stopped, out of allowance, or failed) restores the
 tree before the run ends. Files `.gitignore` ignores are never counted as strays, copied
 into a revert point, restored or committed.
 
+## What git never tracks
+
+A file over `max_tracked_file_mb`, or a nested repository, stays on disk but out of git:
+
+- the `distilled tree` commit leaves it out, and the new repository's `.git/info/exclude`
+  lists it, so `git status` stays clean;
+- the archived tree before cleaning leaves it out, and its commit message names it;
+- the new repository's pre-commit hook refuses any file over the limit an agent stages.
+
+A large file outside the work paths that was not in the repository at the start is still
+a stray, so the cleaner or the flow deletes it.
+
 ## History archive
 
-The history an epoch replaces is never deleted. It is moved to
-`history/epoch-NNN.git` in the run root, with a last commit, `epoch N: the tree before
-cleaning`, that records the tree as the coding turns left it, including uncommitted work.
-The first archive holds the repository's original history.
+The history an epoch replaces is never deleted. It goes into one bare repository per
+workspace, `history.git`, shared by every run, so what the epochs and runs have in
+common is stored once. For run `<run-id>` and epoch `NNN`:
 
-Each archive ends where the next epoch's repository begins, so the whole run can be
-stitched into one history:
+| Ref | What it holds |
+| --- | --- |
+| `refs/runs/<run-id>/epoch-NNN.refs/*` | every ref the replaced repository had: branches, tags, remotes |
+| `refs/runs/<run-id>/epoch-NNN` | `epoch N: the tree before cleaning`, the tree the coding turns left, uncommitted work included, on top of the replaced HEAD |
+| `refs/runs/<run-id>/epoch-NNN.distilled` | `epoch N: distilled tree`, the commit that replaced it, grafted onto the tree before cleaning |
+
+Each epoch is chained to the one before it, so one command reads the whole run, from the
+repository's original history to the latest epoch:
 
 ```sh
-history=$HUMANIZE_HOME/<flow>/<workspace-key>/<run-id>/history
-git init stitched && cd stitched
-for archive in "$history"/epoch-*.git; do
-  git fetch -q "$archive" "HEAD:refs/epochs/$(basename "$archive" .git)"
-done
-git fetch -q /path/to/repo HEAD:refs/epochs/zz-current
-last=
-for ref in $(git for-each-ref --format='%(refname)' refs/epochs); do
-  [ -n "$last" ] && git replace --graft "$(git rev-list --max-parents=0 "$ref")" "$last"
-  last=$(git rev-parse "$ref")
-done
-git log --oneline refs/epochs/zz-current
+git --git-dir=$HUMANIZE_HOME/<flow>/<workspace-key>/history.git \
+    log --oneline refs/runs/<run-id>/epoch-NNN.distilled
 ```
+
+The chain is made with `git replace`, which a clone does not carry by default. Fetch
+`refs/replace/*` along with the refs to keep it.
 
 ## Large workspaces
 
@@ -101,14 +114,18 @@ start. Add `.gitignore` rules, or set `confirm_large_workspace_copies: false` to
 Everything the flows keep lives under Humanize's managed home, outside the repository:
 
 ```text
-$HUMANIZE_HOME/<flow>/<workspace-key>/<run-id>/
-├── manifest.txt        # the task's own files, recorded at the first start
-├── revert/             # only while an epoch is in flight
-├── checks/epoch-NNN.log
-└── history/epoch-NNN.git
+$HUMANIZE_HOME/<flow>/<workspace-key>/
+├── history.git                  # every run's archived history, stored once
+└── <run-id>/
+    ├── manifest.txt             # the task's own files, recorded at the first start
+    ├── revert/                  # only while an epoch is in flight
+    └── checks/epoch-NNN.log     # the last 1 MiB of each check
 ```
 
-The run root is kept after the run ends. Resuming reuses it; a fresh run gets a new one.
+A run root holds only a manifest and check logs once its epochs are done. Resuming reuses
+it; a fresh run gets a new one. Each epoch packs what it added to `history.git`, and
+`git gc --auto` joins the packs as they gather.
+
 The flows run their tree and git work locally. They are not meant for agents anchored on a
 remote machine.
 

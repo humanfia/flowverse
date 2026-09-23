@@ -126,6 +126,7 @@ def test_flows_are_public_resumable_and_declare_a_token_allowance() -> None:
             "session_timeout_minutes",
             "idle_timeout_minutes",
             "stop_grace_minutes",
+            "max_tracked_file_mb",
             "confirm_large_workspace_copies",
         }
         held = model(work_paths=("src",))
@@ -134,6 +135,7 @@ def test_flows_are_public_resumable_and_declare_a_token_allowance() -> None:
         assert held.session_timeout_minutes == 240
         assert held.idle_timeout_minutes == 20
         assert held.stop_grace_minutes == 10
+        assert held.max_tracked_file_mb == 10
         assert held.confirm_large_workspace_copies is True
 
 

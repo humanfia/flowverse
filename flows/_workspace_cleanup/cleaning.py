@@ -12,11 +12,14 @@ from pydantic import BaseModel, Field
 from .config import Config
 from .guard import guarded
 from .tree import (
+    MIB,
     Measure,
     archive_history,
     delete_strays,
     drop_saved,
     erase_history,
+    history_repo,
+    link_history,
     measure,
     restore_tree,
     run_check,
@@ -203,9 +206,12 @@ def clean_epoch(
     The whole listed tree and .git are saved aside first. A failed check puts the tree
     back; a failed git step puts it back with its old history. Interrupted -- stopped,
     out of allowance, or failed -- the epoch puts the tree back before the run ends, so
-    the repository is never left half-cleaned. On success the replaced history is
-    archived under the run root, never deleted.
+    the repository is never left half-cleaned. The history is archived in the
+    workspace's history repository before it is replaced -- and is not replaced at all
+    if it could not be -- then chained to the commit that replaces it. Files over the
+    tracking limit are never committed.
     """
+    limit = int(held.max_tracked_file_mb * MIB)
     print(f"epoch {epoch}: saving the tree aside as the revert point")
     saved = save_tree(root, store)
     try:
@@ -220,8 +226,14 @@ def clean_epoch(
                     f"epoch {epoch}: the check failed -- this epoch's cleaning was"
                     f" reverted; its output is in {log}:\n{tail(log)}"
                 )
-        erased = erase_history(root, epoch)
-        if not erased:
+        archived = archive_history(saved, store, epoch, limit)
+        erased = bool(archived) and erase_history(root, store, epoch, limit)
+        if not archived:
+            print(
+                f"epoch {epoch}: the history could not be archived, so it is kept as it"
+                " is this epoch"
+            )
+        elif not erased:
             restore_tree(root, saved)
             print(
                 f"epoch {epoch}: a git step failed; the tree, old history included, was"
@@ -240,8 +252,9 @@ def clean_epoch(
         print(f"epoch {epoch}: interrupted; the tree was put back as it was before it")
         raise
     if erased:
-        archive = archive_history(saved, store, epoch)
+        link_history(store, epoch)
         print(
-            f"epoch {epoch}: one commit stands; the history before it is at {archive}"
+            f"epoch {epoch}: one commit stands; the history it replaced is {archived}"
+            f" in {history_repo(store)}"
         )
     drop_saved(saved)
