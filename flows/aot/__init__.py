@@ -31,25 +31,25 @@ import shutil
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Annotated, Literal, NamedTuple
 
 from _aot import prompts
-from hmz.flows import (
+from hmz.flows import EVERYWHERE, Agent, AgentDefaults, Person, Session, flow
+
+# What a compiler does to a flow -- read it, prove it, brief its author -- is the runtime's,
+# and `hmz.flows` hands through only what a flow itself writes. So this one flow names the
+# runtime, and its own gate says so (`tests/test_aot.py`).
+from hmz.runtime.flowing import (
     ALWAYS_DONE,
     ENTRY,
-    EVERYWHERE,
     MINE,
     NEVER_DONE,
     SILENT,
-    Agent,
     Finding,
-    Person,
     Scenario,
-    Session,
     briefed,
     catalogue,
     checked,
-    flow,
     proved,
 )
 from pydantic import BaseModel, Field
@@ -64,10 +64,14 @@ class Compiling(NamedTuple):
     reviewer arrangement that catches what the writer has talked itself into. The person
     is the gate for what a compiler must not decide alone: an ask nothing serves, a name
     already taken, a draft the repairs ran out on.
+
+    The writer's work is writing the draft, so it is declared at `workspace-write` -- left at no
+    rung it runs at whatever the account defaults to, which on an account that asks before an
+    edit is a writer whose every draft is refused. The critic only reads.
     """
 
-    writer: Agent
-    critic: Agent
+    writer: Annotated[Agent, AgentDefaults(permission="workspace-write")]
+    critic: Annotated[Agent, AgentDefaults(permission="read-only")]
     human: Person
 
 

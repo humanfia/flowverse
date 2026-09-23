@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from hmz.coganchor.agents import HumanAgent, driver
-from hmz.flows import NEVER_DONE, carries, checked, configures, load, proved, wanted
+from hmz.runtime.flowing import NEVER_DONE, carries, checked, configures, load, proved, wanted
 
 ROOT = Path(__file__).parents[1]
 FLOW = ROOT / "flows" / "aot"
@@ -85,7 +85,7 @@ def equivalent(
 
 
 def _all_places(entry: Path):
-    from hmz.flows.driving import declares
+    from hmz.runtime.flowing.driving import declares
 
     return declares(entry)[1]
 
