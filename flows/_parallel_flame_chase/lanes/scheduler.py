@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from hmz.flows import Stopped
 
-from ..core.models import InitialPlan, LaneName, LaneReport
+from ..core.models import LaneName, LaneReport
 from ..core.utils import close_safely, json_copy, now
 from ..orchestration.state import RuntimeState
 from ..persistence.checkpoints import checkpoint_fingerprint, checkpoint_report
@@ -21,8 +21,25 @@ from .runtime import LaneRuntime, run_lane_session
 class LaneScheduler(RuntimeState):
     """Schedule alternating actors while the inherited state remains single-writer."""
 
+    session_protocol = (
+        "Your partner alternates with you; leave durable work and evidence, "
+        "not conversational memory."
+    )
+
+    def _actor_index(self, runtime: LaneRuntime, durable: dict[str, Any]) -> int:
+        """Select the actor for the next fresh lane session."""
+        return int(durable.get("next_actor", runtime.actor_at)) % 2
+
+    def _next_actor(self, runtime: LaneRuntime) -> int:
+        """Select the actor index persisted after one completed attempt."""
+        return 1 - runtime.actor_at
+
+    def _actor_role(self, lane: LaneName, actor_index: int) -> str:
+        """Describe the selected actor without exposing backend identity."""
+        return f"{lane}-actor-{'a' if actor_index == 0 else 'b'}"
+
     def _initial_brief(self, lane: LaneName) -> dict[str, object]:
-        plan = InitialPlan.model_validate(self.control["plan"])
+        plan = self._validate_plan(self.control["plan"])
         brief = next(item for item in plan.lanes if item.lane == lane)
         return brief.model_dump(mode="json")
 
@@ -44,6 +61,24 @@ class LaneScheduler(RuntimeState):
         """Return a specialized Lane 1 handoff, if the mode defines one."""
         return None
 
+    def _previous_lane_report(self, lane: LaneName) -> dict[str, object] | None:
+        """Return an optional same-lane handoff for additive report-share modes."""
+        return None
+
+    def _unread_reports(
+        self, lane: LaneName, cursors: dict[str, Any]
+    ) -> tuple[list[dict[str, object]], dict[str, int]]:
+        """Return the ordinary inter-lane report batch for one consumer."""
+        return self.bus.unread(lane, cursors)
+
+    def _lane_instructions(self, lane: LaneName) -> str:
+        """Return additive mode instructions without changing LaneReport."""
+        return ""
+
+    def _lane_ownership(self, lane: LaneName) -> str | None:
+        """Override legacy Lane 1 integration ownership for additive modes."""
+        return None
+
     def _after_lane_scheduled(self, runtime: LaneRuntime) -> None:
         """Reset mode-specific ephemeral fields for a new turn."""
 
@@ -52,6 +87,8 @@ class LaneScheduler(RuntimeState):
         runtime: LaneRuntime,
         record: dict[str, object],
         report: LaneReport,
+        *,
+        candidate_became_best: bool,
     ) -> None:
         """Apply mode-specific state transitions after a valid report."""
         if report.status == "blocked":
@@ -75,16 +112,16 @@ class LaneScheduler(RuntimeState):
             return
         self._validate_layout()
         cursors = cast("dict[str, Any]", self.control["bus_cursors"])
-        unread, acknowledgements = self.bus.unread(lane, cursors)
+        unread, acknowledgements = self._unread_reports(lane, cursors)
         identity = self._identity(lane)
         turn = int(durable.get("turns", 0)) + 1
-        actor_index = int(durable.get("next_actor", runtime.actor_at)) % 2
+        actor_index = self._actor_index(runtime, durable)
         runtime.actor_at = actor_index
         actor = runtime.actors[actor_index]
         prompt = lane_prompt(
             objective=cast("str", self.control["objective"]),
             lane=lane,
-            actor_role=f"{lane}-actor-{'a' if actor_index == 0 else 'b'}",
+            actor_role=self._actor_role(lane, actor_index),
             turn=turn,
             workspace_map=self._workspace_map(),
             mission=mission_document,
@@ -101,6 +138,10 @@ class LaneScheduler(RuntimeState):
                 "last_error": durable.get("last_error"),
             },
             skill=self.skill_name,
+            previous_lane_report=self._previous_lane_report(lane),
+            mode_instructions=self._lane_instructions(lane),
+            ownership_instructions=self._lane_ownership(lane),
+            session_protocol=self.session_protocol,
         )
         runtime.identity = identity
         runtime.pending_ack = acknowledgements
@@ -164,7 +205,9 @@ class LaneScheduler(RuntimeState):
         became_best = False
         if report.submission is not None:
             updated_board, candidate, became_best = with_submission(
-                cast("dict[str, object]", self.control["candidate_board"]), record
+                cast("dict[str, object]", self.control["candidate_board"]),
+                record,
+                cast("tuple[str, ...]", self.lane_names),
             )
         self.bus.publish(lane, record)
         if updated_board is not None and candidate is not None:
@@ -191,10 +234,15 @@ class LaneScheduler(RuntimeState):
             runtime.pending_ack,
         )
         durable["turns"] = int(durable.get("turns", 0)) + 1
-        durable["next_actor"] = 1 - runtime.actor_at
+        durable["next_actor"] = self._next_actor(runtime)
         durable["consecutive_failures"] = 0
         durable["last_error"] = None
-        self._observe_report(runtime, record, report)
+        self._observe_report(
+            runtime,
+            record,
+            report,
+            candidate_became_best=became_best,
+        )
         self.completed_turns += 1
 
     def _record_failure(self, runtime: LaneRuntime, error: str) -> None:
@@ -215,7 +263,7 @@ class LaneScheduler(RuntimeState):
         }
         self.bus.publish(lane, failure)
         self.control["latest_reports"][lane] = json_copy(failure)
-        durable["next_actor"] = 1 - runtime.actor_at
+        durable["next_actor"] = self._next_actor(runtime)
         durable["consecutive_failures"] = (
             int(durable.get("consecutive_failures", 0)) + 1
         )

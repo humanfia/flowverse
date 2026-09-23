@@ -83,11 +83,13 @@ def validate_leaderboard(board: object, run_id: str) -> dict[str, object]:
 
 
 def _candidate_record(
-    report: dict[str, object], submission: CandidateSubmission
+    report: dict[str, object],
+    submission: CandidateSubmission,
+    lanes: tuple[str, ...] = LANES,
 ) -> dict[str, object]:
     lane = report.get("lane")
     artifacts = report.get("artifacts")
-    if lane not in LANES:
+    if lane not in lanes:
         raise ValueError("candidate report has an invalid lane")
     if not isinstance(artifacts, list) or not artifacts:
         raise ValueError("candidate submission has no hashed artifacts")
@@ -117,12 +119,14 @@ def _is_better(candidate: dict[str, object], incumbent: dict[str, object]) -> bo
 
 
 def with_submission(
-    board: dict[str, object], report: dict[str, object]
+    board: dict[str, object],
+    report: dict[str, object],
+    lanes: tuple[str, ...] = LANES,
 ) -> tuple[dict[str, object], dict[str, object], bool]:
     """Return an updated board, immutable candidate record, and global-best flag."""
     validated = validate_leaderboard(board, cast("str", report.get("run_id")))
     submission = CandidateSubmission.model_validate(report.get("submission"))
-    candidate = _candidate_record(report, submission)
+    candidate = _candidate_record(report, submission, lanes)
     updated = json_copy(validated)
     updated["submission_count"] = int(updated["submission_count"]) + 1
     identity = _identity(submission)

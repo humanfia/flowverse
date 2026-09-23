@@ -5,8 +5,7 @@ creates an initial three-lane plan and then leaves the run. Each lane alternates
 fresh sessions and coordinates through durable reports.
 
 This ordinary flow intentionally stops at durable peer coordination. The planning coordinator
-does not return for audits, interruptions, redirections, or acceptance decisions. Use the
-separately selectable `parallel_flame_chase_mission` flow when those controls are required.
+does not return for audits, interruptions, redirections, or acceptance decisions.
 
 ## Topology
 
@@ -19,6 +18,9 @@ Pass exactly seven agents in this order:
 5. Lane 2 actor B
 6. Lane 3 actor A
 7. Lane 3 actor B
+
+The person at the prompt is injected automatically for optional startup confirmation and does
+not require an eighth `-a`.
 
 ```console
 hmz exec -f ./flows/parallel_flame_chase \
@@ -47,6 +49,12 @@ alternation, reports, snapshots, and lane-local failure state. A bare `continue`
 when present; if the objective changed, the base flow replans against a fresh source snapshot.
 Set `resume_mode: fresh` to deliberately start another run.
 
+Before a fresh run, and before a changed objective is snapshotted on resume, the source is
+measured. More than `workspace_file_warning_threshold` regular files, or a projected copy size
+above `workspace_copy_warning_threshold_bytes`, prints a warning. By default the flow continues
+without asking; set `confirm_large_workspace_copies: true` to require explicit approval before
+creating the planning, Lane 2, and Lane 3 snapshots.
+
 A per-source advisory lock permits only one Lane 1 owner. Runtime control paths reject links and
 replacements, while Lane 2 and Lane 3 remain confined to snapshots rather than the source tree.
 
@@ -62,6 +70,4 @@ purchase, or other remote-action executor.
 The bundled `parallel-flame-chase` skill defines the actor, report, artifact, checkpoint, and
 resume protocol. Small shared units for lifecycle, lane scheduling, workspaces, reports, events,
 checkpoints, and utilities live in the hidden sibling module `flows/_parallel_flame_chase` so both
-public flows reuse isolation and recovery behavior without sharing a public identity. Mission
-state and audit policy remain owned by `flows/parallel_flame_chase_mission` and are not loaded by
-this base flow.
+public flows reuse isolation and recovery behavior without sharing a public identity.

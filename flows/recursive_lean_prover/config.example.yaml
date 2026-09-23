@@ -1,0 +1,27 @@
+# Both flow agents are selected on the command line; this file configures orchestration.
+max_depth: 2
+max_children: 4
+max_parallel_children: 24
+max_nodes: 24
+# Retained for compatibility; an existing scaffold continues through NL revisions.
+node_attempts: 2
+plan_attempts: 1
+# Number of revisions in one review batch. Every node repeats from the latest
+# rejected draft until one passes; the scaffold plan is never regenerated.
+natural_proof_attempts: 3
+decomposition_attempts: 3
+rlcr_rounds: 20
+comparator_timeout: 21600
+
+# Set this to the repository's candidate Lean file when it has one.
+lean_target: ""
+
+# This is parsed as argv, not by a shell. Available placeholders:
+# {node_id}, {node_dir}, {run_dir}, {wiki_dir}, {lean_target}, {lean_files}
+# The command also receives HUMANIZE_NODE_* environment variables.
+comparator_command: bash tools/check-with-comparator.sh
+comparator_success: Your solution is okay!
+
+artifact_dir: .humanize/recursive-lean-prover
+wiki_dir: .humanize/math-wiki
+stop_on_child_failure: true

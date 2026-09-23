@@ -1,7 +1,5 @@
 """The official plan flow is bounded and independent of either role's backend."""
 
-# ruff: noqa: D103, PLR2004, S101
-
 from __future__ import annotations
 
 import json
@@ -12,19 +10,19 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from hmz.agents import AgentBase, AgentConfig, Event, Failed, SessionBase
+import pytest
+from hmz.coganchor.agents import AgentBase, AgentConfig, Event, Failed, SessionBase
 
 ROOT = Path(__file__).parents[1]
 FLOW = ROOT / "flows" / "humanize1"
 sys.path[:0] = [str(FLOW), str(FLOW.parent)]
 
-import humanize1  # noqa: E402
+import humanize1
 
 if TYPE_CHECKING:
     import os
     from collections.abc import Callable, Iterator
 
-    import pytest
     from pydantic import BaseModel
 
 
@@ -91,6 +89,12 @@ Use the existing flow-facing interfaces.
 Keep role names independent of backend names.
 """
 
+DECISION = """- DEC-1: Storage backend
+  - Planner Position: keep it in sqlite
+  - Reviewer Position: flat files are enough
+  - Tradeoff Summary: durability against simplicity
+  - Decision Status: {status}"""
+
 
 class Scripted(AgentBase):
     """An agent whose role behavior is supplied by the test."""
@@ -132,7 +136,9 @@ class ScriptedSession(SessionBase):
         self.released.set()
 
 
-def _planner(plan: Path, *, revise_materially: bool = False) -> Scripted:
+def _planner(
+    plan: Path, *, revise_materially: bool = False, decisions: str = ""
+) -> Scripted:
     def target(prompt: str) -> Path:
         for named in re.findall(r"/[^\s`]+", prompt):
             path = Path(named.rstrip(".,:;"))
@@ -159,11 +165,15 @@ def _planner(plan: Path, *, revise_materially: bool = False) -> Scripted:
                 if "set to `partially_converged`" in prompt
                 else "converged"
             )
-            output.write_text(
-                output.read_text().replace(
-                    "`converged` or `partially_converged`", f"`{status}`"
-                )
+            held = output.read_text().replace(
+                "`converged` or `partially_converged`", f"`{status}`"
             )
+            if decisions:
+                held = held.replace(
+                    "## Pending User Decisions\n- None.",
+                    "## Pending User Decisions\n" + decisions,
+                )
+            output.write_text(held)
         return str(output)
 
     return Scripted("planner", turn)
@@ -242,7 +252,11 @@ def test_permanent_review_failure_is_bounded_and_returns_the_candidate(
         turn_retries=1,
     )
 
-    assert calls == 4  # two analysis attempts, then two review attempts
+    # Two analysis attempts, then two review attempts -- each costing two calls, because
+    # humanize reads `service unavailable` as a gateway that went away and takes the turn
+    # again once beneath the flow. The flow's own bound is unchanged: four attempts, and it
+    # still comes back with the candidate rather than going round.
+    assert calls == 8
     assert "Final Status: `partially_converged`" in plan.read_text()
 
 
@@ -379,3 +393,42 @@ def test_default_planning_budgets_are_finite() -> None:
     assert config.turn_timeout == 3600
     assert config.total_timeout == 14400
     assert config.turn_retries == 1
+
+
+def test_a_decision_left_pending_stops_the_run_with_the_plan_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "plan.md"
+    planner = _planner(output, decisions=DECISION.format(status="`PENDING`"))
+
+    with pytest.raises(ValueError, match="PENDING.*DEC-1"):
+        _run(tmp_path, planner, _analyst())
+
+    held = output.read_text()
+    assert "Planner Position: keep it in sqlite" in held
+    assert "Final Status: `converged`" in held
+
+
+def test_a_decision_answered_lets_the_plan_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "plan.md"
+    planner = _planner(
+        output, decisions=DECISION.format(status="sqlite, as the planner had it")
+    )
+
+    plan = _run(tmp_path, planner, _analyst())
+
+    assert "Decision Status: sqlite, as the planner had it" in plan.read_text()
+
+
+def test_the_templates_own_unfilled_status_line_counts_as_undecided() -> None:
+    held = (
+        "## Pending User Decisions\n\n"
+        "- DEC-2: Cache eviction\n"
+        "  - Decision Status: `PENDING` or `<User's final decision>`\n"
+    )
+
+    assert humanize1._undecided(held) == ["DEC-2"]

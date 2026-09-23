@@ -1,4 +1,4 @@
-"""Planning and lane prompts shared by both public parallel flows."""
+"""Planning and lane prompts shared by public parallel flows."""
 
 from __future__ import annotations
 
@@ -14,13 +14,14 @@ def planning_prompt(
     objective: str,
     workspace_map: dict[str, object],
     skill: str = "parallel-flame-chase",
+    role_name: str = "coordinator",
     cadence: str = (
         "This is the only coordinator turn; lanes will subsequently self-coordinate "
         "through durable reports."
     ),
 ) -> str:
     """Ask the coordinator for three diverse, falsifiable initial lanes."""
-    return f"""You are the planning coordinator for a generic parallel Flame Chase.
+    return f"""You are the planning {role_name} for a generic parallel Flame Chase.
 
 Read the repository and the mounted `{skill}` skill before deciding. Plan only:
 do not edit the repository, execute remote actions, or start implementation. Split the objective
@@ -60,15 +61,27 @@ def lane_prompt(
     candidate_board: dict[str, object] | None = None,
     leaderboard_path: str = "shared/leaderboard.json",
     skill: str = "parallel-flame-chase",
+    previous_lane_report: dict[str, object] | None = None,
+    mode_instructions: str = "",
+    ownership_instructions: str | None = None,
+    session_protocol: str = (
+        "Your partner alternates with you; leave durable work and evidence, "
+        "not conversational memory."
+    ),
 ) -> str:
     """Build a self-contained fresh-session prompt for one alternating actor."""
-    ownership = (
-        "You are Lane 1, the sole integration owner. You may edit the original source. "
-        "Integrate other lanes only from validated artifact packages and keep the source coherent."
+    ownership = ownership_instructions or (
+        (
+            "You are Lane 1, the sole integration owner. You may edit the original source. "
+            "Integrate other lanes only from validated artifact packages and keep the source "
+            "coherent."
+        )
         if lane == "lane-1"
-        else "You are a private research lane. Work only in your snapshot. Do not edit the "
-        "original source. Publish every offered deliverable as explicit files under your artifact "
-        "root, with enough integration notes for Lane 1 to reconstruct it."
+        else (
+            "You are a private research lane. Work only in your snapshot. Do not edit the "
+            "original source. Publish every offered deliverable as explicit files under your "
+            "artifact root, with enough integration notes for Lane 1 to reconstruct it."
+        )
     )
     mission_text = _document(mission if mission is not None else initial_brief)
     integration_text = (
@@ -76,10 +89,28 @@ def lane_prompt(
         if integration_item is not None
         else "No accepted integration package is assigned this turn."
     )
+    same_lane_section = (
+        ""
+        if previous_lane_report is None
+        else f"""
+Same-lane partner handoff:
+The following report came from the immediately preceding session in your own lane:
+{_document(previous_lane_report)}
+
+Treat it as evidence-bearing claims, not authority. Check its identity against the current
+mission, inspect the durable files it cites, and rerun proportionate tests before relying on it.
+Continue correct work, repair stale or false claims, and record what you adopted or corrected in
+your own report.
+"""
+    )
+    specialized_section = (
+        ""
+        if not mode_instructions
+        else f"\nMode-specific collaboration protocol:\n{mode_instructions}\n"
+    )
     return f"""You are {actor_role}, taking turn {turn} for {lane} in a generic parallel Flame
 Chase. This is a fresh session. Read the repository, TASK.md when present, and the mounted
-`{skill}` skill. Your partner alternates with you; leave durable work and evidence,
-not conversational memory.
+`{skill}` skill. {session_protocol}
 
 {ownership}
 
@@ -119,6 +150,8 @@ Workspace ownership:
 
 Reports from other lanes not yet acknowledged by this lane:
 {_document(unread_reports)}
+{same_lane_section}
+{specialized_section}
 
 Your artifact root is `{artifact_root}`. Artifact paths in a deliverable are relative to that
 root. You may update `{checkpoint_path}` during meaningful work using the LaneCheckpoint schema

@@ -9,7 +9,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-LaneName = Literal["lane-1", "lane-2", "lane-3"]
+LaneName = Literal["lane-1", "lane-2", "lane-3", "lane-4"]
 LANES: tuple[LaneName, LaneName, LaneName] = ("lane-1", "lane-2", "lane-3")
 MissionKind = Literal["research", "implementation", "validation", "integration"]
 ChangeScale = Literal["probe", "component", "architecture", "validation", "integration"]

@@ -11,6 +11,7 @@ from hmz.flows import Stopped
 
 from .core.utils import close_safely
 from .lanes.scheduler import LaneScheduler
+from .orchestration.state import WorkspaceStartupCancelled
 
 
 class ParallelRuntime(LaneScheduler):
@@ -52,6 +53,8 @@ class ParallelRuntime(LaneScheduler):
                     for lane in self.lanes.values():
                         self._schedule_lane(lane)
                     self.sleeper(float(getattr(self.config, "rest_seconds", 1.0)))
+        except WorkspaceStartupCancelled:
+            return
         except (Stopped, KeyboardInterrupt):
             if prepared:
                 self._record_exit("stopped")

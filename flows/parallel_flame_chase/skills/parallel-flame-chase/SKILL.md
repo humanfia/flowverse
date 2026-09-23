@@ -20,8 +20,7 @@ Then route by role:
   [state-events.md](references/state-events.md).
 
 There is no audit coordinator in this flow. Terminal reports remain durable collaboration evidence;
-they do not pause lanes or request a coordinator verdict. Use `parallel_flame_chase_mission` when
-the task requires scoped audits, interruption, or mission redirection.
+they do not pause lanes or request a coordinator verdict.
 
 This flow owns local coordination, including task-provided local evaluator submissions. Those
 evaluator calls do not authorize uploading, deploying, publishing, remotely submitting to a

@@ -20,6 +20,14 @@ ARTIFACT_FILE_LIMIT = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceStats:
+    """The regular-file count and apparent bytes in one workspace source."""
+
+    regular_files: int
+    total_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class RunPaths:
     """Every runtime-owned location for one parallel run."""
 
@@ -138,18 +146,25 @@ class SourceLock:
         handle.close()
 
 
-def inspect_workspace(source: Path) -> int:
-    """Validate a snapshot source and return its regular-file size."""
+def inspect_workspace_stats(source: Path) -> WorkspaceStats:
+    """Validate a workspace source and return its regular-file count and size."""
+    regular_files = 0
     total = 0
     for folder, directories, files in os.walk(source):
         for name in [*directories, *files]:
             path = Path(folder, name)
             info = path.lstat()
             if stat.S_ISREG(info.st_mode):
+                regular_files += 1
                 total += info.st_size
             elif not (stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                 raise ValueError(f"workspace contains unsupported special file: {path}")
-    return total
+    return WorkspaceStats(regular_files=regular_files, total_bytes=total)
+
+
+def inspect_workspace(source: Path) -> int:
+    """Validate a snapshot source and return its regular-file size."""
+    return inspect_workspace_stats(source).total_bytes
 
 
 def snapshot(source: Path, destination: Path, size: int | None = None) -> None:
@@ -182,24 +197,33 @@ def snapshot(source: Path, destination: Path, size: int | None = None) -> None:
     shutil.copytree(source, destination, symlinks=True)
 
 
-def initialize_paths(paths: RunPaths, *, make_snapshots: bool) -> None:
+def initialize_paths(
+    paths: RunPaths,
+    *,
+    make_snapshots: bool,
+    lanes: tuple[LaneName, ...] = LANES,
+    source_size: int | None = None,
+) -> None:
     """Create one run layout and its private research snapshots."""
     paths.reports.mkdir(parents=True, exist_ok=True)
     paths.checkpoints.mkdir(parents=True, exist_ok=True)
     paths.private.mkdir(parents=True, exist_ok=True)
-    for lane in LANES:
+    for lane in lanes:
         paths.artifact_root(lane).mkdir(parents=True, exist_ok=True)
         report = paths.reports / f"{lane}.jsonl"
         if not report.exists() and not report.is_symlink():
             report.touch(exist_ok=False)
     if make_snapshots:
-        size = inspect_workspace(paths.source)
+        size = inspect_workspace(paths.source) if source_size is None else source_size
         snapshot(paths.source, paths.planning, size)
-        snapshot(paths.source, paths.private / "lane-2", size)
-        snapshot(paths.source, paths.private / "lane-3", size)
+        for lane in lanes:
+            if lane != "lane-1":
+                snapshot(paths.source, paths.private / lane, size)
 
 
-def validate_runtime_layout(paths: RunPaths) -> None:
+def validate_runtime_layout(
+    paths: RunPaths, lanes: tuple[LaneName, ...] = LANES
+) -> None:
     """Reject deleted, linked, or replaced runtime control paths before use."""
     directories = [
         paths.root,
@@ -208,9 +232,8 @@ def validate_runtime_layout(paths: RunPaths) -> None:
         paths.reports,
         paths.artifacts,
         paths.checkpoints,
-        paths.private / "lane-2",
-        paths.private / "lane-3",
-        *(paths.artifact_root(lane) for lane in LANES),
+        *(paths.private / lane for lane in lanes if lane != "lane-1"),
+        *(paths.artifact_root(lane) for lane in lanes),
     ]
     for path in directories:
         try:
@@ -220,7 +243,7 @@ def validate_runtime_layout(paths: RunPaths) -> None:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise RuntimeError(f"runtime directory was replaced or linked: {path}")
     files = [
-        *(paths.reports / f"{lane}.jsonl" for lane in LANES),
+        *(paths.reports / f"{lane}.jsonl" for lane in lanes),
         paths.manifest,
         paths.state_mirror,
         paths.workspace_map,

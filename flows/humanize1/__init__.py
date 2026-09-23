@@ -9,8 +9,9 @@
         -a claude/claude-opus-4-8:max -a codex/gpt-5.6-sol:max "build it"
 
 which are the plugin's three commands: `gen-idea` opens a loose idea into a repo-grounded
-draft, `gen-plan` turns that draft into a plan both sides have converged on, and `rlcr` builds
-the plan under review until nothing is left to say. Everything each of them can be told is on
+draft, `gen-plan` turns that draft into a plan both sides have converged on -- and stops,
+plan on disk, rather than finish with a decision still `PENDING`, since the loop never waits
+for a person -- and `rlcr` builds the plan under review until nothing is left to say. Everything each of them can be told is on
 `/config` -- one field per flag the plugin takes, under the name the plugin gives it. Add
 `-c setup.yaml` to run one set up rather than as it comes, and `hmz -f official/humanize1:rlcr
 -c setup.yaml` opens the interface on the same setup.
@@ -417,6 +418,13 @@ class Rlcr(BaseModel):
     base_branch: str = Field(
         default="", description="--base-branch: what the code review reads against"
     )
+    skip_code_review: bool = Field(
+        default=False,
+        description=(
+            "--skip-code-review: finish after implementation RLCR; do not start the "
+            "final repository-wide code-review phase"
+        ),
+    )
     track_plan_file: bool = Field(
         default=False,
         description="--track-plan-file: the plan is in git and stays clean",
@@ -550,6 +558,17 @@ def _base(root: Path, asked: str) -> str:
     return ""
 
 
+def _review_base(root: Path, config: Rlcr) -> str:
+    """Resolve the final code-review base, including an explicit opt-out.
+
+    A blank ``base_branch`` asks :func:`_base` to auto-detect a branch; it is
+    therefore not a way to disable review.  Keep that established default while
+    giving composed flows a setup-time switch for cases where a narrower,
+    authoritative review gate runs after RLCR.
+    """
+    return "" if config.skip_code_review else _base(root, config.base_branch)
+
+
 def _section(held: str, *headings: str) -> str:
     """One section of a plan, by any of the headings it might be under.
 
@@ -574,6 +593,29 @@ def _section(held: str, *headings: str) -> str:
             found.append(under)
         return "\n".join(found).strip()
     return ""
+
+
+def _undecided(held: str) -> list[str]:
+    """The decisions a plan still leaves to the person, by their `DEC-N` names.
+
+    Args:
+      held: The plan.
+
+    Returns:
+      Every entry under `## Pending User Decisions` whose `Decision Status` still says
+      `PENDING`, in the order the plan lists them. The template's own unfilled status line
+      counts, since a status nobody touched is a decision nobody made.
+    """
+    found: list[str] = []
+    named = ""
+    for line in _section(held, "pending user decisions").splitlines():
+        said = line.strip()
+        if match := re.match(r"-\s*(DEC-\d+)", said):
+            named = match.group(1)
+        elif named and said.startswith("- Decision Status:") and "PENDING" in said:
+            found.append(named)
+            named = ""
+    return found
 
 
 def _asked(human: Person, question: str, options: list[str]) -> str:
@@ -866,7 +908,10 @@ def _plan(
 
     Raises:
       ValueError: If the draft is not there, is empty, does not belong to this repository, or
-        the plan cannot be written where it was asked for.
+        the plan cannot be written where it was asked for -- and if the finished plan still
+        says `PENDING` on a decision only the person may make, which is the one gate between
+        planning and building: the loop never blocks on a person, so what is undecided here
+        would idle it, not stop it.
     """
     began = time.monotonic()
     if not draft.is_file():
@@ -1135,6 +1180,20 @@ def _plan(
     )
     staged.write_text(finished, encoding="utf-8")
     _promote(staged, where)
+
+    # The one gate between planning and building. `rlcr` never blocks on a person -- the
+    # quiz is advisory, `--yolo` answers the rest -- so a decision still `PENDING` would
+    # not stop the loop, it would idle it: every task hanging on the decision is deferred,
+    # round after round, and a week of reviews builds nothing. The plan is durable by now,
+    # every position written down; deciding is all that is left to do.
+    if undecided := _undecided(finished):
+        raise ValueError(
+            f"{where}: `PENDING` still stands on {', '.join(undecided)} under "
+            "`## Pending User Decisions`, and a loop handed a plan nobody finished "
+            "deciding builds none of it. The plan is written, every position with it -- "
+            "answer each `Decision Status` in the file, or run gen-plan again with "
+            "somebody at the prompt."
+        )
 
     language, code = _language(config.alternative_plan_language)
     if language:
@@ -1532,7 +1591,7 @@ def _fresh(
         shutil.copyfile(plan, where / "plan.md")
         named = _named(root, plan)
 
-    base = _base(root, config.base_branch)
+    base = _review_base(root, config)
     commit = git("rev-parse", base, at=root)[1] if base else ""
     state = State(
         current_round=0,
@@ -1811,7 +1870,9 @@ def gen_plan(agents: Planning, task: str, config: Plan | None = None) -> None:
 
     Raises:
       ValueError: If there is no draft to plan from, or it is not this repository's, or the
-        plan cannot be written where it was asked for.
+        plan cannot be written where it was asked for -- and if the finished plan leaves a
+        `Pending User Decisions` entry `PENDING`: a plan is handed on decided, since the
+        loop that builds it never waits for a person.
     """
     setting = config or Plan()
     root = Path.cwd()
@@ -1857,7 +1918,7 @@ def rlcr(
         else _under(root, PLAN)
     )
     # A run of a flow that is not being written down is handed nothing to write down in --
-    # one called from a test, one called by a flow that opened no cycle -- and is a loop
+    # one called from a test, one called by a flow that opened no epic -- and is a loop
     # that starts fresh and is not picked up, rather than a run that refuses to happen.
     _rlcr(
         agents,
