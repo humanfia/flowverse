@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import importlib
-import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import flame_chase_agent_cleanup as agent_cleanup
-import flame_chase_rule_cleanup as rule_cleanup
 import pytest
 import ralph_loop_agent_cleanup as ralph_agent_cleanup
-import ralph_loop_workspace_cleanup as ralph_rule_cleanup
 from hmz.flows import configures, drives, offered, resumes
 
 
@@ -40,21 +37,10 @@ class FakeAgent:
 
 def test_cleanup_flows_are_public_resumable_and_configurable() -> None:
     flows = Path(__file__).parents[1] / "flows"
-    rule = flows / "flame_chase_rule_cleanup" / "__init__.py"
     agent = flows / "flame_chase_agent_cleanup" / "__init__.py"
 
-    assert drives(rule) == ("flame", "chaser")
     assert drives(agent) == ("first_chaser", "second_chaser", "cleaner")
-    assert resumes(rule)
     assert resumes(agent)
-    assert set(configures(rule).model_fields) == {
-        "budget_millions",
-        "cleanup_turns",
-        "work_paths",
-        "session_timeout_minutes",
-        "idle_timeout_minutes",
-        "stop_grace_minutes",
-    }
     assert set(configures(agent).model_fields) == {
         "budget",
         "cleanup_turns",
@@ -68,62 +54,17 @@ def test_cleanup_flows_are_public_resumable_and_configurable() -> None:
         "check_command",
     }
     offered_names = offered(flows)
-    assert "flame_chase_rule_cleanup" in offered_names
     assert "flame_chase_agent_cleanup" in offered_names
-    for name, seats in (
-        ("ralph_loop_workspace_cleanup", ("agent",)),
-        ("ralph_loop_agent_cleanup", ("agent", "cleaner")),
-    ):
-        path = flows / name / "__init__.py"
-        assert drives(path) == seats
-        assert resumes(path)
-        assert name in offered_names
-    for name in (
-        "flame_chase_rule_cleanup",
-        "flame_chase_agent_cleanup",
-        "ralph_loop_workspace_cleanup",
-        "ralph_loop_agent_cleanup",
-    ):
+    ralph = flows / "ralph_loop_agent_cleanup" / "__init__.py"
+    assert drives(ralph) == ("agent", "cleaner")
+    assert resumes(ralph)
+    assert "ralph_loop_agent_cleanup" in offered_names
+    for name in ("flame_chase_agent_cleanup", "ralph_loop_agent_cleanup"):
         config = configures(flows / name / "__init__.py")(work_paths=("src",))
         assert config.cleanup_turns == 3
         assert config.session_timeout_minutes == 240
         assert config.idle_timeout_minutes == 10
         assert config.stop_grace_minutes == 10
-
-
-def test_rule_cleanup_runs_after_three_completed_agent_turns(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    events: list[str] = []
-    first = FakeAgent("first", events)
-    second = FakeAgent("second", events)
-
-    monkeypatch.setattr(rule_cleanup, "home", lambda: tmp_path / "humanize")
-    monkeypatch.setattr(rule_cleanup, "ensure_snapshot", lambda *_args: False)
-    monkeypatch.setattr(
-        rule_cleanup,
-        "cleanup",
-        lambda *_args: events.append("cleanup") or (0, ("src",), 0),
-    )
-    monkeypatch.setattr(rule_cleanup.time, "sleep", lambda _seconds: None)
-
-    assert rule_cleanup.Config(work_paths=("src",)).cleanup_turns == 3
-    assert rule_cleanup.Config(cleanup_turns=4, work_paths=("src",)).cleanup_turns == 4
-    rule_cleanup.run(
-        rule_cleanup.Agents(first, second),
-        "task",
-        rule_cleanup.Config(budget_millions=0.000004, work_paths=("src",)),
-        {},
-    )
-
-    assert events == [
-        "first",
-        "second",
-        "first",
-        "cleanup",
-        "second",
-    ]
 
 
 def test_agent_cleanup_cleans_after_three_completed_chaser_turns(
@@ -163,43 +104,6 @@ def test_agent_cleanup_cleans_after_three_completed_chaser_turns(
     ]
 
 
-def test_rule_cleanup_preserves_configured_generic_work_paths(tmp_path: Path) -> None:
-    root = tmp_path / "repo"
-    keep = tmp_path / "state"
-    (root / "src").mkdir(parents=True)
-    (root / "src" / "main.py").write_text("value = 1\n")
-    (root / "project.toml").write_text("mode = 'initial'\n")
-    (root / "README.md").write_text("task\n")
-    assert rule_cleanup.ensure_snapshot(root, keep)
-
-    (root / "src" / "main.py").write_text("value = 2  # experiment\n")
-    (root / "src" / "new.py").write_text("# attempt\nvalue = 3\n")
-    (root / "project.toml").write_text("mode = 'current'\n")
-    (root / "README.md").write_text("agent note\n")
-    (root / "scratch.txt").write_text("discard me\n")
-
-    removed, carried, stripped = rule_cleanup.cleanup(
-        root, keep, (Path("src"), Path("project.toml"))
-    )
-
-    assert removed >= 5
-    assert carried == ("src", "project.toml")
-    assert stripped == 2
-    assert "#" not in (root / "src" / "main.py").read_text()
-    assert "#" not in (root / "src" / "new.py").read_text()
-    assert (root / "project.toml").read_text() == "mode = 'current'\n"
-    assert (root / "README.md").read_text() == "task\n"
-    assert not (root / "scratch.txt").exists()
-    commits = subprocess.run(
-        ["git", "rev-list", "--count", "HEAD"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert commits.stdout.strip() == "1"
-
-
 def test_agent_cleanup_measures_configured_generic_work_paths(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
@@ -236,9 +140,7 @@ def test_agent_revert_point_recovers_an_interrupted_cleanup(tmp_path: Path) -> N
     assert not saved.exists()
 
 
-@pytest.mark.parametrize(
-    "flow", [rule_cleanup, agent_cleanup, ralph_rule_cleanup, ralph_agent_cleanup]
-)
+@pytest.mark.parametrize("flow", [agent_cleanup, ralph_agent_cleanup])
 def test_work_paths_must_be_safe_and_non_overlapping(flow) -> None:
     with pytest.raises(ValueError):
         flow.Config()
@@ -248,9 +150,7 @@ def test_work_paths_must_be_safe_and_non_overlapping(flow) -> None:
         flow.Config(work_paths=("src", "src/generated"))
 
 
-@pytest.mark.parametrize(
-    "flow", [rule_cleanup, agent_cleanup, ralph_rule_cleanup, ralph_agent_cleanup]
-)
+@pytest.mark.parametrize("flow", [agent_cleanup, ralph_agent_cleanup])
 def test_run_storage_uses_humanize_home_and_validates_resume(
     flow, tmp_path: Path, monkeypatch
 ) -> None:
@@ -270,9 +170,7 @@ def test_run_storage_uses_humanize_home_and_validates_resume(
     flow._remove_store(root)
 
 
-@pytest.mark.parametrize(
-    "flow", [rule_cleanup, agent_cleanup, ralph_rule_cleanup, ralph_agent_cleanup]
-)
+@pytest.mark.parametrize("flow", [agent_cleanup, ralph_agent_cleanup])
 def test_run_storage_refuses_humanize_home_inside_cleaned_repository(
     flow, tmp_path: Path, monkeypatch
 ) -> None:
@@ -285,13 +183,7 @@ def test_run_storage_refuses_humanize_home_inside_cleaned_repository(
 
 
 @pytest.mark.parametrize(
-    "name",
-    [
-        "flame_chase_rule_cleanup",
-        "flame_chase_agent_cleanup",
-        "ralph_loop_workspace_cleanup",
-        "ralph_loop_agent_cleanup",
-    ],
+    "name", ["flame_chase_agent_cleanup", "ralph_loop_agent_cleanup"]
 )
 def test_forced_coding_session_retries_same_seat_without_advancing_cleanup(
     name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -338,25 +230,13 @@ def test_forced_coding_session_retries_same_seat_without_advancing_cleanup(
         "stop_grace_minutes": 0,
     }
     is_ralph = name.startswith("ralph_loop")
-    if name in ("flame_chase_rule_cleanup", "ralph_loop_workspace_cleanup"):
-        monkeypatch.setattr(flow, "ensure_snapshot", lambda *_args: False)
-        monkeypatch.setattr(
-            flow, "cleanup", lambda *_args: events.append("cleanup") or (0, (), 0)
-        )
-        config["budget" if is_ralph else "budget_millions"] = 0.000003
-        agents = flow.Agents(first) if is_ralph else flow.Agents(first, second)
-    else:
-        monkeypatch.setattr(flow, "_ensure_manifest", lambda *_args: set())
-        monkeypatch.setattr(
-            flow, "_clean_epoch", lambda *_args: events.append("cleanup")
-        )
-        config["budget"] = 0.000003
-        cleaner = FakeAgent("cleaner", events)
-        agents = (
-            flow.Agents(first, cleaner)
-            if is_ralph
-            else flow.Agents(first, second, cleaner)
-        )
+    monkeypatch.setattr(flow, "_ensure_manifest", lambda *_args: set())
+    monkeypatch.setattr(flow, "_clean_epoch", lambda *_args: events.append("cleanup"))
+    config["budget"] = 0.000003
+    cleaner = FakeAgent("cleaner", events)
+    agents = (
+        flow.Agents(first, cleaner) if is_ralph else flow.Agents(first, second, cleaner)
+    )
 
     flow.run(agents, "task", flow.Config(**config), state)
     assert events == ["first", "first", "cleanup", "first" if is_ralph else "second"]
