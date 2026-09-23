@@ -87,8 +87,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     monkeypatch.chdir(root)
-    for flow in (flame, ralph):
-        monkeypatch.setattr(flow, "time", SimpleNamespace(sleep=lambda _seconds: None))
+    monkeypatch.setattr(loop, "time", SimpleNamespace(sleep=lambda _seconds: None))
     return root
 
 
@@ -162,7 +161,7 @@ def test_flame_chase_alternates_retries_an_empty_turn_and_cleans_between_turns(
     first = FakeAgent("first", events, ledger, answers=["", "done"])
     second = FakeAgent("second", events, ledger)
     cleaner = FakeAgent("cleaner", events, ledger)
-    monkeypatch.setattr(flame, "clean_epoch", lambda *_args: events.append("clean"))
+    monkeypatch.setattr(loop, "clean_epoch", lambda *_args: events.append("clean"))
     state: dict[str, Any] = {}
 
     with pytest.raises(Stopped):
@@ -190,7 +189,7 @@ def test_ralph_hands_each_due_cleanup_to_its_cleaner(
         assert agent is cleaner
         events.append("clean")
 
-    monkeypatch.setattr(ralph, "clean_epoch", clean)
+    monkeypatch.setattr(loop, "clean_epoch", clean)
     with pytest.raises(Stopped):
         ralph.run(ralph.Agents(coder, cleaner, Human(None)), "task", _configured(), {})
 
@@ -209,7 +208,7 @@ def test_three_empty_turns_in_a_row_end_the_run_and_keep_its_state(
         FakeAgent(field, events, ledger, answers=[""] * 10)
         for field in flow.Agents._fields[:-1]
     ]
-    monkeypatch.setattr(flow, "clean_epoch", lambda *_args: events.append("clean"))
+    monkeypatch.setattr(loop, "clean_epoch", lambda *_args: events.append("clean"))
     state: dict[str, Any] = {}
 
     flow.run(flow.Agents(*agents, Human(None)), "task", _configured(), state)
@@ -253,6 +252,30 @@ def test_a_turn_the_clock_ended_counts_and_hands_over() -> None:
     assert session.budget is not None
     assert session.budget.seconds == pytest.approx(0.06)
     assert any("Wrap up" in said for said in session.said)
+
+
+def test_a_resumed_run_counts_turns_from_its_last_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(loop, "clean_epoch", lambda *_args: events.append("clean"))
+    state: dict[str, Any] = {}
+    coder = FakeAgent("coder", events, Ledger(3))
+    with pytest.raises(Stopped):
+        ralph.run(ralph.Agents(coder, coder, Human(None)), "task", _configured(), state)
+    assert (state["turns"], state["epoch"], state["cleaned_at"]) == (3, 1, 3)
+
+    events.clear()
+    coder.ledger = Ledger(2)
+    with pytest.raises(Stopped):
+        ralph.run(
+            ralph.Agents(coder, coder, Human(None)),
+            "task",
+            _configured(cleanup_turns=1),
+            state,
+        )
+
+    assert events == ["coder", "clean", "coder", "clean"]
 
 
 @pytest.mark.parametrize("answer", [None, "Stop"])

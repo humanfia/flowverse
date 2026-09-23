@@ -70,7 +70,7 @@ def test_repair_prompt_names_places_not_paths() -> None:
     strays += [f"tmp/{index}.log" for index in range(6)] + ["scratch.txt"]
     held = Config(work_paths=("src",))
     overs = cleaning.overages(tree.Measure(strays, 12, 0), held)
-    prompt = cleaning.repair_prompt(overs, held)
+    prompt = cleaning.repair_prompt(overs)
 
     assert "37 stray file(s) in build/ (30), tmp/ (6), scratch.txt" in prompt
     assert "NEXT.md has 12 lines, cap 10" in prompt
@@ -229,6 +229,9 @@ def test_a_failed_check_reverts_the_cleaning_and_keeps_its_log(
 
     assert (repo / "src" / "main.py").read_text() == "value = 1\n"
     assert _git(repo, "rev-list", "--count", "HEAD") == "1"
+    assert _git(repo, "log", "-1", "--format=%s").startswith(
+        "epoch 1: the tree the coding turns left; the check failed"
+    )
     assert "checking" in (store / "checks" / "epoch-001.log").read_text()
     assert _git(
         repo,
@@ -238,6 +241,115 @@ def test_a_failed_check_reverts_the_cleaning_and_keeps_its_log(
         "--verify",
         "refs/runs/store/epoch-001",
     )
+
+
+def test_gitignore_files_hold_for_the_whole_epoch(repo: Path, store: Path) -> None:
+    manifest = set(tree.listed(repo))
+    (repo / "out").mkdir()
+    (repo / "out" / ".gitignore").write_text("*.log\n")
+    (repo / "out" / "run.log").write_text("kept out of git\n")
+
+    def clean(_prompt: str) -> Cleaned:
+        (repo / ".gitignore").unlink()
+        (repo / "out" / ".gitignore").unlink()
+        (repo / "src" / ".gitignore").write_text("*.py\n")
+        return _cleaned()
+
+    cleaning.clean_epoch(
+        Scripted(clean), Config(work_paths=("src",)), repo, manifest, store, 1
+    )
+
+    assert (repo / ".gitignore").read_text() == ".venv/\n"
+    assert (repo / "out" / ".gitignore").read_text() == "*.log\n"
+    assert not (repo / "src" / ".gitignore").exists()
+    tracked = _git(repo, "ls-files").splitlines()
+    assert "src/main.py" in tracked
+    assert not any(path.startswith(".venv") for path in tracked)
+    assert "out/run.log" not in tracked
+    assert (repo / ".venv" / "lib" / "site.py").read_text() == "# installed\n"
+    assert (repo / "out" / "run.log").exists()
+
+
+def test_a_restore_spares_what_the_saved_gitignore_ignored(
+    repo: Path, store: Path
+) -> None:
+    saved = tree.save_tree(repo, store)
+    (repo / ".gitignore").unlink()
+
+    tree.restore_tree(repo, saved)
+
+    assert (repo / ".gitignore").read_text() == ".venv/\n"
+    assert (repo / ".venv" / "lib" / "site.py").read_text() == "# installed\n"
+
+
+def test_a_restore_puts_back_a_file_that_became_a_directory(
+    repo: Path, store: Path
+) -> None:
+    (repo / ".gitignore").write_text(".venv/\nbuild/\n")
+    (repo / "build").write_text("script\n")
+    saved = tree.save_tree(repo, store)
+    (repo / "build").unlink()
+    (repo / "build").mkdir()
+    (repo / "build" / "out.o").write_text("ignored\n")
+
+    tree.restore_tree(repo, saved)
+
+    assert (repo / "build").read_text() == "script\n"
+
+
+def test_a_dropped_revert_point_never_reads_as_in_flight(
+    repo: Path, store: Path
+) -> None:
+    saved = tree.save_tree(repo, store)
+    (saved / "locked").mkdir()
+    (saved / "locked" / "f").write_text("x\n")
+    (saved / "locked").chmod(0o555)
+
+    tree.drop_saved(saved)
+
+    assert not os.path.lexists(saved)
+    assert not (store / "revert.dropping").exists()
+    (store / "revert.dropping" / "left").mkdir(parents=True)
+    (repo / "src" / "main.py").write_text("value = 5\n")
+    tree.save_tree(repo, store)
+    assert (repo / "src" / "main.py").read_text() == "value = 5\n"
+    assert not (store / "revert.dropping").exists()
+
+
+def test_a_tracked_file_counts_whatever_gitignore_says(
+    repo: Path, store: Path, tmp_path: Path
+) -> None:
+    (repo / ".venv" / "lib" / "pinned.py").write_text("pinned = 1\n")
+    _git(repo, "add", "-f", ".venv/lib/pinned.py")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pin")
+    manifest = set(tree.listed(repo))
+    assert ".venv/lib/pinned.py" in manifest
+
+    cleaning.clean_epoch(
+        Scripted(_cleaned), Config(work_paths=("src",)), repo, manifest, store, 1
+    )
+
+    tracked = _git(repo, "ls-files").splitlines()
+    assert ".venv/lib/pinned.py" in tracked
+    assert ".venv/lib/site.py" not in tracked
+    at = ("--git-dir", str(tmp_path / "history.git"))
+    archived = _git(
+        repo, *at, "ls-tree", "-r", "--name-only", "refs/runs/store/epoch-001"
+    )
+    assert ".venv/lib/pinned.py" in archived.splitlines()
+
+
+def test_a_git_that_will_not_finish_is_a_failed_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def hangs(*_args: Any, **_kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired("git", tree.GIT_SECONDS)
+
+    monkeypatch.setattr(tree.subprocess, "run", hangs)
+
+    done = tree._git("status")
+
+    assert done.returncode != 0
 
 
 def test_epochs_store_what_they_share_once(repo: Path, store: Path) -> None:
@@ -411,17 +523,21 @@ def test_the_clock_asks_for_a_wrap_up_and_sets_the_cut_off() -> None:
     assert "within 0.002 minutes" in session.said[0]
 
 
-def test_a_tighter_budget_the_agent_carries_is_kept() -> None:
+def test_a_tighter_clock_is_kept_and_a_timeout_always_lands() -> None:
     session = Quiet()
-    session.budget = Budget(output=100, seconds=5)
+    session.budget = Budget(output=100, seconds=5, then="fail")
     with _held(session, wall=1, idle=0, grace=0):
         pass
-    assert session.budget == Budget(output=100, seconds=5)
+    assert session.budget == Budget(
+        output=100, seconds=5, when="immediately", then="end"
+    )
 
     session.budget = Budget(output=100)
     with _held(session, wall=1, idle=0, grace=1):
         pass
-    assert session.budget == Budget(output=100, seconds=120)
+    assert session.budget == Budget(
+        output=100, seconds=120, when="immediately", then="end"
+    )
 
 
 def test_idle_reminders_rearm_after_progress_and_never_end_a_turn() -> None:

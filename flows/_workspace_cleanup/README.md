@@ -15,7 +15,7 @@ relative to the repository, where agents may create or revise task work.
 
 ```yaml
 work_paths: [src]
-cleanup_turns: 3                     # counted coding turns between epochs; 0 never cleans
+cleanup_turns: 3                     # counted coding turns since the last epoch; 0 never cleans
 next_lines: 10                       # the most lines NEXT.md may hold
 comment_lines: 30                    # comment-line cap under work_paths, printed only
 repairs: 2                           # over-measures handed back to the cleaner
@@ -48,11 +48,12 @@ progress; it never ends a turn. `0` disables either limit.
 
 ## Cleaning epochs
 
-Every `cleanup_turns` counted turns, between turns:
+Every `cleanup_turns` counted turns since the last epoch, between turns:
 
 1. The tree git would add (`.gitignore` honoured) and `.git` are saved aside as a revert
    point.
 2. A fresh cleaner session distills the work paths, deletes strays, and writes `NEXT.md`.
+   Every `.gitignore` is put back as it was saved, after each of its turns.
 3. The flow measures what survived. Entries outside the work paths that were not in the
    repository when the run first started count as strays. Anything over is handed back to
    the cleaner up to `repairs` times, summarized by directory. After that, the flow deletes
@@ -60,16 +61,21 @@ Every `cleanup_turns` counted turns, between turns:
 4. `check_command`, if set, runs for at most an hour. The last 1 MiB of its output goes
    to `checks/epoch-NNN.log` in the run root. A failure restores the tree from the revert
    point.
-5. The repository's history is replaced by one commit, `epoch N: distilled tree`, and the
-   history it replaces is archived.
+5. The history is archived, then replaced by one commit, `epoch N: distilled tree`. After
+   a failed check, the commit says the cleaning was reverted instead.
 
 An epoch interrupted for any reason (stopped, out of allowance, or failed) restores the
-tree before the run ends. Files `.gitignore` ignores are never counted as strays, copied
-into a revert point, restored or committed.
+tree before the run ends.
+
+The ignore rules hold for the whole epoch. A file `.gitignore` ignored when the tree was
+saved aside is never counted as a stray, copied into the revert point, taken away by a
+restore, or committed, and a `.gitignore` is never a stray itself. A file the
+repository tracks always counts, whatever `.gitignore` says of it.
 
 ## What git never tracks
 
-A file over `max_tracked_file_mb`, or a nested repository, stays on disk but out of git:
+A file over `max_tracked_file_mb`, or a nested repository (a submodule too), stays on disk
+but out of git:
 
 - the `distilled tree` commit leaves it out, and the new repository's `.git/info/exclude`
   lists it, so `git status` stays clean;

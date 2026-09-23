@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .config import Config
-from .guard import guarded
+from .guard import guarded, limits
 from .tree import (
     MIB,
     Measure,
@@ -18,6 +18,7 @@ from .tree import (
     delete_strays,
     drop_saved,
     erase_history,
+    freeze_ignores,
     history_repo,
     link_history,
     measure,
@@ -66,7 +67,7 @@ def cleaning_prompt(held: Config) -> str:
             " leave the task's own files untouched; write exactly one file, NEXT.md at the"
             f" tree's root, of at most {held.next_lines} lines, each line one direction"
             " worth exploring next, distilled from what you read -- no narratives, no"
-            " history. Never follow symlinks."
+            " history. Leave every .gitignore as it is. Never follow symlinks."
         ),
     ]
     if held.check_command:
@@ -109,7 +110,7 @@ def overages(found: Measure, held: Config) -> list[str]:
     return overs
 
 
-def repair_prompt(overs: list[str], held: Config) -> str:
+def repair_prompt(overs: list[str]) -> str:
     listed = "\n".join(f"- {over}" for over in overs)
     return (
         "Still over after your cleaning:\n"
@@ -118,21 +119,29 @@ def repair_prompt(overs: list[str], held: Config) -> str:
     )
 
 
-def _guard(held: Config, label: str) -> dict[str, Any]:
-    return {
-        "session_timeout_minutes": held.session_timeout_minutes,
-        "idle_timeout_minutes": held.idle_timeout_minutes,
-        "stop_grace_minutes": held.stop_grace_minutes,
-        "label": label,
-    }
+def _measure(
+    held: Config, root: Path, saved: Path, manifest: set[str], epoch: int
+) -> tuple[Measure, list[str]]:
+    """Measure under the ignore rules the epoch started with."""
+    if touched := freeze_ignores(root, saved):
+        print(
+            f"epoch {epoch}: put back the .gitignore files the cleaner changed: {touched}"
+        )
+    found = measure(root, manifest, held.work_paths)
+    return found, overages(found, held)
 
 
 def _clean(
-    cleaner: Any, held: Config, root: Path, manifest: set[str], epoch: int
+    cleaner: Any,
+    held: Config,
+    root: Path,
+    saved: Path,
+    manifest: set[str],
+    epoch: int,
 ) -> None:
     """The cleaner's turns and the flow's measures, repairs and mechanical cut."""
     session = cleaner.new(cwd=str(root))
-    with guarded(session, **_guard(held, f"epoch {epoch} cleaner")) as watch:
+    with guarded(session, **limits(held, f"epoch {epoch} cleaner")) as watch:
         report = session(cleaning_prompt(held), suppress=True, schema=Cleaned)
     ended = watch.timed_out
     if report is None:
@@ -154,8 +163,7 @@ def _clean(
         )
         print(f"epoch {epoch}: cleaner says its check {said_check}")
 
-    found = measure(root, manifest, held.work_paths)
-    overs = overages(found, held)
+    found, overs = _measure(held, root, saved, manifest, epoch)
     print(f"epoch {epoch}: measured -- " + ("; ".join(overs) or "within every cap"))
     used = 0
     while overs and used < held.repairs and not ended:
@@ -163,8 +171,8 @@ def _clean(
         landed = False
         for _ in range(DELIVERY_TRIES):
             label = f"epoch {epoch} cleaner repair {used + 1}"
-            with guarded(session, **_guard(held, label)) as watch:
-                said = session(repair_prompt(overs, held), suppress=True)
+            with guarded(session, **limits(held, label)) as watch:
+                said = session(repair_prompt(overs), suppress=True)
             ended = watch.timed_out
             if said or ended:
                 landed = True
@@ -177,8 +185,7 @@ def _clean(
             )
             break
         used += 1
-        found = measure(root, manifest, held.work_paths)
-        overs = overages(found, held)
+        found, overs = _measure(held, root, saved, manifest, epoch)
     if overs:
         print(f"epoch {epoch}: the flow cuts mechanically")
         delete_strays(root, found.strays)
@@ -215,19 +222,24 @@ def clean_epoch(
     print(f"epoch {epoch}: saving the tree aside as the revert point")
     saved = save_tree(root, store)
     try:
-        _clean(cleaner, held, root, manifest, epoch)
+        _clean(cleaner, held, root, saved, manifest, epoch)
+        title = f"epoch {epoch}: distilled tree"
         if held.check_command:
             log = store / "checks" / f"epoch-{epoch:03d}.log"
             if run_check(root, held.check_command, log):
                 print(f"epoch {epoch}: the check passed; the cleaning stands")
             else:
                 restore_tree(root, saved)
+                title = (
+                    f"epoch {epoch}: the tree the coding turns left; the check failed,"
+                    " so the cleaning was reverted"
+                )
                 print(
                     f"epoch {epoch}: the check failed -- this epoch's cleaning was"
                     f" reverted; its output is in {log}:\n{tail(log)}"
                 )
         archived = archive_history(saved, store, epoch, limit)
-        erased = bool(archived) and erase_history(root, store, epoch, limit)
+        erased = bool(archived) and erase_history(root, store, epoch, limit, title)
         if not archived:
             print(
                 f"epoch {epoch}: the history could not be archived, so it is kept as it"

@@ -18,6 +18,8 @@ from typing import Any
 
 from hmz.flows import Budget
 
+from .config import Config
+
 WRAP_UP = (
     "You have been working for {elapsed}. Stop now; do not start another experiment."
     " Wrap up your current work and end this session within {grace:g} minutes."
@@ -45,12 +47,26 @@ def _tokens(session: Any) -> float | None:
 
 
 def _capped(current: Budget | None, seconds: float) -> Budget:
-    """The turn's budget with the clock limit added, keeping a tighter one it had."""
+    """The turn's budget with the clock limit added, keeping a tighter clock it had.
+
+    Always cut off where it stands and answering with what was said: a turn the clock
+    ended is a turn that landed, so a budget that raised instead would end the run.
+    """
     if current is None:
         return Budget(seconds=seconds, when="immediately", then="end")
-    if current.seconds and current.seconds <= seconds:
-        return current
-    return dataclasses.replace(current, seconds=seconds)
+    if current.seconds:
+        seconds = min(current.seconds, seconds)
+    return dataclasses.replace(current, seconds=seconds, when="immediately", then="end")
+
+
+def limits(held: Config, label: str) -> dict[str, Any]:
+    """The guard's settings, as a run was set up with them."""
+    return {
+        "session_timeout_minutes": held.session_timeout_minutes,
+        "idle_timeout_minutes": held.idle_timeout_minutes,
+        "stop_grace_minutes": held.stop_grace_minutes,
+        "label": label,
+    }
 
 
 def _elapsed(seconds: float) -> str:

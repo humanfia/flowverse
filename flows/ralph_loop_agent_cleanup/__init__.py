@@ -19,19 +19,9 @@ output tokens by default, and `budget:` in the file passed with -c says otherwis
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
 from typing import Any, NamedTuple
 
-from _workspace_cleanup import (
-    STALLED,
-    Config,
-    clean_epoch,
-    coding_turn,
-    due,
-    required,
-    start,
-)
+from _workspace_cleanup import Config, drive, required
 from hmz.flows import Agent, Allowance, Person, flow
 
 FLOW_NAME = "ralph_loop_agent_cleanup"
@@ -52,27 +42,12 @@ def run(
     config: Config | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
-    """Run Ralph turns and hand each due cleanup to ``agents.cleaner``."""
-    held = required(config, FLOW_NAME)
-    kept: dict[str, Any] = state if state is not None else {}
-    root = Path.cwd().resolve()
-    store, manifest = start(FLOW_NAME, root, kept, held, agents.human)
-    stalled = 0
-    while True:
-        if due(held, kept):
-            clean_epoch(agents.cleaner, held, root, manifest, store, kept["epoch"] + 1)
-            kept["epoch"] += 1
-            continue
-        label = f"turn {kept['turns'] + 1}"
-        if not coding_turn(agents.agent, task, root, held, label):
-            stalled += 1
-            print(f"{label} answered nothing; taking it again")
-            if stalled >= STALLED:
-                print(f"stopping: {stalled} turns in a row answered with nothing")
-                return
-            time.sleep(5)
-            continue
-        stalled = 0
-        kept["turns"] += 1
-        print(f"turn {kept['turns']} done | epoch {kept['epoch']}")
-        time.sleep(5)
+    drive(
+        FLOW_NAME,
+        (agents.agent,),
+        agents.cleaner,
+        agents.human,
+        task,
+        required(config, FLOW_NAME),
+        state if state is not None else {},
+    )
