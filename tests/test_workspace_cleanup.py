@@ -1,0 +1,370 @@
+from __future__ import annotations
+
+import subprocess
+import threading
+import time
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from _workspace_cleanup import Cleaned, Config, cleaning, guard, loop, tree
+from hmz.coganchor.agents import AgentBase, AgentConfig, Event, SessionBase
+from hmz.flows import Budget, Stopped
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A task repository with history, an ignored environment and a work path."""
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "main.py").write_text("value = 1\n")
+    (root / "README.md").write_text("task\n")
+    (root / ".gitignore").write_text(".venv/\n")
+    (root / ".venv" / "lib").mkdir(parents=True)
+    (root / ".venv" / "lib" / "site.py").write_text("# installed\n")
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "task")
+    return root
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Path:
+    path = tmp_path / "store"
+    path.mkdir()
+    return path
+
+
+def test_listing_honours_gitignore_and_leaves_git_out(repo: Path) -> None:
+    (repo / "link").symlink_to("src")
+
+    assert tree.listed(repo) == [".gitignore", "README.md", "link", "src/main.py"]
+
+
+def test_measure_counts_strays_notes_and_work_path_comments(repo: Path) -> None:
+    manifest = set(tree.listed(repo))
+    (repo / "src" / "new.py").write_text("value = 2  # design intent\n")
+    (repo / "scratch.txt").write_text("discard me\n")
+    (repo / ".venv" / "lib" / "more.py").write_text("# ignored, never a stray\n")
+    (repo / "NEXT.md").write_text("try another design\n")
+
+    found = tree.measure(repo, manifest, ("src",))
+
+    assert found.strays == ["scratch.txt"]
+    assert found.notes_lines == 1
+    assert found.comment_count == 1
+
+
+def test_repair_prompt_names_places_not_paths() -> None:
+    strays = [f"build/obj/{index}.o" for index in range(30)]
+    strays += [f"tmp/{index}.log" for index in range(6)] + ["scratch.txt"]
+    held = Config(work_paths=("src",))
+    overs = cleaning.overages(tree.Measure(strays, 12, 0), held)
+    prompt = cleaning.repair_prompt(overs, held)
+
+    assert "37 stray file(s) in build/ (30), tmp/ (6), scratch.txt" in prompt
+    assert "NEXT.md has 12 lines, cap 10" in prompt
+    assert "obj" not in prompt
+    many = cleaning.places([f"d{index}/f" for index in range(12)])
+    assert many.endswith("and 4 more places")
+
+
+def test_revert_point_recovers_an_interrupted_epoch_and_spares_ignored_files(
+    repo: Path, store: Path
+) -> None:
+    head = _git(repo, "rev-parse", "HEAD")
+    saved = tree.save_tree(repo, store)
+    assert not (saved / ".venv").exists()
+    (repo / "src" / "main.py").write_text("partly cleaned\n")
+    (repo / "stray" / "deep").mkdir(parents=True)
+    (repo / "stray" / "deep" / "x.txt").write_text("partial\n")
+    (repo / ".venv" / "lib" / "site.py").write_text("# rebuilt\n")
+
+    assert tree.save_tree(repo, store) == saved
+
+    assert (repo / "src" / "main.py").read_text() == "value = 1\n"
+    assert not (repo / "stray").exists()
+    assert (repo / ".venv" / "lib" / "site.py").read_text() == "# rebuilt\n"
+    assert _git(repo, "rev-parse", "HEAD") == head
+
+
+class Scripted:
+    """A cleaner whose turns are functions of the prompt, run in the repository."""
+
+    def __init__(self, *turns: Callable[[str], Any]) -> None:
+        self.turns = list(turns)
+        self.prompts: list[str] = []
+        self.budget = None
+
+    def new(self, cwd: str) -> Scripted:
+        return self
+
+    def spent(self) -> SimpleNamespace:
+        return SimpleNamespace(total=len(self.prompts))
+
+    def interject(self, _text: str) -> None:
+        pass
+
+    def __call__(self, prompt: str, **_kwargs: Any) -> Any:
+        self.prompts.append(prompt)
+        return self.turns.pop(0)(prompt)
+
+
+def _cleaned(*_args: Any) -> Cleaned:
+    return Cleaned(
+        deleted=["scratch"], kept=["src"], check_ran=False, check_passed=False
+    )
+
+
+def test_an_epoch_replaces_history_and_archives_the_one_it_replaced(
+    repo: Path, store: Path
+) -> None:
+    manifest = set(tree.listed(repo))
+    original = _git(repo, "rev-parse", "HEAD")
+    (repo / "src" / "main.py").write_text("value = 2  # tried 3 variants\n")
+    (repo / "scratch.txt").write_text("notes from turn 2\n")
+
+    def clean(_prompt: str) -> Cleaned:
+        (repo / "src" / "main.py").write_text("value = 2\n")
+        (repo / "scratch.txt").unlink()
+        (repo / "NEXT.md").write_text("try a lookup table\n")
+        return _cleaned()
+
+    cleaner = Scripted(clean)
+    cleaning.clean_epoch(cleaner, Config(work_paths=("src",)), repo, manifest, store, 1)
+
+    assert len(cleaner.prompts) == 1
+    assert _git(repo, "rev-list", "--count", "HEAD") == "1"
+    assert _git(repo, "log", "-1", "--format=%s") == "epoch 1: distilled tree"
+    assert ".venv/lib/site.py" not in _git(repo, "ls-files")
+    assert (repo / ".venv" / "lib" / "site.py").exists()
+    assert not (store / "revert").exists()
+
+    archive = store / "history" / "epoch-001.git"
+    at = ("--git-dir", str(archive))
+    assert _git(repo, *at, "log", "--format=%s") == (
+        "epoch 1: the tree before cleaning\ntask"
+    )
+    assert _git(repo, *at, "rev-parse", "HEAD~1") == original
+    before = _git(repo, *at, "show", "HEAD:src/main.py")
+    assert before == "value = 2  # tried 3 variants"
+    assert _git(repo, *at, "show", "HEAD:scratch.txt") == "notes from turn 2"
+
+
+def test_a_second_epoch_archives_the_first_epochs_repository(
+    repo: Path, store: Path
+) -> None:
+    manifest = set(tree.listed(repo))
+    held = Config(work_paths=("src",))
+    for epoch in (1, 2):
+        (repo / "src" / "main.py").write_text(f"value = {epoch}\n")
+        cleaning.clean_epoch(Scripted(_cleaned), held, repo, manifest, store, epoch)
+
+    second = ("--git-dir", str(store / "history" / "epoch-002.git"))
+    assert _git(repo, *second, "log", "--format=%s") == (
+        "epoch 2: the tree before cleaning\nepoch 1: distilled tree"
+    )
+
+
+def test_an_interrupted_epoch_puts_the_tree_back(repo: Path, store: Path) -> None:
+    manifest = set(tree.listed(repo))
+    head = _git(repo, "rev-parse", "HEAD")
+
+    def stopped(_prompt: str) -> Any:
+        (repo / "src" / "main.py").unlink()
+        (repo / "half.txt").write_text("half-cleaned\n")
+        raise Stopped("allowance spent")
+
+    with pytest.raises(Stopped):
+        cleaning.clean_epoch(
+            Scripted(stopped), Config(work_paths=("src",)), repo, manifest, store, 1
+        )
+
+    assert (repo / "src" / "main.py").read_text() == "value = 1\n"
+    assert not (repo / "half.txt").exists()
+    assert _git(repo, "rev-parse", "HEAD") == head
+    assert not (store / "revert").exists()
+    assert not (store / "history").exists()
+
+
+def test_a_failed_check_reverts_the_cleaning_and_keeps_its_log(
+    repo: Path, store: Path
+) -> None:
+    manifest = set(tree.listed(repo))
+
+    def clean(_prompt: str) -> Cleaned:
+        (repo / "src" / "main.py").write_text("broken\n")
+        return _cleaned()
+
+    held = Config(work_paths=("src",), check_command="echo checking; exit 3")
+    cleaning.clean_epoch(Scripted(clean), held, repo, manifest, store, 1)
+
+    assert (repo / "src" / "main.py").read_text() == "value = 1\n"
+    assert _git(repo, "rev-list", "--count", "HEAD") == "1"
+    assert "checking" in (store / "checks" / "epoch-001.log").read_text()
+    assert (store / "history" / "epoch-001.git").is_dir()
+
+
+def test_measured_overages_go_back_as_repairs_then_the_flow_cuts(
+    repo: Path, store: Path
+) -> None:
+    manifest = set(tree.listed(repo))
+
+    def leave_junk(_prompt: str) -> Cleaned:
+        (repo / "junk").mkdir()
+        for index in range(3):
+            (repo / "junk" / f"{index}.log").write_text("x\n")
+        return _cleaned()
+
+    cleaner = Scripted(leave_junk, lambda _prompt: "tried", lambda _prompt: "tried")
+    cleaning.clean_epoch(cleaner, Config(work_paths=("src",)), repo, manifest, store, 1)
+
+    assert len(cleaner.prompts) == 3
+    assert "3 stray file(s) in junk/ (3)" in cleaner.prompts[1]
+    assert not list((repo / "junk").iterdir())
+
+
+def test_a_cleaner_the_clock_ended_gets_no_repairs(repo: Path, store: Path) -> None:
+    manifest = set(tree.listed(repo))
+
+    def slow(_prompt: str) -> None:
+        (repo / "junk.txt").write_text("x\n")
+        time.sleep(0.15)
+
+    cleaner = Scripted(slow)
+    held = Config(
+        work_paths=("src",),
+        session_timeout_minutes=0.001,
+        idle_timeout_minutes=0,
+        stop_grace_minutes=0,
+    )
+    cleaning.clean_epoch(cleaner, held, repo, manifest, store, 1)
+
+    assert len(cleaner.prompts) == 1
+    assert not (repo / "junk.txt").exists()
+
+
+class Quiet:
+    """A session that spends nothing until told to, recording what it is told."""
+
+    def __init__(self, *, moves_when_told: bool = False) -> None:
+        self.budget: Budget | None = None
+        self.said: list[str] = []
+        self.tokens = 0
+        self.moves_when_told = moves_when_told
+
+    def spent(self) -> SimpleNamespace:
+        return SimpleNamespace(total=self.tokens)
+
+    def interject(self, text: str) -> None:
+        self.said.append(text)
+        if self.moves_when_told:
+            self.tokens += 1
+
+
+def _held(session: Any, *, wall: float, idle: float, grace: float) -> Any:
+    return guard.guarded(
+        session,
+        session_timeout_minutes=wall,
+        idle_timeout_minutes=idle,
+        stop_grace_minutes=grace,
+        label="test",
+    )
+
+
+def test_the_clock_asks_for_a_wrap_up_and_sets_the_cut_off() -> None:
+    session = Quiet()
+    with _held(session, wall=0.001, idle=0, grace=0.002) as watch:
+        time.sleep(0.15)
+
+    assert watch.timed_out
+    assert session.budget is not None
+    assert session.budget.seconds == pytest.approx(0.18)
+    assert (session.budget.when, session.budget.then) == ("immediately", "end")
+    assert len(session.said) == 1
+    assert "within 0.002 minutes" in session.said[0]
+
+
+def test_a_tighter_budget_the_agent_carries_is_kept() -> None:
+    session = Quiet()
+    session.budget = Budget(output=100, seconds=5)
+    with _held(session, wall=1, idle=0, grace=0):
+        pass
+    assert session.budget == Budget(output=100, seconds=5)
+
+    session.budget = Budget(output=100)
+    with _held(session, wall=1, idle=0, grace=1):
+        pass
+    assert session.budget == Budget(output=100, seconds=120)
+
+
+def test_idle_reminders_rearm_after_progress_and_never_end_a_turn() -> None:
+    session = Quiet(moves_when_told=True)
+    with _held(session, wall=0, idle=0.001, grace=0) as watch:
+        time.sleep(0.2)
+
+    assert not watch.timed_out
+    assert session.budget is None
+    assert len(session.said) >= 2
+    assert all("carry on" in said for said in session.said)
+
+
+def test_one_idle_reminder_per_idle_stretch() -> None:
+    session = Quiet()
+    with _held(session, wall=0, idle=0.001, grace=0):
+        time.sleep(0.2)
+
+    assert len(session.said) == 1
+
+
+def test_nothing_is_watched_when_both_limits_are_off() -> None:
+    session = Quiet()
+    before = threading.active_count()
+    with _held(session, wall=0, idle=0, grace=0) as watch:
+        assert threading.active_count() == before
+    assert session.budget is None
+    assert not watch.timed_out
+
+
+class Slow(SessionBase):
+    """A humanize session whose turn runs until humanize cuts it off."""
+
+    def _stream(self, prompt: str, *, schema: Any = None) -> Iterator[Event]:
+        for step in range(200):
+            # Where a real backend's process would be ended by the cut-off.
+            if self._cutting():
+                yield Event(kind="result", text=f"cut at step {step}")
+                return
+            time.sleep(0.01)
+            yield Event(kind="text", text=".")
+        yield Event(kind="result", text="finished")
+
+
+class SlowAgent(AgentBase):
+    def new(self, cwd: Any = None) -> Slow:
+        return Slow(self)
+
+
+def test_humanize_cuts_a_long_turn_off_and_the_turn_counts(tmp_path: Path) -> None:
+    held = Config(
+        work_paths=("src",),
+        session_timeout_minutes=0.002,
+        idle_timeout_minutes=0,
+        stop_grace_minutes=0.002,
+    )
+    began = time.monotonic()
+
+    landed = loop.coding_turn(
+        SlowAgent(AgentConfig(model="m", effort="high")), "task", tmp_path, held, "t"
+    )
+
+    assert landed
+    assert time.monotonic() - began < 1.5

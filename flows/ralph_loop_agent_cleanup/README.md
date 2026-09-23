@@ -1,18 +1,18 @@
-# flame_chase_agent_cleanup
+# ralph_loop_agent_cleanup
 
-Two coding agents alternate fresh-session turns on a repository task. Every few turns, a
-third agent cleans the workspace between them.
+A fresh-session Ralph loop on a repository task. Every few turns, a second agent cleans
+the workspace.
 
 ## Usage
 
 ```sh
-hmz exec -f flame_chase_agent_cleanup \
-    -a claude/MODEL:EFFORT -a codex/MODEL:EFFORT -a claude/MODEL:EFFORT \
+hmz exec -f ralph_loop_agent_cleanup \
+    -a claude/MODEL:EFFORT -a claude/MODEL:EFFORT \
     -c cleanup.yaml "$(cat TASK.md)"
 ```
 
-The agents fill `first_chaser`, `second_chaser` and `cleaner` in that order. `cleanup.yaml`
-needs at least `work_paths`:
+The agents fill `agent` and `cleaner` in that order. `cleanup.yaml` needs at least
+`work_paths`:
 
 ```yaml
 work_paths: [src]
