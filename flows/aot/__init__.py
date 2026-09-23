@@ -67,7 +67,10 @@ class Compiling(NamedTuple):
 
     The writer's work is writing the draft, so it is declared at `workspace-write` -- left at no
     rung it runs at whatever the account defaults to, which on an account that asks before an
-    edit is a writer whose every draft is refused. The critic only reads.
+    edit is a writer whose every draft is refused. The critic only reads -- and a CLI that
+    reads inside a sandbox of its own needs one the host can build: Codex's bubblewrap cannot
+    where unprivileged user namespaces are restricted (Ubuntu 24.04 by default), and a critic
+    that can read nothing refuses every draft for a reason no repair can reach.
     """
 
     writer: Annotated[Agent, AgentDefaults(permission="workspace-write")]
