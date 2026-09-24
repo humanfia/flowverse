@@ -1,5 +1,3 @@
-"""Focused contracts for composing the official Humanize RLCR flow."""
-
 from __future__ import annotations
 
 import subprocess

@@ -1,5 +1,3 @@
-"""The official plan flow is bounded and independent of either role's backend."""
-
 from __future__ import annotations
 
 import json
@@ -97,8 +95,6 @@ DECISION = """- DEC-1: Storage backend
 
 
 class Scripted(AgentBase):
-    """An agent whose role behavior is supplied by the test."""
-
     moments: ClassVar = frozenset()
 
     def __init__(
@@ -115,8 +111,6 @@ class Scripted(AgentBase):
 
 
 class ScriptedSession(SessionBase):
-    """One fake conversation which can be released when its role is stopped."""
-
     def __init__(
         self, agent: AgentBase, cwd: str | os.PathLike[str] | None = None
     ) -> None:
@@ -252,10 +246,6 @@ def test_permanent_review_failure_is_bounded_and_returns_the_candidate(
         turn_retries=1,
     )
 
-    # Two analysis attempts, then two review attempts -- each costing two calls, because
-    # humanize reads `service unavailable` as a gateway that went away and takes the turn
-    # again once beneath the flow. The flow's own bound is unchanged: four attempts, and it
-    # still comes back with the candidate rather than going round.
     assert calls == 8
     assert "Final Status: `partially_converged`" in plan.read_text()
 
