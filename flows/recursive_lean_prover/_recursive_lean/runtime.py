@@ -1,5 +1,3 @@
-"""Recursive orchestration built from Humanize agent turns and nested RLCR flows."""
-
 from __future__ import annotations
 
 import hashlib
@@ -58,8 +56,6 @@ INTEGRATION_GIT = (
 
 
 class _WorkspaceAgent:
-    """Run every session cloned from one Humanize agent in a fixed worktree."""
-
     def __init__(self, agent: Any, cwd: Path) -> None:
         self._agent = agent
         self._cwd = cwd
@@ -119,8 +115,6 @@ class _WorkspaceAgent:
 
 
 class Runtime:
-    """One resumable recursive proof run."""
-
     def __init__(
         self,
         agents: Any,
@@ -133,9 +127,6 @@ class Runtime:
         self.config = config
         self.state = state if state is not None else {}
         self.project = Path.cwd().resolve()
-        # The graph and short integration operations are synchronized. Lean workers and
-        # both comparator passes run in per-node Git worktrees, so every ready leaf may
-        # formalize concurrently without sharing source, HEAD, or comparator scratch files.
         self._graph_lock = threading.RLock()
         self._integration_lock = threading.Lock()
         self._revision_lock = threading.Lock()
@@ -153,7 +144,6 @@ class Runtime:
         )
 
     def execute(self) -> None:
-        """Validate the host project, solve the root, and retain state only if unfinished."""
         if not self.task:
             raise ValueError("recursive_lean_prover needs a mathematical problem")
         self._require_git()
@@ -199,7 +189,6 @@ class Runtime:
         print(f"Root theorem not accepted: {result.feedback}")
 
     def _solve(self, node: NodeRecord) -> SolveResult:
-        """Solve one node; child calls use this same method and can split again."""
         if node.status == "proved":
             return SolveResult(
                 ok=True,
@@ -209,15 +198,8 @@ class Runtime:
         if node.status == "integrating" and node.candidate_commit:
             return self._resume_accepted_candidate(node)
         feedback = node.message if node.status == "failed" else "None."
-        # Once a plan passes its independent gate it is a stable scaffold.  Subsequent
-        # mathematical corrections iterate the natural-language proof from its latest
-        # checkpoint; they do not generate a fresh plan on every outer attempt.
         plan = self._recorded_plan(node)
         if plan is None:
-            # A stopped direct gen-plan may leave either its substantive output in the
-            # atomic-write temporary file or only the controller's concrete input draft.
-            # Both are sufficient as an immutable scaffold: mathematical correction
-            # belongs to the NL-proof loop, never to another plan generation/review loop.
             plan = self._preserved_plan(node)
             if plan is not None:
                 self.store.update(
@@ -269,7 +251,6 @@ class Runtime:
         return SolveResult(ok=False, node_id=node.id, feedback=feedback)
 
     def _accepted_plan(self, node: NodeRecord, feedback: str) -> Path | None:
-        """Generate one immutable scaffold directly with humanize1:gen-plan."""
         preserved = self._preserved_plan(node) if node.status == "interrupted" else None
         if preserved is not None:
             self.store.update(
@@ -315,10 +296,6 @@ class Runtime:
                         "input": str(draft.relative_to(self.project)),
                         "output": str(output.relative_to(self.project)),
                         "mode": "direct",
-                        # Planning must never start Lean implementation here.  This runtime
-                        # first requires an independently accepted natural-language proof and
-                        # a validated recursive decomposition, then invokes RLCR explicitly in
-                        # _formalize.
                         "auto_start_rlcr_if_converged": False,
                         "turn_timeout": self.config.plan_turn_timeout,
                         "total_timeout": self.config.plan_total_timeout,
@@ -326,8 +303,6 @@ class Runtime:
                     },
                 )
             except Stopped as error:
-                # Direct plan generation gets one invocation; freeze its concrete input
-                # draft on interruption so the node still advances to NL proof.
                 feedback = f"humanize1:gen-plan stopped: {error}"
                 self.store.update(
                     node.id,
@@ -366,7 +341,6 @@ class Runtime:
     def _accepted_natural_proof(
         self, node: NodeRecord, plan_path: Path, outer_feedback: str = ""
     ) -> NaturalProof | None:
-        """Run the author/reviewer RLCR loop on prose before Lean starts."""
         plan = plan_path.read_text(encoding="utf-8")
         prior_proof, feedback = self._latest_natural_checkpoint(node)
         if outer_feedback and outer_feedback not in {
@@ -411,10 +385,6 @@ class Runtime:
                     )
                     + "\n",
                 )
-                # Proof recovery is deliberately monotone: every rejected proof becomes
-                # the input to the next revision, even after one configured review batch
-                # is exhausted. A theorem must not become terminal merely because its
-                # natural-language proof needed more review iterations.
                 prior_proof = proof.proof
                 if proof.unresolved:
                     feedback = "Unresolved proof gaps: " + "; ".join(proof.unresolved)
@@ -472,7 +442,6 @@ class Runtime:
             )
 
     def _decompose(self, node: NodeRecord, proof: NaturalProof) -> Decomposition | None:
-        """Ask for a bounded DAG after the prose proof, validating dependencies locally."""
         if node.depth >= self.config.max_depth:
             return Decomposition(
                 should_split=False,
@@ -583,13 +552,6 @@ class Runtime:
         decomposition: Decomposition,
         parent_attempt: int,
     ) -> list[SolveResult]:
-        """Activate or reuse theorem workers recursively in dependency order.
-
-        A Lean theorem name is the stable identity of a child below one parent.  Outer
-        retries may revise prose or decomposition, but they may not create ``-a2`` copies
-        of an already accepted ``-a1`` theorem or send that theorem through proof stages
-        again.
-        """
         del parent_attempt
         if not decomposition.should_split:
             return []
@@ -750,16 +712,6 @@ class Runtime:
         return [results[one.key] for one in decomposition.subproblems]
 
     def _resume_existing_dag(self, root: NodeRecord) -> SolveResult:
-        """Launch the entire dependency-ready frontier of an existing DAG.
-
-        A resumed run must not descend through one parent at a time.  It snapshots every
-        existing descendant, submits all currently ready nodes, and refills the worker pool
-        whenever any result unlocks another node. Newly created descendants remain owned by
-        the `_solve` call that created them, preventing duplicate scheduling.
-        """
-        # Follow the durable graph edges, not every historical record whose ``parent``
-        # field happens to match.  This keeps obsolete pre-fix ``-a2`` duplicates out of
-        # the runnable frontier after their parent has been rewired to the accepted node.
         managed = {root.id}
         frontier = [root.id]
         while frontier:
@@ -860,7 +812,6 @@ class Runtime:
         )
 
     def _formalize_checkpoint_parent(self, node: NodeRecord) -> SolveResult:
-        """Finish a resumed parent after all of its existing children are proved."""
         plan = self._recorded_plan(node) or self._preserved_plan(node)
         if plan is None or not node.natural_proof:
             return SolveResult(
@@ -895,7 +846,6 @@ class Runtime:
                 return result
 
     def _checkpoint_theorems(self, node: NodeRecord) -> list[ProvedTheorem]:
-        """Rehydrate enough accepted child metadata for resumed parent formalization."""
         audit = self._latest_lean_audit(node)
         if audit is not None:
             return audit.theorems
@@ -919,13 +869,11 @@ class Runtime:
 
     @staticmethod
     def _accepted_checkpoint(node: NodeRecord) -> bool:
-        """Whether a dependency has passed both isolated correctness gates."""
         return node.status == "proved" or (
             node.status == "integrating" and bool(node.candidate_commit)
         )
 
     def _latest_lean_audit(self, node: NodeRecord) -> LeanAudit | None:
-        """Load the durable reviewer approval that created an accepted checkpoint."""
         candidates = sorted(
             self._node_dir(node).glob("lean-audit-v*.json"),
             key=lambda path: path.stat().st_mtime_ns,
@@ -943,7 +891,6 @@ class Runtime:
         return None
 
     def _resume_accepted_candidate(self, node: NodeRecord) -> SolveResult:
-        """Resume only integration for a comparator/reviewer-approved checkpoint."""
         theorems = self._checkpoint_theorems(node)
         if not theorems:
             return SolveResult(
@@ -973,7 +920,6 @@ class Runtime:
         )
 
     def _submit_resumed_integration(self, node: NodeRecord) -> Any:
-        """Ensure one retained accepted checkpoint has one background promotion."""
         theorems = self._checkpoint_theorems(node)
         worktree = Path(node.worktree)
         with self._integration_futures_lock:
@@ -1000,7 +946,6 @@ class Runtime:
         theorems: list[ProvedTheorem],
         comparator_log: str,
     ) -> Any:
-        """Promote an accepted non-root proof while its parent starts immediately."""
         with self._integration_futures_lock:
             existing = self._integration_futures.get(node.id)
             if existing is not None:
@@ -1018,7 +963,6 @@ class Runtime:
             return future
 
     def _wait_for_integrations(self) -> None:
-        """Wait for every accepted descendant promotion before root acceptance."""
         while True:
             with self._integration_futures_lock:
                 futures = list(self._integration_futures.values())
@@ -1038,7 +982,6 @@ class Runtime:
         theorems: list[ProvedTheorem],
         comparator_log: str = "",
     ) -> SolveResult:
-        """Finish only the integration gate, retaining all accepted proof artifacts."""
         integrated, feedback = self._integrate_reviewed_candidate(
             worktree,
             before,
@@ -1075,7 +1018,6 @@ class Runtime:
         *,
         comparator_log: str = "",
     ) -> None:
-        """Publish an accepted theorem from durable artifacts without reproving it."""
         plan_path = self._recorded_plan(node) or self._preserved_plan(node)
         natural_path = self.project / node.natural_proof if node.natural_proof else None
         try:
@@ -1115,13 +1057,6 @@ class Runtime:
     def _overlay_accepted_children(
         self, node: NodeRecord, worktree: Path
     ) -> tuple[bool, str]:
-        """Put accepted child commits into a parent's speculative proof worktree.
-
-        A child in ``integrating`` has already passed both isolated correctness gates.
-        Its immutable candidate history may therefore be used by the parent before the
-        serialized canonical-branch promotion finishes.  The parent's own comparator
-        and reviewer validate the combined history again.
-        """
         commits: list[str] = []
         seen: set[str] = set()
         prerequisite_ids = list(dict.fromkeys([*node.children, *node.depends_on]))
@@ -1187,7 +1122,6 @@ class Runtime:
         natural: NaturalProof,
         children: list[SolveResult],
     ) -> SolveResult:
-        """Run RLCR and both reviews in an isolated node worktree, then integrate."""
         natural_path = self.project / node.natural_proof
         child_pages = [
             theorem for child in children if child.ok for theorem in child.theorems
@@ -1218,10 +1152,6 @@ class Runtime:
                 node_id=node.id,
                 feedback=overlay_feedback,
             )
-        # Record the exact post-overlay commit in the durable bridge configuration for
-        # audit.  The bridge explicitly disables RLCR's duplicate final repository-wide
-        # code-review phase; the implementation rounds still use this frozen worktree,
-        # and the controller subsequently applies both exact comparator gates.
         review_base = self._git_head(worktree)
         self.store.update(
             node.id,
@@ -1355,11 +1285,8 @@ class Runtime:
         )
 
     def _revise_parent(self, child: NodeRecord, failure: str) -> None:
-        """Route an incorrect child theorem into the parent's NL-proof loop."""
         if child.parent is None:
             return
-        # Several siblings may fail in one parallel wave. Preserve concrete feedback while
-        # leaving the accepted scaffold plan immutable.
         with self._revision_lock:
             parent = self.store.nodes[child.parent]
             self.store.update(
@@ -1376,7 +1303,6 @@ class Runtime:
         *,
         label: str = "",
     ) -> tuple[bool, Path, str]:
-        """Run the comparator without a shell and require both exit zero and its marker."""
         rendered = self._render_command(node, lean_files)
         argv = shlex.split(rendered)
         environment = os.environ.copy()
@@ -1417,7 +1343,6 @@ class Runtime:
     def _lean_files(
         self, before: str, after: str, cwd: Path | None = None
     ) -> list[str]:
-        """Identify Lean files changed by this node, plus an explicitly configured target."""
         workspace = cwd or self.project
         found: set[str] = set()
         if before and after:
@@ -1437,7 +1362,6 @@ class Runtime:
         return sorted(found)
 
     def _review_command(self, node: NodeRecord, lean_files: list[str]) -> str:
-        """Render the comparator with explicit controller paths for isolated worktrees."""
         environment = (
             f"HUMANIZE_RUN_DIR={shlex.quote(str(self.run_root))} "
             f"HUMANIZE_WIKI_DIR={shlex.quote(str(self.store.wiki))}"
@@ -1452,12 +1376,6 @@ class Runtime:
         task: str,
         review_base: str,
     ) -> tuple[bool, Path]:
-        """Run official RLCR in a process whose real cwd is the node worktree.
-
-        Humanize's RLCR intentionally derives its Git root from ``Path.cwd()``. Changing
-        Python's cwd in a worker thread would race every other leaf, so process isolation is
-        required in addition to binding the Codex sessions to the worktree.
-        """
         node_dir = self._node_dir(node)
         config_path = node_dir / f"rlcr-config-v{node.attempts}.json"
         atomic_text(
@@ -1509,39 +1427,11 @@ class Runtime:
 
     @staticmethod
     def _agent_spec(agent: Any) -> str:
-        """Serialize a parent Humanize agent for an isolated ``hmz exec`` child.
-
-        Written the one way ``-a`` still reads: ``CLI[@PROVIDER]/MODEL:EFFORT``. The
-        written-out form this used to emit -- ``cli=codex,model=...,effort=...`` -- is a
-        spelling humanize has taken away, and taken away loudly: ``=`` now names the place
-        an agent fills, so ``cli=`` reads as a place this flow never declared, and the
-        commas separate agents, so the old line asked for four of them. Every nested RLCR
-        process launched with it died on its own command line before taking a turn.
-
-        What the agent may do and whether it may read the internet are not written here.
-        They are the flow's to say rather than the line that runs it, and the child is the
-        same two places this one declares: ``worktree-rlcr`` carries the ``AgentDefaults``
-        beside them, so the child process settles ``auto`` on both without being told.
-
-        The service tier the parent runs at, and any setting carried on a backend's own
-        config, do not cross with it either -- the line has nowhere left to put them, and a
-        file of agents is not what ``-c`` takes. A nested proof therefore runs at whatever
-        tier its CLI serves by default, which is a turn taken a little slower rather than a
-        turn not taken at all.
-
-        Args:
-          agent: The parent's agent, whose backend, account, model and effort the child is
-            to be started on.
-
-        Returns:
-          The one ``-a`` that starts it.
-        """
         config = agent.config
         account = f"@{config.provider}" if config.provider else ""
         return f"{agent.backend}{account}/{config.model}:{config.effort}"
 
     def _node_worktree(self, node: NodeRecord) -> Path:
-        """Create or reuse a durable Git branch and worktree for one node attempt."""
         recorded = Path(node.worktree) if node.worktree else None
         recorded_valid = (
             recorded is not None and self._git_toplevel(recorded) == recorded
@@ -1589,9 +1479,6 @@ class Runtime:
             with self._integration_lock:
                 if self._git_toplevel(path) == path:
                     break
-                # A disappeared /tmp checkout can leave prunable worktree metadata that
-                # still claims its proof branch. Pruning removes only that stale checkout
-                # record; the named proof branch and every commit remain durable.
                 subprocess.run(
                     ["git", "worktree", "prune"],
                     cwd=self.project,
@@ -1638,22 +1525,16 @@ class Runtime:
             if completed.returncode == 0:
                 break
             detail = (completed.stderr or completed.stdout).strip()
-            # Twelve problem supervisors can share one underlying Git repository. Git's
-            # own ref/worktree locks are authoritative; retry their brief contention.
             time.sleep(0.2 * (retry + 1))
         if self._git_toplevel(path) != path:
             raise RuntimeError(f"could not create isolated node worktree: {detail}")
         node.worktree = str(path)
         node.proof_branch = branch
-        # HEAD may advance while this worker waits for the integration lock.  Record the
-        # commit the new worktree actually checked out, not a pre-lock snapshot of the
-        # moving problem branch.
         node.proof_base_commit = self._git_head(path)
         self._prepare_lake_workspace(path)
         return path
 
     def _node_worktree_path(self, node: NodeRecord) -> Path:
-        """Choose a stable checkout path short enough for Humanize's epic key."""
         descriptive = (
             self.project.parent
             / ".recursive-lean-node-worktrees"
@@ -1681,14 +1562,6 @@ class Runtime:
         )
 
     def _prepare_lake_workspace(self, path: Path) -> None:
-        """Provision ignored pinned Lake inputs in an isolated worktree.
-
-        Lake worktrees do not receive ignored files.  Sharing the immutable package
-        checkout avoids a network fetch, while copying the pinned manifest prevents
-        Lake from trying to update dependency repositories through read-only shared
-        Git metadata.  A copy is intentional: a worker must never rewrite the source
-        manifest in another checkout.
-        """
         packages = self.project / ".lake" / "packages"
         linked = path / ".lake" / "packages"
         packages_ignored = subprocess.run(
@@ -1733,7 +1606,6 @@ class Runtime:
                 return
 
     def _node_branch(self, node: NodeRecord) -> str:
-        """Return the stable Git branch name retaining one node attempt's proof."""
         if node.proof_branch:
             return node.proof_branch
         return (
@@ -1751,13 +1623,6 @@ class Runtime:
         node: NodeRecord,
         lean_files: list[str],
     ) -> tuple[bool, str]:
-        """Keep an accepted candidate in integration until its latest-base merge passes.
-
-        Returning a comparator- and reviewer-approved theorem to natural-language proof would
-        discard the wrong checkpoint: an integration failure concerns composition with a moving
-        sibling history, not the theorem's accepted mathematics.  Retry only this promotion gate,
-        retaining the candidate branch and all earlier approvals.
-        """
         retry = 0
         while True:
             integrated, feedback = self._integrate_candidate(
@@ -1779,8 +1644,6 @@ class Runtime:
                 ),
                 candidate_commit=after,
             )
-            # Infrastructure or Git-lock failures may resolve without a source repair.  Keep the
-            # retry bounded enough to remain observable while avoiding a hot failure loop.
             time.sleep(min(60.0, float(retry)))
 
     def _integrate_candidate(
@@ -1792,7 +1655,6 @@ class Runtime:
         node: NodeRecord | None = None,
         lean_files: list[str] | None = None,
     ) -> tuple[bool, str]:
-        """Integrate one reviewed history, reconciling parallel sibling bases safely."""
         if not after:
             return False, f"isolated worktree has no Git HEAD: {worktree}"
         if before == after:
@@ -1811,11 +1673,6 @@ class Runtime:
             if not self._git_clean(self.project):
                 return False, "problem integration worktree is not clean"
             canonical = self._git_head(self.project)
-            # A long-running RLCR may fast-forward or rebase its proof branch onto the
-            # moving problem branch before it writes the theorem commit.  Its persisted
-            # `before` value then predates commits which are already in `canonical`.
-            # Do not cherry-pick those ancestors back onto themselves: Git reports that
-            # as an empty cherry-pick with no unmerged paths.
             commits = [
                 commit
                 for commit in commits
@@ -1962,13 +1819,6 @@ class Runtime:
         lean_files: list[str],
         failure: str,
     ) -> tuple[bool, str]:
-        """Repair only composition of histories whose isolated proof gates passed.
-
-        The repair loop deliberately remains inside the serialized integration worktree.  It
-        never calls the mathematical planner, natural-language author, decomposition stage, or
-        node RLCR prover.  Every source repair receives a new machine comparator run and a fresh
-        independent reviewer comparator run before it can advance the canonical branch.
-        """
         if node is None or self.agents is None:
             return False, failure
         feedback = failure
@@ -2068,7 +1918,6 @@ class Runtime:
     def _apply_candidate_commits(
         self, integration: Path, commits: list[str]
     ) -> tuple[bool, bool, str]:
-        """Cherry-pick reviewed commits, unioning only ordinary tracked Lean conflicts."""
         unioned = False
         for commit in commits:
             picked = subprocess.run(
@@ -2088,9 +1937,6 @@ class Runtime:
                 check=False,
             )
             if status.returncode == 0 and not status.stdout.strip():
-                # The same patch can already exist under a different integration commit
-                # hash.  An empty cherry-pick is success: skip its sequencer entry and
-                # continue with any later, genuinely new theorem commits.
                 skipped = subprocess.run(
                     ["git", "cherry-pick", "--skip"],
                     cwd=integration,
@@ -2140,11 +1986,6 @@ class Runtime:
                     check=False,
                 )
                 if status.returncode == 0 and not status.stdout.strip():
-                    # Union conflict resolution can discover that the canonical branch
-                    # already contains the candidate's complete Lean result.  Git then
-                    # keeps the sequencer active but rejects --continue as an empty
-                    # commit.  This is the same successful duplicate-patch case handled
-                    # above, reached only after resolving an ordinary Lean conflict.
                     skipped = subprocess.run(
                         ["git", "cherry-pick", "--skip"],
                         cwd=integration,
@@ -2170,7 +2011,6 @@ class Runtime:
 
     @staticmethod
     def _union_lean_conflicts(integration: Path) -> tuple[bool, str]:
-        """Preserve both sides of same-file Lean additions for comparator rechecking."""
         unmerged = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
             cwd=integration,
@@ -2257,7 +2097,6 @@ class Runtime:
         return completed.returncode == 0 and not completed.stdout.strip()
 
     def _render_command(self, node: NodeRecord, lean_files: list[str]) -> str:
-        """Fill documented comparator placeholders while refusing unknown ones."""
         values = {
             "node_id": node.id,
             "node_dir": str(self._node_dir(node).relative_to(self.project)),
@@ -2334,7 +2173,6 @@ class Runtime:
         natural_path: Path,
         children: str,
     ) -> Path:
-        """Give nested RLCR only the work it can finish before returning control."""
         path = self._node_dir(node) / f"rlcr-plan-v{node.attempts}.md"
         content = f"""# Implement Lean DAG node `{node.id}`
 
@@ -2409,12 +2247,10 @@ not blockers for completion of this implementation-only plan.
         return sum(1 for _ in existing) + 1
 
     def _next_json_version(self, node: NodeRecord, prefix: str) -> int:
-        """Allocate a durable version across outer node retries."""
         existing = self._node_dir(node).glob(f"{prefix}-v*.json")
         return sum(1 for _ in existing) + 1
 
     def _latest_natural_checkpoint(self, node: NodeRecord) -> tuple[str, str]:
-        """Return the latest proof draft and its exact rejection feedback."""
         candidates = sorted(
             self._node_dir(node).glob("natural-proof-draft-v*.json"),
             key=lambda path: path.stat().st_mtime_ns,
@@ -2460,14 +2296,6 @@ not blockers for completion of this implementation-only plan.
         return proof, feedback or "Continue from this latest preserved draft."
 
     def _preserved_plan(self, node: NodeRecord) -> Path | None:
-        """Return the best existing immutable scaffold after an interrupted run.
-
-        ``humanize1:gen-plan`` creates the public output from a blank template and writes
-        substantive content through a hidden atomic temporary file.  A stopped flow can
-        therefore leave a placeholder ``plan-vN.md`` beside a useful temporary output.  If
-        neither finalized nor temporary output is usable, the concrete controller input
-        draft is still frozen as the scaffold so planning is never regenerated or reviewed.
-        """
         node_dir = self._node_dir(node)
         tiers = (
             node_dir.glob("plan-v*.md"),
@@ -2490,7 +2318,6 @@ not blockers for completion of this implementation-only plan.
         return None
 
     def _recorded_plan(self, node: NodeRecord) -> Path | None:
-        """Return the node's already accepted plan without regenerating it."""
         if not node.plan:
             return None
         candidate = self.project / node.plan
