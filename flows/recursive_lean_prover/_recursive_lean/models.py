@@ -1,5 +1,3 @@
-"""Structured answers and durable node records used by the flow."""
-
 from __future__ import annotations
 
 from typing import Literal
@@ -44,7 +42,6 @@ class NaturalAudit(BaseModel):
 
     @property
     def passed(self) -> bool:
-        """Whether the answer consistently approves the proof."""
         return (
             self.acceptable
             and not self.first_invalid_step
@@ -87,7 +84,6 @@ class Subproblem(BaseModel):
     @field_validator("lean_statement")
     @classmethod
     def _safe_lean_statement(cls, value: str) -> str:
-        """Keep the frozen type usable as one parenthesized Lean term."""
         normalized = value.strip()
         if "\n" in normalized or "\r" in normalized:
             raise ValueError("lean_statement must be a single line")
@@ -127,7 +123,6 @@ class DecompositionAudit(BaseModel):
 
     @property
     def passed(self) -> bool:
-        """Whether global and per-child verdicts consistently approve."""
         return (
             self.acceptable
             and all(one.acceptable for one in self.nodes)
@@ -136,7 +131,6 @@ class DecompositionAudit(BaseModel):
 
 
 def _no_subproblems() -> list[Subproblem]:
-    """Give Pydantic a precisely typed fresh default."""
     return []
 
 
@@ -195,7 +189,6 @@ class ProvedTheorem(BaseModel):
 
 
 def _no_theorems() -> list[ProvedTheorem]:
-    """Give Pydantic a precisely typed fresh default."""
     return []
 
 
@@ -225,7 +218,6 @@ class LeanAudit(BaseModel):
 
     @property
     def passed(self) -> bool:
-        """Whether the reviewer and its comparator rerun both pass."""
         return (
             self.accepted
             and self.comparator_reran
@@ -255,8 +247,6 @@ NodeStatus = Literal[
 
 
 class NodeRecord(BaseModel):
-    """One durable theorem node rendered into the live DAG."""
-
     model_config = {"extra": "forbid"}
 
     id: str
@@ -284,8 +274,6 @@ class NodeRecord(BaseModel):
 
 
 class SolveResult(BaseModel):
-    """What a recursive node hands its parent."""
-
     ok: bool
     node_id: str
     feedback: str = ""

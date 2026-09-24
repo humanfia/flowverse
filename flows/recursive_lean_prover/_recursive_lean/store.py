@@ -1,5 +1,3 @@
-"""Atomic DAG and wiki persistence for an observable long-running flow."""
-
 from __future__ import annotations
 
 import datetime as dt
@@ -15,18 +13,15 @@ if TYPE_CHECKING:
 
 
 def now() -> str:
-    """Return one stable UTC timestamp for status records."""
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def slug(value: str, *, fallback: str = "theorem") -> str:
-    """Turn a model-provided name into a safe file component."""
     made = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
     return made[:80] or fallback
 
 
 def atomic_text(path: Path, content: str) -> None:
-    """Replace one small control artifact without exposing a partial write."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(content, encoding="utf-8")
@@ -34,8 +29,6 @@ def atomic_text(path: Path, content: str) -> None:
 
 
 class Store:
-    """The single writer of node state, rendered DAGs, and theorem wiki pages."""
-
     def __init__(self, root: Path, wiki: Path, task: str) -> None:
         self.root = root
         self.wiki = wiki
@@ -73,7 +66,6 @@ class Store:
         lean_name: str = "",
         depends_on: list[str] | None = None,
     ) -> NodeRecord:
-        """Return an existing node or durably add it to the graph."""
         with self._lock:
             found = self.nodes.get(node_id)
             if found is not None:
@@ -100,14 +92,8 @@ class Store:
     def update(
         self, node_id: str, status: NodeStatus, message: str = "", **fields: Any
     ) -> None:
-        """Persist one status transition and immediately redraw the live DAG."""
         with self._lock:
             record = self.nodes[node_id]
-            # Comparator + independent reviewer approval is a permanent checkpoint.
-            # A later integration conflict is about composing Git histories; it must
-            # never send accepted mathematics back through planning, prose, splitting,
-            # or Lean proving.  Keep this invariant here at the persistence boundary so
-            # stale supervisors cannot accidentally erase it.
             if record.status == "proved" and status != "proved":
                 print(
                     f"[DAG] {node_id}: proved — ignored regressive transition to {status}"
@@ -132,7 +118,6 @@ class Store:
             print(f"[DAG] {node_id}: {status}" + (f" — {message}" if message else ""))
 
     def render(self) -> None:
-        """Write machine-readable state, Mermaid, and a compact Markdown status view."""
         with self._lock:
             ordered = sorted(self.nodes.values(), key=lambda one: (one.depth, one.id))
             payload = {
@@ -154,10 +139,6 @@ class Store:
             for record in ordered:
                 label = self._label(record, self._scheduling(record))
                 mermaid.append(f'  {self._mermaid_id(record.id)}["{label}"]')
-            # Use one direction and one line style everywhere: the arrow starts at
-            # the dependent theorem and points toward what it needs. A parent
-            # depends on every decomposition child; a node depends on every
-            # explicit prerequisite in ``depends_on``.
             edges: set[tuple[str, str]] = set()
             for record in ordered:
                 edges.update(
@@ -221,7 +202,6 @@ class Store:
         natural: str,
         comparator_log: str,
     ) -> Path:
-        """Write or update one theorem page and rebuild the wiki index."""
         page = self.wiki / f"{slug(theorem.name)}.md"
         content = f"""# `{theorem.name}`
 
@@ -288,7 +268,6 @@ class Store:
         return value.replace("|", "\\|").replace("\n", " ")
 
     def _scheduling(self, record: NodeRecord) -> str:
-        """Explain decomposition shape separately from dependency readiness."""
         shape = "decomposition leaf" if not record.children else "decomposed node"
         blocked = [
             dependency

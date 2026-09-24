@@ -235,18 +235,11 @@ class WorktreeTests(unittest.TestCase):
                 self.assertEqual(command[-1], "prove the node")
                 spec = command[command.index("-a") + 1]
                 self.assertEqual(spec, "codex/gpt-5.6-sol:max")
-                # And read back with humanize's own reader rather than compared only with
-                # a string: the form this used to send -- `cli=codex,model=...` -- also
-                # matched a string somebody had copied out of the code, and went on
-                # matching it long after `hmz exec` had stopped accepting it. A spec is
-                # right when the thing that parses it says so.
                 place, profile, model, effort, provider = read(spec)
                 self.assertEqual(
                     (place, profile.name, model, effort, provider),
                     ("", "codex", "gpt-5.6-sol", "max", ""),
                 )
-                # What the agent may do and whether it reads the internet belong to the
-                # child flow's own places now; an `-a` that wrote either is refused.
                 self.assertFalse(any("permission=" in part for part in command))
                 self.assertFalse(any("web_search=" in part for part in command))
                 rlcr_config = json.loads(
@@ -368,8 +361,6 @@ class WorktreeTests(unittest.TestCase):
                     (project / "lake-manifest.json").read_text(),
                 )
 
-                # Reusing an already-recorded worktree also repairs disposable
-                # ignored Lake inputs that vanished between process invocations.
                 (worktree / "lake-manifest.json").unlink()
                 self.assertEqual(runtime._node_worktree(node), worktree)
                 self.assertTrue((worktree / "lake-manifest.json").is_file())
@@ -739,8 +730,6 @@ class WorktreeTests(unittest.TestCase):
                 git(project, "commit", "-m", "feat: advance canonical")
                 canonical = runtime._git_head(project)
 
-                # Model an official worker updating its long-lived branch while the
-                # controller still retains the original proof-base checkpoint.
                 git(worktree, "merge", "--ff-only", canonical)
                 (worktree / "Candidate.lean").write_text(
                     "theorem candidate : True := by trivial\n"

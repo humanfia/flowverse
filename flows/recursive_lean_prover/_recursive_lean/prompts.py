@@ -1,5 +1,3 @@
-"""Prompts whose invariants are enforced again by structured flow gates."""
-
 PLAN_DRAFT = """# Recursive Lean theorem node
 
 ## Mathematical task
