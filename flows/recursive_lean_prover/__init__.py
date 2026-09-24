@@ -15,15 +15,6 @@ MIN_RECURSIVE_NODES = 3
 
 
 class Agents(NamedTuple):
-    """Two independent Codex roles; the worker writes and the reviewer only judges.
-
-    Both run at `auto`, which is the flow's to say and not the line that starts it: RLCR's
-    plan-integrity guards are hooks on the moment a tool is asked about, so a worker nothing
-    asks about is a worker they never see, and a Lean comparator may need to write build
-    artifacts. The reviewer prompt forbids edits; what keeps it from making them is that it
-    is a separate agent with sessions of its own, not a rung.
-    """
-
     worker: Annotated[
         Agent, Moment.PERMISSION_REQUEST, AgentDefaults(permission="auto")
     ]
@@ -31,8 +22,6 @@ class Agents(NamedTuple):
 
 
 class Config(BaseModel):
-    """Bounds, output locations, and the repository's comparator contract."""
-
     model_config = {"extra": "forbid", "frozen": True}
 
     max_depth: int = Field(
@@ -142,7 +131,6 @@ class Config(BaseModel):
     @field_validator("artifact_dir", "wiki_dir")
     @classmethod
     def _local_state(cls, value: str) -> str:
-        """Keep orchestration output out of RLCR's git-clean gate."""
         normalized = value.strip().rstrip("/")
         if not normalized.startswith(".humanize/"):
             raise ValueError("must be a relative path below .humanize/")
@@ -153,7 +141,6 @@ class Config(BaseModel):
     @field_validator("lean_target")
     @classmethod
     def _relative_lean_target(cls, value: str) -> str:
-        """A target belongs to the repository in which the flow runs."""
         normalized = value.strip()
         if normalized.startswith("/") or ".." in normalized.split("/"):
             raise ValueError("must be blank or a relative path inside the repository")
@@ -163,15 +150,12 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _tree_fits(self) -> Config:
-        """Reject a bound that cannot even hold a root and one complete fan-out."""
         if self.max_depth and self.max_nodes < MIN_RECURSIVE_NODES:
             raise ValueError("recursive runs need max_nodes >= 3")
         return self
 
 
 class WorktreeRlcrConfig(BaseModel):
-    """The official RLCR settings forwarded by an isolated node process."""
-
     model_config = {"extra": "forbid", "frozen": True}
 
     plan_file: str = Field(description="absolute immutable implementation plan path")
@@ -197,22 +181,7 @@ class WorktreeRlcrConfig(BaseModel):
 
 
 def _nested_rlcr_config(config: WorktreeRlcrConfig) -> dict[str, Any]:
-    """Forward implementation settings without enabling RLCR's generic code review.
-
-    The recursive controller owns the Lean acceptance review: after its machine
-    comparator succeeds, a fresh role-distinct Codex reviewer reruns that exact
-    comparator.  Giving official RLCR a base branch starts an additional generic
-    repository-wide code review that does not know the selected DAG-node boundary
-    and can reopen already accepted ancestor work.  Keep the frozen base in the
-    durable node-side config, but leave the nested loop's review base blank so it
-    returns immediately after its implementation reviewer accepts the candidate.
-    """
     forwarded = config.model_dump()
-    # An empty base_branch is not itself a no-review setting: official Humanize
-    # resolves it to origin/HEAD, main, or master.  Use the explicit setup-only
-    # switch so the implementation loop finalizes as soon as its ordinary RLCR
-    # rounds accept the work.  The recursive controller then owns both exact
-    # Lean comparator gates.
     forwarded["base_branch"] = ""
     forwarded["skip_code_review"] = True
     return forwarded
@@ -228,7 +197,6 @@ def run(
     config: Config | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
-    """Prove one mathematical problem and recursively prove its named subproblems."""
     Runtime(agents, task, config or Config(), state).execute()
 
 
@@ -244,11 +212,6 @@ def worktree_rlcr(
     config: WorktreeRlcrConfig,
     state: dict[str, Any] | None = None,
 ) -> None:
-    """Process-isolated bridge whose actual cwd is the formalizing node worktree."""
-    # Long-lived recursive supervisors may have been imported before automatic
-    # Lake-input provisioning was added.  This newly spawned bridge still runs in
-    # the node worktree before the builder starts, so repair a missing ignored
-    # manifest from the repository's primary worktree without restarting anything.
     worktree = Path.cwd()
     manifest = worktree / "lake-manifest.json"
     ignored = subprocess.run(
