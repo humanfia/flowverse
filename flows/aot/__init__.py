@@ -1,30 +1,4 @@
-"""AOT -- the flow that writes a flow: a description in, a checked and proved flow out.
-
-hmz exec -f official/aot -a claude/MODEL:high -a codex/MODEL:high \\
-    "two agents take turns on the task until a reviewer says it is done"
-
-The writer reads the description against a briefing of what this installed humanize serves,
-and says what the flow is to be first -- the places, the settings, the ways it ends, and what
-it needs of the interface. What it needs is checked against the catalogue before anything is
-written: a description that asks for what nothing here serves is refused at compile time,
-with the person at the prompt asked whether to narrow it, rather than compiled into a flow
-that fails at hour three.
-
-Then the writer writes the flow, in a scratch directory of its own, and the flow is held to
-three gates before anybody keeps it. The checker reads it without running it. The stubs drive
-it against the worst worlds there are -- the reviewer that never says done, the turn that
-always fails -- in a subprocess held to a clock, so a loop that cannot end is caught in
-milliseconds. And a critic that shares nothing with the writer reads it fresh against the
-spec. Whatever any gate refuses goes back to the writer's own session, word for word, for as
-many repairs as the config allows.
-
-One rule is the compiler's own and not the checker's: a generated loop is bounded, always.
-The checker only warns about a loop whose every way out waits on an agent's verdict; here
-that warning is a refusal, whatever `strict` says, so the flow that lands ends even when its
-reviewer never says done. What lands is copied whole into the flows of your own -- atomically,
-the way `fork` copies one -- and the compile ends with a report: what it is called, what it
-drives, how every loop ends, and the line that runs it.
-"""
+"""AOT -- the flow that writes a flow: a description in, a checked and proved flow out."""
 
 import os
 import shutil
@@ -56,24 +30,12 @@ from pydantic import BaseModel, Field
 
 
 class Compiling(NamedTuple):
-    """The three the compile drives: two agents that share nothing, and the person.
-
-    The writer holds the whole compile in one session -- the spec it drew, the drafts it
-    wrote, every refusal it was handed -- because repair is a conversation. The critic
-    arrives fresh each round and reads only the draft against the spec, which is the one
-    reviewer arrangement that catches what the writer has talked itself into. The person
-    is the gate for what a compiler must not decide alone: an ask nothing serves, a name
-    already taken, a draft the repairs ran out on.
-    """
-
     writer: Agent
     critic: Agent
     human: Person
 
 
 class Config(BaseModel):
-    """What a compile takes."""
-
     model_config = {"frozen": True}
 
     name: str = Field(
@@ -213,9 +175,6 @@ class Renamed(BaseModel):
 @flow
 def run(agents: Compiling, task: str, config: Config | None = None) -> None:
     held = config or Config()
-    # A scratch directory of the compile's own: drafts are proved there, and only what
-    # passed every gate is copied out. Taken away however the compile ends, so a refused
-    # draft is nowhere.
     scratch = tempfile.mkdtemp(prefix=".aot.")
     try:
         _compiled(agents, task, held, Path(scratch))
@@ -224,8 +183,6 @@ def run(agents: Compiling, task: str, config: Config | None = None) -> None:
 
 
 def _compiled(agents: Compiling, task: str, held: Config, scratch: Path) -> None:
-    # One session for the whole compile: the spec it drew and every refusal it was handed
-    # are the context its repairs are made of.
     writing = agents.writer.new(cwd=scratch)
     spec = _drafted(writing, task)
     if spec is None:
@@ -234,10 +191,6 @@ def _compiled(agents: Compiling, task: str, held: Config, scratch: Path) -> None
         return
     unserved, limited = _unserved(spec)
     if unserved:
-        # The writer's own round first: an unserved ask is more often the description's
-        # words taken for a capability -- writing a file, reading the repository -- than
-        # a real hole, and the writer can restate the spec in the catalogue's vocabulary
-        # before anybody is asked to build less.
         resaid = writing(
             prompts.RESAID.format(
                 unserved="\n".join(f"- {one}" for one in unserved)
@@ -271,7 +224,6 @@ def _compiled(agents: Compiling, task: str, held: Config, scratch: Path) -> None
         print(feedback)
     if not landed:
         if not (draft / ENTRY).is_file():
-            # There is nothing to take: the writer never landed a draft at all.
             print("hmz: aot: the repairs ran out with no draft to show; nothing was "
                   "written")
             return
@@ -286,15 +238,6 @@ def _compiled(agents: Compiling, task: str, held: Config, scratch: Path) -> None
 
 
 def _drafted(writing: Session, task: str) -> Spec | None:
-    """The spec, drawn from the description against the briefing -- with one more try.
-
-    Args:
-      writing: The writer's session, whose first turn this is.
-      task: The description, as it was given.
-
-    Returns:
-      The spec, or None for a writer that would not answer in shape twice.
-    """
     asked = prompts.SPEC.format(briefing=briefed(), task=task)
     spec = writing(asked, suppress=True, schema=Spec)
     if spec is None:
@@ -303,22 +246,12 @@ def _drafted(writing: Session, task: str) -> Spec | None:
 
 
 def _named(said: str) -> str:
-    """A flow's name as a directory may be called: snake_case, and never empty."""
     held = "".join(one if one.isalnum() else "_" for one in said.strip().lower())
     held = "_".join(part for part in held.split("_") if part)
     return held or "compiled_flow"
 
 
 def _unserved(spec: Spec) -> tuple[list[str], list[str]]:
-    """The spec's needs, checked against the catalogue of what is actually served.
-
-    Args:
-      spec: What the flow is to be.
-
-    Returns:
-      What nothing here serves -- each one a reason not to compile -- and what only some
-      backends serve, which is compiled and said in the report.
-    """
     served = {one.name: one for one in catalogue()}
     everywhere = {one.value for one in EVERYWHERE}
     unserved: list[str] = []
@@ -346,16 +279,6 @@ def _unserved(spec: Spec) -> tuple[list[str], list[str]]:
 
 
 def _narrowed(human: Person, unserved: list[str]) -> bool:
-    """Puts an ask nothing serves to the person: narrow the flow, or stop here.
-
-    Args:
-      human: The person at the prompt, who answers nothing when nobody is there.
-      unserved: What was asked for that nothing here serves.
-
-    Returns:
-      Whether to compile the rest. Nobody there is no: a compiler must not decide alone
-      to build less than what was asked for.
-    """
     for one in unserved:
         print(f"hmz: aot: cannot compile -- asks for {one}, which nothing here serves")
     going = human(
@@ -367,17 +290,6 @@ def _narrowed(human: Person, unserved: list[str]) -> bool:
 
 
 def _refused(draft: Path, spec: Spec, held: Config, agents: Compiling) -> str:
-    """The three gates, in their order, and what the first to refuse said.
-
-    Args:
-      draft: Where the writer was told to put the flow.
-      spec: What it is to be.
-      held: The compile's config.
-      agents: For the critic, who reads the draft fresh.
-
-    Returns:
-      What to hand the writer, or "" for a draft every gate let through.
-    """
     if not (draft / ENTRY).is_file():
         return (
             f"nothing landed at {draft} -- write the flow there: a directory of that "
@@ -413,25 +325,16 @@ def _refused(draft: Path, spec: Spec, held: Config, agents: Compiling) -> str:
 
 
 def _blocks(one: Finding, *, strict: bool) -> bool:
-    """Whether one finding sends a draft back.
-
-    Every error does. `unbounded-loop` does whatever `strict` says: it is the compiler's
-    own rule that a generated loop is bounded, since the flow that lands must end even
-    when its reviewer never says done. The rest of the warnings block only under
-    `strict`, and are said in the report either way.
-    """
     return one.severity == "error" or one.code == "unbounded-loop" or strict
 
 
 def _worlds(seconds: float) -> tuple[Scenario, ...]:
-    """The scenarios every draft is driven against, at the compile's own clock."""
     return tuple(
         one._replace(seconds=seconds) for one in (NEVER_DONE, ALWAYS_DONE, SILENT)
     )
 
 
 def _said(findings: Sequence[Finding]) -> str:
-    """Findings as the writer is handed them, one a line."""
     return "\n".join(
         f"- {one.where.name}:{one.line}: {one.severity}: {one.code}: {one.said}"
         for one in findings
@@ -439,15 +342,6 @@ def _said(findings: Sequence[Finding]) -> str:
 
 
 def _taken(human: Person, feedback: str) -> bool:
-    """The last gate: take the draft with what is still wrong with it, or stop.
-
-    Args:
-      human: The person at the prompt.
-      feedback: The last refusal, which is what they would be taking.
-
-    Returns:
-      Whether to keep it anyway. Nobody there is no.
-    """
     going = human(
         prompts.TAKEN.format(refused=feedback), suppress=True, schema=Going
     )
@@ -455,21 +349,6 @@ def _taken(human: Person, feedback: str) -> bool:
 
 
 def _landed(draft: Path, name: str, into: str, human: Person) -> str | None:
-    """Copies the draft into the flows of your own, whole and atomically.
-
-    The way `fork` lands one: copied beside and then moved into place, so a copy that
-    fails partway leaves no half a flow under the name. A name already taken is the
-    person's to change, not the compiler's to write over.
-
-    Args:
-      draft: The draft that passed the gates.
-      name: What it is to be called.
-      into: Which of the two places of your own, `local` or `user`.
-      human: The person, for a name already taken.
-
-    Returns:
-      The directory it landed in, or None for a landing refused.
-    """
     mine = os.path.expanduser(MINE[into])
     for _ in range(2):
         at = os.path.join(mine, name)
@@ -498,14 +377,6 @@ def _landed(draft: Path, name: str, into: str, human: Person) -> str | None:
 
 
 def _reported(at: str, spec: Spec, held: Config, limited: list[str]) -> None:
-    """Says what was compiled: what it is, what it drives, how it ends, how to run it.
-
-    Args:
-      at: Where the flow landed.
-      spec: What it was compiled to be.
-      held: The compile's config.
-      limited: What it builds on that only some backends serve.
-    """
     name = os.path.basename(at)
     print(f"\ncompiled: {name} -- {spec.about}")
     print(f"landed:   {at}")
