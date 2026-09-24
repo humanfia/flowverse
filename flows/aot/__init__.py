@@ -68,6 +68,13 @@ class Config(BaseModel):
 
 
 class Seat(BaseModel):
+    """One agent the compiled flow will drive.
+
+    Every field required, here and in every shaped answer of this flow: a backend that
+    holds a model to a strict schema refuses one whose fields have defaults, and the
+    compiler must compile on any backend that shapes.
+    """
+
     model_config = {"extra": "forbid"}
 
     name: str = Field(description="what the flow calls it, snake_case, for what it does")
@@ -85,6 +92,8 @@ class Seat(BaseModel):
 
 
 class Setting(BaseModel):
+    """One knob the compiled flow can be set up with."""
+
     model_config = {"extra": "forbid"}
 
     name: str = Field(description="the field's name, snake_case")
@@ -94,6 +103,8 @@ class Setting(BaseModel):
 
 
 class Ending(BaseModel):
+    """One way the compiled flow ends."""
+
     model_config = {"extra": "forbid"}
 
     by: Literal["budget", "rounds", "verdict"] = Field(
@@ -107,6 +118,8 @@ class Ending(BaseModel):
 
 
 class Spec(BaseModel):
+    """What the flow is to be, drawn from the description before anything is written."""
+
     model_config = {"extra": "forbid"}
 
     about: str = Field(description="one line saying what the flow does")
@@ -128,6 +141,8 @@ class Spec(BaseModel):
 
 
 class Review(BaseModel):
+    """What the critic answers, having read the draft fresh against the spec."""
+
     model_config = {"extra": "forbid"}
 
     approved: bool = Field(
@@ -142,12 +157,16 @@ class Review(BaseModel):
 
 
 class Going(BaseModel):
+    """A yes or no the compiler must not answer for itself."""
+
     model_config = {"extra": "forbid"}
 
     proceed: bool = Field(description="yes to go on as asked, no to stop the compile")
 
 
 class Renamed(BaseModel):
+    """Another name, where the one the spec chose is already taken."""
+
     model_config = {"extra": "forbid"}
 
     name: str = Field(description="another name for the flow, or '' to stop the compile")
