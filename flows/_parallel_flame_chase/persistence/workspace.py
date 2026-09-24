@@ -9,6 +9,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Self
@@ -172,14 +173,19 @@ def snapshot(source: Path, destination: Path, size: int | None = None) -> None:
     if destination.exists():
         raise FileExistsError(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if (copy := shutil.which("cp")) is not None:
+    copy = "/bin/cp" if sys.platform == "darwin" else shutil.which("cp")
+    if copy is not None:
+        flags = (
+            ["-a", "-c"]
+            if sys.platform == "darwin"
+            else ["--archive", "--reflink=auto"]
+        )
         destination.mkdir()
         try:
             subprocess.run(
                 [
                     copy,
-                    "--archive",
-                    "--reflink=auto",
+                    *flags,
                     f"{source}{os.sep}.",
                     str(destination),
                 ],

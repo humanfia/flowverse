@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +19,7 @@ from _parallel_flame_chase.core.models import (
 )
 from _parallel_flame_chase.lanes.prompts import lane_prompt, planning_prompt
 from _parallel_flame_chase.lanes.runtime import run_lane_session
+from _parallel_flame_chase.persistence import workspace
 from _parallel_flame_chase.persistence.checkpoints import checkpoint_report
 from _parallel_flame_chase.persistence.events import ReportBus
 from _parallel_flame_chase.persistence.leaderboard import (
@@ -94,6 +98,64 @@ def test_workspace_inspection_counts_regular_files_and_apparent_bytes(
     inspected = inspect_workspace_stats(source)
 
     assert inspected == WorkspaceStats(regular_files=2, total_bytes=6)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires native macOS cp")
+def test_macos_snapshot_clones_without_falling_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    original = source / "data.txt"
+    original.write_text("original", encoding="utf-8")
+    original.chmod(0o640)
+    (source / "link.txt").symlink_to("data.txt")
+    probe = subprocess.run(
+        ["/bin/cp", "-c", str(original), str(tmp_path / "clone-probe")],
+        capture_output=True,
+    )
+    if probe.returncode:
+        pytest.skip("temporary filesystem does not support macOS file cloning")
+
+    def slow_copy(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("snapshot fell back despite native file cloning being available")
+
+    monkeypatch.setattr(workspace.shutil, "copytree", slow_copy)
+    destination = tmp_path / "snapshot"
+    workspace.snapshot(source, destination)
+
+    copied = destination / "data.txt"
+    assert copied.read_text(encoding="utf-8") == "original"
+    assert copied.stat().st_mode & 0o777 == 0o640
+    assert (destination / "link.txt").readlink() == Path("data.txt")
+    copied.write_text("changed", encoding="utf-8")
+    assert original.read_text(encoding="utf-8") == "original"
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_snapshot_fallback_discards_partial_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "data.txt").write_text("original", encoding="utf-8")
+    (source / "link.txt").symlink_to("data.txt")
+    destination = tmp_path / "snapshot"
+
+    def fail_copy(command: list[str], **_kwargs: Any) -> None:
+        (destination / "partial.txt").write_text("partial", encoding="utf-8")
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(workspace, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(workspace.shutil, "which", lambda _command: "/test-bin/cp")
+    monkeypatch.setattr(workspace.subprocess, "run", fail_copy)
+    workspace.snapshot(source, destination)
+
+    assert not (destination / "partial.txt").exists()
+    assert (destination / "data.txt").read_text(encoding="utf-8") == "original"
+    assert (destination / "link.txt").readlink() == Path("data.txt")
+    (destination / "data.txt").write_text("changed", encoding="utf-8")
+    assert (source / "data.txt").read_text(encoding="utf-8") == "original"
 
 
 def candidate_report(
