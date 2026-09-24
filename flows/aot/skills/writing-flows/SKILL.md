@@ -16,6 +16,11 @@ Everything it needs lives inside that directory: helper code as an underscore-na
 module or package (`_myflow/`), skills it brings as `skills/<name>/SKILL.md`. A flow whose
 parts are elsewhere is a flow with a hole in it wherever it is copied to.
 
+Import that sibling by its plain name -- `from _myflow import helpers` -- never relatively
+(`from ._myflow import ...`): humanize runs `__init__.py` as a file (`runpy.run_path`) with the
+flow's own directory on `sys.path`, not as a package, so a relative import has no parent package
+to resolve against.
+
 ## One import
 
 The whole of humanize a flow imports is `hmz.flows`, and only names it offers:
