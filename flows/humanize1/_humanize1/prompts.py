@@ -1,21 +1,3 @@
-"""Every word either agent is told, kept as PolyArch/humanize writes them.
-
-The plugin is prompts: its commands are markdown Claude reads, its subagents are markdown
-their model reads, its hooks answer with markdown Claude is sent on with. So the port of the
-plugin is these strings, and the flow is the order they go out in. They are copied rather
-than paraphrased, `{{PLACEHOLDER}}` and all, so that a diff against the plugin's own
-`prompt-template/` shows what has drifted.
-
-What is written differently is written differently because the mechanism is: the plugin runs
-`codex exec` and `codex review` and this drives whichever agent was chosen as the reviewer,
-and the plugin's IO validation is a shell script where this is Python. Each of those is
-marked where it appears.
-
-The two commands before the loop are in :mod:`planning`, beside this rather than in it: the
-loop's own words are already two thousand lines, which is the length the loop itself refuses
-to let a round leave behind.
-"""
-
 from __future__ import annotations
 
 __all__ = [
@@ -60,7 +42,6 @@ __all__ = [
 
 from . import blocks
 
-#: What the plugin's own delegation warning says, injected above the plan in agent teams mode.
 AGENT_TEAMS_ENFORCEMENT = (
     "**Delegation Warning**: Do NOT implement code yourself in Agent Teams mode; delegate "
     "all coding tasks to team members."
@@ -68,28 +49,12 @@ AGENT_TEAMS_ENFORCEMENT = (
 
 
 def render(template: str, **fields: object) -> str:
-    """Fills a template in, the way the plugin's template loader fills one in.
-
-    Args:
-      template: The text, with `{{NAME}}` where a value goes.
-      fields: What each name is worth.
-
-    Returns:
-      The text with every named placeholder replaced. One nothing was given for is left
-      standing, exactly as the plugin's loader leaves it: a prompt with a hole in it is
-      easier to notice than a prompt that quietly lost a section.
-    """
     said = template
     for name, value in fields.items():
         said = said.replace(f"{{{{{name}}}}}", str(value))
     return said
 
 
-# ======================================================================================
-# start-rlcr-loop -- the setup script's round 0, and the state it sets up
-# ======================================================================================
-
-#: templates/bitlesson.md, verbatim.
 BITLESSON = """# BitLesson Knowledge Base
 
 This file is project-specific. Keep entries precise and reusable for future rounds.
@@ -115,7 +80,6 @@ Source Rounds: <round numbers where problem appeared and was solved>
 <!-- Add lessons below using the strict template. -->
 """
 
-#: agents/plan-understanding-quiz.md, as the prompt its model is given.
 PLAN_UNDERSTANDING_QUIZ = """You are a specialized agent that analyzes an implementation plan \
 and generates targeted multiple-choice technical comprehension questions. Your goal is to test \
 whether the user genuinely understands HOW the plan will be implemented, not just what the \
@@ -178,7 +142,6 @@ The plan is at @{{PLAN_FILE}}. Its content:
 {{PLAN_CONTENT}}
 """
 
-#: agents/plan-compliance-checker.md, as the prompt its model is given.
 PLAN_COMPLIANCE = """You are a specialized agent that validates an implementation plan before \
 it enters an RLCR (iterative development) loop. You perform two checks and return a single \
 verdict.
@@ -233,7 +196,6 @@ The plan is at @{{PLAN_FILE}}. Its content:
 {{PLAN_CONTENT}}
 """
 
-#: setup-rlcr-loop.sh, the goal tracker it writes in normal mode.
 GOAL_TRACKER = """# Goal Tracker
 
 <!--
@@ -301,7 +263,6 @@ codex | mainline task only |
 |------|-------------|----------------|---------------|-------------------|
 """
 
-#: setup-rlcr-loop.sh, the goal tracker it writes for `--skip-impl` with no plan.
 GOAL_TRACKER_SKIP_IMPL = """# Goal Tracker (Skip Implementation Mode)
 
 This RLCR loop was started with `--skip-impl`. The implementation phase was skipped,
@@ -356,7 +317,6 @@ review-only objective |
 |------|-------------|----------------|---------------|-------------------|
 """
 
-#: setup-rlcr-loop.sh, the goal tracker it writes for `--skip-impl` with a plan to anchor to.
 GOAL_TRACKER_SKIP_IMPL_ANCHORED = """# Goal Tracker (Skip Implementation Mode with Plan Anchor)
 
 This RLCR loop was started with `--skip-impl`. The implementation phase was skipped,
@@ -411,7 +371,6 @@ ACs in scope | pending | Review-only mode with explicit plan anchor |
 |------|-------------|----------------|---------------|-------------------|
 """
 
-#: setup-rlcr-loop.sh, `write_summary_template`.
 SUMMARY_TEMPLATE = """# Round {{ROUND}} Summary
 
 ## What Was Implemented
@@ -437,8 +396,6 @@ Lesson ID(s): NONE
 Notes: [what changed and why]
 """
 
-#: The stop hook's own summary scaffold for a round it opens, which differs from the setup
-#: script's -- the headings are the ones a later round is asked for.
 ROUND_SUMMARY_TEMPLATE = """# Round {{ROUND}} Summary
 
 ## Work Completed
@@ -459,7 +416,6 @@ ROUND_SUMMARY_TEMPLATE = """# Round {{ROUND}} Summary
 - Notes: [what changed and why]
 """
 
-#: setup-rlcr-loop.sh, the round 0 contract for `--skip-impl` with no plan.
 ROUND_CONTRACT_SKIP_IMPL = """# Round 0 Contract
 
 - Mainline Objective: Run code review for the current branch and resolve only findings that \
@@ -472,7 +428,6 @@ improvements that do not block review acceptance.
 non-blocking follow-up is explicitly queued.
 """
 
-#: setup-rlcr-loop.sh, the round 0 contract for `--skip-impl` anchored to a plan.
 ROUND_CONTRACT_SKIP_IMPL_ANCHORED = """# Round 0 Contract
 
 - Mainline Objective: Keep the current branch aligned with @{{PLAN_FILE}} while resolving only \
@@ -486,7 +441,6 @@ improvements that do not block review acceptance or plan alignment.
 plan's intended scope.
 """
 
-#: The task lane rules, which round 0 states and every round after it restates.
 TASK_LANES = """For all tasks that need to be completed, please use the Task system \
 (TaskCreate, TaskUpdate, TaskList).
 
@@ -504,7 +458,6 @@ moving on
 the mainline
 """
 
-#: setup-rlcr-loop.sh, the BitLesson section of the round 0 prompt.
 BITLESSON_SELECTION = """
 ---
 
@@ -526,8 +479,6 @@ Include a `## BitLesson Delta` section in your summary with:
 Reference: @{{BITLESSON_FILE}}
 """
 
-#: setup-rlcr-loop.sh, the round 0 prompt in normal mode. The plan itself is appended where
-#: `{{PLAN_CONTENT}}` is, as the script appends the plan backup.
 ROUND_0 = """Read and execute below with ultrathink
 
 ## Goal Tracker Setup (REQUIRED FIRST STEP)
@@ -619,7 +570,6 @@ Tracker Setup" above)
 4. Write your work summary into @{{SUMMARY_FILE}}
 """
 
-#: setup-rlcr-loop.sh, the round 0 prompt for `--skip-impl`.
 ROUND_0_SKIP_IMPL = """# Skip Implementation Mode - Code Review Loop
 
 This RLCR loop was started with `--skip-impl`.
@@ -666,7 +616,6 @@ try to execute anything, just stop).
 Write your summary to: @{{SUMMARY_FILE}}
 """
 
-#: The two endings of the skip-impl round 0 prompt: with a plan to stay inside, and without.
 ROUND_0_SKIP_IMPL_ANCHORED = """- Keep review-only work aligned with the original plan at \
 @{{PLAN_FILE}}
 
@@ -676,7 +625,6 @@ ROUND_0_SKIP_IMPL_UNANCHORED = """There is no explicit implementation plan for t
 the review-only contract is the primary anchor.
 """
 
-#: prompt-template/claude/agent-teams-instructions.md, verbatim.
 AGENT_TEAMS_INSTRUCTIONS = """## Agent Teams Mode
 
 You are operating in **Agent Teams mode** as the **Team Leader** within an RLCR \
@@ -692,7 +640,6 @@ evolution - read it before splitting tasks
 accomplished into the designated summary file
 """
 
-#: prompt-template/claude/agent-teams-core.md, verbatim.
 AGENT_TEAMS_CORE = """### Your Role
 
 You are the team leader. Your ONLY job is coordination and delegation. You must NEVER write \
@@ -747,7 +694,6 @@ commands, delegate it instead
 your response, not done forever
 """
 
-#: prompt-template/claude/agent-teams-continue.md, verbatim.
 AGENT_TEAMS_CONTINUE = """## Agent Teams Continuation
 
 Continue using **Agent Teams mode** as the **Team Leader** within the RLCR development cycle. \
@@ -777,11 +723,6 @@ file ownership to team members.
 """
 
 
-# ======================================================================================
-# The loop -- what the reviewer is asked each round, and what the builder hears back
-# ======================================================================================
-
-#: prompt-template/codex/goal-tracker-update-section.md, verbatim.
 GOAL_TRACKER_UPDATE_SECTION = """## Goal Tracker Update Requests (YOUR RESPONSIBILITY)
 
 The builder should normally keep the **mutable section** of `goal-tracker.md` up to date \
@@ -806,7 +747,6 @@ Common update requests you should handle:
 - Deferrals: Only allow with strong justification; add to "Explicitly Deferred"
 """
 
-#: prompt-template/codex/commit-history-section.md, verbatim.
 COMMIT_HISTORY_SECTION = """## Development History (Integral Context)
 
 Accumulated commits since loop start (oldest first):
@@ -823,8 +763,6 @@ drift from the mainline objective. Weight recent rounds more heavily but watch f
 trends in the full commit log.
 """
 
-#: prompt-template/codex/regular-review.md, verbatim but for naming the two agents by what
-#: this flow calls them.
 REGULAR_REVIEW = """# Code Review - Round {{CURRENT_ROUND}}
 
 ## Original Implementation Plan
@@ -932,7 +870,6 @@ deferrals or pending work allowed
 - The word COMPLETE on the last line will stop the builder.
 """
 
-#: prompt-template/codex/full-alignment-review.md, verbatim but for naming the two agents.
 FULL_ALIGNMENT_REVIEW = """# FULL GOAL ALIGNMENT CHECK - Round {{CURRENT_ROUND}}
 
 This is a **mandatory checkpoint** (at configurable intervals). You must conduct a \
@@ -1059,10 +996,6 @@ FULLY MET with no deferrals
 deferrals allowed
 """
 
-#: prompt-template/codex/code-review-phase.md is an audit note in the plugin: `codex review`
-#: takes no prompt, so the file only records that it ran. Here the reviewer is whichever
-#: agent was chosen, so the review has to be asked for -- and this asks for exactly what
-#: `codex review --base` produces, since the loop reads it the same way.
 CODE_REVIEW = """# Code Review Phase - Round {{REVIEW_ROUND}}
 
 The builder has finished the work for the plan in this repository, and the question here is \
@@ -1096,7 +1029,6 @@ If there is nothing that should be fixed before this ships, say so plainly and w
 marker anywhere in your answer: a review that finds something every time is not a review.
 """
 
-#: prompt-template/claude/next-round-prompt.md, verbatim but for naming the two agents.
 NEXT_ROUND = """Your work is not finished. Read and execute the below with ultrathink.
 
 ## Original Implementation Plan
@@ -1177,7 +1109,6 @@ Request" section in your summary (see below).
 - Only mainline gaps and blocking side issues should drive the next code changes
 """
 
-#: prompt-template/claude/drift-replan-prompt.md, verbatim but for naming the two agents.
 DRIFT_REPLAN = """Your work is not finished. Read and execute the below with ultrathink.
 
 ## Drift Recovery Mode
@@ -1251,7 +1182,6 @@ changing direction
 concrete blockers
 """
 
-#: prompt-template/claude/review-phase-prompt.md, verbatim but for naming the two agents.
 REVIEW_PHASE = """# Code Review Findings
 
 You are in the **Review Phase**. The reviewer has performed a code review and found issues \
@@ -1316,7 +1246,6 @@ Your summary should include:
 - The loop continues until no `[P0-9]` issues are found
 """
 
-#: The stop hook's `continue_review_loop_with_issues` BitLesson section.
 REVIEW_PHASE_BITLESSON = """
 ## BitLesson Selection (REQUIRED FOR EACH FIX TASK)
 
@@ -1329,7 +1258,6 @@ Before implementing each fix task, you MUST:
 Reference: @{{BITLESSON_FILE}}
 """
 
-#: The stop hook's `append_task_tag_routing_note`, verbatim.
 ROUND_ROUTING_NOTE = """
 ## Task Tag Routing Reminder
 
@@ -1339,7 +1267,6 @@ Follow the plan's per-task routing tags strictly:
 - Keep Goal Tracker Active Tasks columns `Tag` and `Owner` aligned with execution
 """
 
-#: prompt-template/claude/next-round-footer.md, verbatim.
 NEXT_ROUND_FOOTER = """
 ---
 
@@ -1351,7 +1278,6 @@ After completing the work, please:
 2. Write your work summary into @{{NEXT_SUMMARY_FILE}}
 """
 
-#: prompt-template/claude/post-alignment-action-items.md, verbatim.
 POST_ALIGNMENT_ACTION_ITEMS = """
 ### Post-Alignment Check Action Items
 
@@ -1364,18 +1290,15 @@ them.
 mainline progress.
 """
 
-#: prompt-template/claude/push-every-round-note.md, verbatim.
 PUSH_EVERY_ROUND_NOTE = """
 Note: Since `push_every_round` is enabled, you must push your commits to remote after each \
 round.
 """
 
-#: prompt-template/claude/open-question-notice.md, verbatim.
 OPEN_QUESTION_NOTICE = """**IMPORTANT**: The reviewer has found Open Question(s). You must use \
 `AskUserQuestion` to clarify those questions with the user first, before proceeding to resolve \
 any other findings."""
 
-#: prompt-template/claude/goal-tracker-update-request.md, verbatim.
 GOAL_TRACKER_UPDATE_REQUEST = """
 **Optional fallback**: if you could not safely update the mutable section of \
 `goal-tracker.md` directly, include this section in your summary:
@@ -1396,7 +1319,6 @@ GOAL_TRACKER_UPDATE_REQUEST = """
 The reviewer will review your request and reconcile the Goal Tracker if justified.
 """
 
-#: prompt-template/claude/finalize-phase-prompt.md, verbatim.
 FINALIZE = """# Finalize Phase
 
 The code review has passed. The implementation is complete and all acceptance criteria have \
@@ -1449,7 +1371,6 @@ Your summary should include:
 - Any notes about the refactoring decisions
 """
 
-#: prompt-template/claude/finalize-phase-skipped-prompt.md, verbatim.
 FINALIZE_SKIPPED = """# Finalize Phase (Review Skipped)
 
 **Warning**: Code review was skipped due to: {{REVIEW_SKIP_REASON}}
@@ -1500,8 +1421,6 @@ Your summary should include:
 - Any notes about manual verification performed
 """
 
-#: prompt-template/claude/methodology-analysis-prompt.md, verbatim but for the one thing that
-#: differs: the plugin files its issue against PolyArch/humanize, and so does this.
 METHODOLOGY_ANALYSIS = """# Methodology Analysis Phase
 
 The RLCR loop has reached its exit point.
