@@ -1,13 +1,3 @@
-"""What either agent is told while the idea is opened and the plan is written.
-
-`commands/gen-idea.md` and `commands/gen-plan.md` in PolyArch/humanize, and the two subagents
-they call, as the prompts their models are given: a slash command's body is what Claude reads,
-and an agent's body is what its model reads, so the port of a command is its body.
-
-Beside :mod:`prompts` rather than in it because the loop's own words are already two thousand
-lines, which is the length the loop itself refuses to let a round leave behind.
-"""
-
 from __future__ import annotations
 
 __all__ = [
@@ -24,11 +14,6 @@ __all__ = [
 ]
 
 
-# ======================================================================================
-# gen-idea -- commands/gen-idea.md, as the instructions Claude is given
-# ======================================================================================
-
-#: prompt-template/idea/gen-idea-template.md, verbatim.
 GEN_IDEA_TEMPLATE = """# <TITLE>
 
 ## Original Idea
@@ -62,9 +47,6 @@ GEN_IDEA_TEMPLATE = """# <TITLE>
 <SYNTHESIS_NOTES>
 """
 
-#: commands/gen-idea.md, phases 2 to 4. Phase 0 and phase 1 are the argument parsing and the
-#: IO validation `validate-gen-idea-io.sh` does, which the flow does in Python before this is
-#: sent -- so what would have been read out of that script's stdout is filled in here.
 GEN_IDEA = """# Generate Idea Draft from Loose Input
 
 Read and execute below with ultrathink.
@@ -270,12 +252,6 @@ The idea:
 """
 
 
-# ======================================================================================
-# gen-plan -- commands/gen-plan.md, as the phases each agent is given
-# ======================================================================================
-
-#: prompt-template/plan/gen-plan-template.md, verbatim, less its own note about the output
-#: file convention -- which is about the plugin's config loading rather than about the plan.
 GEN_PLAN_TEMPLATE = """# <Plan Title>
 
 ## Goal Description
@@ -389,9 +365,6 @@ Each task must include exactly one routing tag:
 - Use descriptive, domain-appropriate naming in code instead
 """
 
-#: agents/draft-relevance-checker.md, as the prompt its model is given. The plugin runs it as
-#: a haiku subagent of Claude's; here it is one turn of the reviewer, which is the agent that
-#: reads this repository without having watched the draft be written.
 RELEVANCE = """You are a specialized agent that determines whether a user's draft document is \
 relevant to the current repository.
 
@@ -424,7 +397,6 @@ The draft is at @{{INPUT_FILE}}. Its content:
 {{DRAFT_CONTENT}}
 """
 
-#: commands/gen-plan.md phase 3, which the plugin sends through `ask-codex.sh`.
 GEN_PLAN_ANALYSIS = """A coding agent is about to write an implementation plan for this \
 repository from the draft below, and you are the first planning pass over it -- before any \
 plan exists.
@@ -449,7 +421,6 @@ The draft is at @{{INPUT_FILE}}. Its content:
 {{DRAFT_CONTENT}}
 """
 
-#: commands/gen-plan.md phase 4, given to the builder with the reviewer's analysis.
 GEN_PLAN_CANDIDATE = """Read and execute below with ultrathink.
 
 ## Hard Constraint: No Coding During Plan Generation
@@ -513,7 +484,6 @@ The analysis:
 {{ANALYSIS}}
 """
 
-#: commands/gen-plan.md phase 5, the independent review pass, one round of it.
 GEN_PLAN_CONVERGENCE = """Review the complete candidate plan below for this repository. Judge \
 it against repository facts and the requested work, rather than against how a plan usually \
 looks. This is convergence round {{ROUND}} of at most {{TOTAL_ROUNDS}}.
@@ -539,7 +509,6 @@ The candidate plan (the immutable original-draft appendix is intentionally omitt
 
 {{PLAN_CONTENT}}"""
 
-#: commands/gen-plan.md phase 5 step 2, the builder's revision of its own plan.
 GEN_PLAN_REVISION = """Revise the plan at {{OUTPUT_FILE}} against the review below, and answer \
 with the path you wrote and nothing else.
 
@@ -558,8 +527,6 @@ Review:
 {{REVIEW}}
 """
 
-#: commands/gen-plan.md phases 6 and 7 -- the consolidation of what only a person can settle,
-#: and the final plan.
 GEN_PLAN_FINAL = """Deeply think and finish the plan at {{OUTPUT_FILE}} now.
 
 ## Consolidate Pending User Decisions
@@ -604,7 +571,6 @@ is.
 Answer with the path you wrote and nothing else: the plan will be read from the file.
 """
 
-#: commands/gen-plan.md phase 8, the translated variant.
 GEN_PLAN_TRANSLATE = """Write a full translation of {{OUTPUT_FILE}} into {{LANGUAGE}}, to \
 {{VARIANT_FILE}}.
 

@@ -1,10 +1,3 @@
-"""What the builder is told instead of stopping, one message per gate that refused it.
-
-`prompt-template/block/` in PolyArch/humanize, verbatim: these are what its hooks answer with
-when they refuse a stop or a tool, and what the agent reads is the whole of the difference a
-gate makes. A message paraphrased here would be a gate that behaves differently.
-"""
-
 from __future__ import annotations
 
 __all__ = [
@@ -368,10 +361,6 @@ BITLESSON_DELTA_MISSING_IDS = """# BitLesson Delta Missing Lesson IDs
 BITLESSON_FILE_MISSING = """# BitLesson File Missing
 
 Summary declares `Action: {{ACTION}}`, but `{{BITLESSON_FILE}}` does not exist."""
-
-# ------------------------------------------------------------------------------------
-# What the builder may not do while the loop runs -- the plugin's tool validators.
-# ------------------------------------------------------------------------------------
 
 STATE_FILE_MODIFICATION = """# State File Modification Blocked
 
