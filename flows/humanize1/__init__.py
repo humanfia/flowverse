@@ -72,6 +72,14 @@ PLAN = "docs/plan.md"
 
 
 class Relevance(BaseModel):
+    """Whether a draft is about this repository at all, which `gen-plan` will not start without.
+
+    One of the four questions this flow puts to an agent rather than sets it to work on. Each
+    is a model like this one: the fields are the whole of what is being asked, the backend is
+    held to them, and the flow reads a field rather than looking for a word at the start of a
+    paragraph.
+    """
+
     model_config = {"extra": "forbid"}
 
     relevant: bool = Field(
@@ -82,6 +90,8 @@ class Relevance(BaseModel):
 
 
 class Convergence(BaseModel):
+    """One review round, retaining the original flow's public answer shape."""
+
     model_config = {"extra": "forbid"}
 
     converged: bool = Field(
@@ -152,6 +162,8 @@ class Convergence(BaseModel):
 
 
 class Compliance(BaseModel):
+    """The two things a plan is checked for before a loop is started to build it."""
+
     model_config = {"extra": "forbid"}
 
     relevant: bool = Field(
@@ -169,6 +181,8 @@ class Compliance(BaseModel):
 
 
 class Question(BaseModel):
+    """One of the plan understanding quiz's questions, with its four options."""
+
     model_config = {"extra": "forbid"}
 
     question: str = Field(description="The question itself.")
@@ -179,6 +193,8 @@ class Question(BaseModel):
 
 
 class Quiz(BaseModel):
+    """The plan understanding quiz, which is advisory and never a gate."""
+
     model_config = {"extra": "forbid"}
 
     questions: list[Question] = Field(
@@ -191,6 +207,8 @@ class Quiz(BaseModel):
 
 
 class Idea(BaseModel):
+    """Every flag `gen-idea` takes, under the name the plugin gives it."""
+
     model_config = {"frozen": True}
 
     n: int = Field(
@@ -203,6 +221,13 @@ class Idea(BaseModel):
 
 
 class Plan(BaseModel):
+    """Every flag `gen-plan` takes, under the name the plugin gives it.
+
+    `--input` is a field here where the three phases were one flow it was not: the draft is
+    what `gen-idea` left behind, and naming it is how a plan is written from a draft somebody
+    read and edited first.
+    """
+
     model_config = {"frozen": True}
 
     input: str = Field(
@@ -243,6 +268,17 @@ class Plan(BaseModel):
 
 
 class Rlcr(BaseModel):
+    """Every flag the loop takes, under the name the plugin gives it.
+
+    What the plugin reads from `.humanize/config.json` is here too, since a config file and a
+    flag are the same setting arrived at two ways -- and this is the one way.
+
+    What the plugin says with a model name is said here by choosing an agent: `codex_model`,
+    `codex_effort`, `bitlesson_model` and `provider_mode` are all "which model does this
+    half", which is `/agents`. `--allow-empty-bitlesson-none` and
+    `--require-bitlesson-entry-for-none` are one switch written twice.
+    """
+
     model_config = {"frozen": True}
 
     plan_file: str = Field(
