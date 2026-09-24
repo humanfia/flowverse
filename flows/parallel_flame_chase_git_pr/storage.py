@@ -1,5 +1,3 @@
-"""Transactional PR, evaluation, knowledge, and telemetry storage."""
-
 from __future__ import annotations
 
 import datetime as dt
@@ -29,13 +27,10 @@ EXPERIMENT_OUTCOMES = {
 
 
 def re_split_words(value: str) -> list[str]:
-    """Normalize free-form intent text for deterministic lexical retrieval."""
     return re.findall(r"[\w.-]+", value.casefold())
 
 
 class _ClosingConnection(sqlite3.Connection):
-    """Commit or roll back a context-managed transaction, then close its handle."""
-
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
@@ -49,23 +44,19 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 def timestamp() -> str:
-    """Return a stable UTC timestamp without depending on flow internals."""
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def canonical_json(value: object) -> str:
-    """Serialize values for stable IDs and durable JSON columns."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def content_id(prefix: str, value: object) -> str:
-    """Return one readable content-addressed identifier."""
     digest = hashlib.sha256(canonical_json(value).encode()).hexdigest()
     return f"{prefix}{digest[:24]}"
 
 
 def append_event(path: Path, value: object) -> None:
-    """Append one compact event using a single O_APPEND write."""
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (canonical_json(value) + "\n").encode()
     if len(encoded) > 256 * 1024:
@@ -83,14 +74,11 @@ def append_event(path: Path, value: object) -> None:
 
 
 class CoordinationStore:
-    """SQLite is the live truth; JSONL is the immutable audit projection."""
-
     def __init__(self, database: Path, events: Path) -> None:
         self.database = database
         self.events = events
 
     def connect(self, *, readonly: bool = False) -> sqlite3.Connection:
-        """Open one short transaction or query connection."""
         self.database.parent.mkdir(parents=True, exist_ok=True)
         if self.database.is_symlink():
             raise RuntimeError("coordination database cannot be a symbolic link")
@@ -122,7 +110,6 @@ class CoordinationStore:
         allowed_paths: Sequence[str],
         trusted_evaluator_command: Sequence[str] = (),
     ) -> None:
-        """Create the complete run-local schema once and validate resume identity."""
         with self.connect() as connection:
             connection.executescript(
                 """
@@ -275,7 +262,6 @@ class CoordinationStore:
             self.events.touch()
 
     def meta(self, key: str) -> object:
-        """Read one frozen run setting."""
         with self.connect(readonly=True) as connection:
             row = connection.execute(
                 "SELECT value_json FROM meta WHERE key = ?", (key,)
@@ -302,7 +288,6 @@ class CoordinationStore:
     def record_telemetry(
         self, kind: str, payload: dict[str, object], *, lane: str | None = None
     ) -> None:
-        """Record one event in both durable projections."""
         with self.connect() as connection:
             event = self._event(connection, kind, lane=lane, payload=payload)
         append_event(self.events, event)
@@ -317,7 +302,6 @@ class CoordinationStore:
         head_sha: str,
         base_sha: str,
     ) -> str:
-        """Open one draft PR at the pushed branch head."""
         stamp = timestamp()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -354,7 +338,6 @@ class CoordinationStore:
         return pr_id
 
     def pr(self, pr_id: str) -> dict[str, object]:
-        """Return one PR record."""
         with self.connect(readonly=True) as connection:
             row = connection.execute(
                 "SELECT * FROM pull_requests WHERE id = ?", (pr_id,)
@@ -364,7 +347,6 @@ class CoordinationStore:
         return dict(row)
 
     def prs(self, *, status: str | None = None) -> list[dict[str, object]]:
-        """List PRs in creation order."""
         query = "SELECT * FROM pull_requests"
         values: tuple[object, ...] = ()
         if status is not None:
@@ -377,7 +359,6 @@ class CoordinationStore:
             return [dict(row) for row in connection.execute(query, values)]
 
     def add_receipt(self, receipt: dict[str, object]) -> str:
-        """Insert one immutable evaluation receipt."""
         receipt_id = cast("str", receipt["id"])
         fields = (
             "id",
@@ -425,7 +406,6 @@ class CoordinationStore:
         return receipt_id
 
     def receipts_after(self, rowid: int) -> tuple[list[dict[str, object]], int]:
-        """Read newly inserted receipts for single-writer notification projection."""
         with self.connect(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT rowid AS receipt_rowid, * FROM receipts WHERE rowid>? ORDER BY rowid",
@@ -437,7 +417,6 @@ class CoordinationStore:
         )
 
     def receipt(self, receipt_id: str) -> dict[str, object]:
-        """Return one immutable evaluation receipt."""
         with self.connect(readonly=True) as connection:
             row = connection.execute(
                 "SELECT * FROM receipts WHERE id = ?", (receipt_id,)
@@ -449,7 +428,6 @@ class CoordinationStore:
     def ready_pr(
         self, *, pr_id: str, lane: str, head_sha: str, receipt_id: str
     ) -> None:
-        """Freeze a draft head, superseding an older queued head from this lane."""
         stamp = timestamp()
         events: list[dict[str, object]] = []
         with self.connect() as connection:
@@ -531,7 +509,6 @@ class CoordinationStore:
             append_event(self.events, event)
 
     def active_review(self) -> dict[str, object] | None:
-        """Return the unique active FIFO review, if any."""
         with self.connect(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM pull_requests WHERE status='reviewing' ORDER BY ready_at, id"
@@ -541,7 +518,6 @@ class CoordinationStore:
         return dict(rows[0]) if rows else None
 
     def activate_next_pr(self) -> dict[str, object] | None:
-        """Move the oldest ready PR into review when no review is active."""
         with self.connect() as connection:
             if connection.execute(
                 "SELECT 1 FROM pull_requests WHERE status='reviewing'"
@@ -572,7 +548,6 @@ class CoordinationStore:
         return updated
 
     def activate_pr(self, pr_id: str) -> dict[str, object] | None:
-        """Atomically activate one runtime-selected ready PR."""
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if connection.execute(
@@ -601,7 +576,6 @@ class CoordinationStore:
         return updated
 
     def reject_pr(self, *, pr_id: str, reason: str) -> dict[str, object]:
-        """Close the active PR and release the author's ready slot."""
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM pull_requests WHERE id = ?", (pr_id,)
@@ -628,7 +602,6 @@ class CoordinationStore:
         return updated
 
     def staging_receipts(self, pr_id: str, commit_sha: str) -> list[dict[str, object]]:
-        """Return successful staging receipts for one exact review commit."""
         with self.connect(readonly=True) as connection:
             rows = connection.execute(
                 """
@@ -643,7 +616,6 @@ class CoordinationStore:
     def qualifying_receipts(
         self, pr_id: str, commit_sha: str
     ) -> list[dict[str, object]]:
-        """Return staging evidence or the frozen head's trusted provisional receipt."""
         staging = self.staging_receipts(pr_id, commit_sha)
         if staging:
             return staging
@@ -668,7 +640,6 @@ class CoordinationStore:
         merge_sha: str,
         comparison: dict[str, object],
     ) -> dict[str, object]:
-        """Close one observed main merge and append its official ledger row."""
         receipts = self.qualifying_receipts(pr_id, merge_sha)
         if not receipts:
             raise ValueError("official merge has no qualifying evaluation receipt")
@@ -725,7 +696,6 @@ class CoordinationStore:
         return updated
 
     def enqueue_report(self, report: dict[str, object]) -> None:
-        """Retain a legacy immutable report-queue record for state compatibility."""
         report_id = report.get("report_id")
         if not isinstance(report_id, str):
             raise TypeError("the report queue requires a report_id")
@@ -740,7 +710,6 @@ class CoordinationStore:
             )
 
     def pending_reports(self, limit: int = 6) -> list[dict[str, object]]:
-        """Return pending records from the legacy report queue."""
         with self.connect(readonly=True) as connection:
             rows = connection.execute(
                 """
@@ -755,7 +724,6 @@ class CoordinationStore:
         ]
 
     def mark_reports_reviewed(self, report_ids: Sequence[str]) -> None:
-        """Acknowledge an exact batch from the legacy report queue."""
         if not report_ids:
             return
         with self.connect() as connection:
@@ -768,7 +736,6 @@ class CoordinationStore:
             )
 
     def add_fact(self, proposal: dict[str, object]) -> dict[str, object]:
-        """Insert one evidence-backed atomic fact and dependency edges."""
         identity = {
             key: proposal.get(key)
             for key in ("statement", "proof", "scope", "evidence", "dependencies")
@@ -888,7 +855,6 @@ class CoordinationStore:
         return self.fact(fact_id, include_inactive=True)
 
     def mark_fact_stale(self, fact_id: str) -> set[str]:
-        """Quarantine one fact and its currently visible dependents."""
         affected: set[str] = set()
         pending = [fact_id]
         stamp = timestamp()
@@ -931,7 +897,6 @@ class CoordinationStore:
     def fact(
         self, fact_id: str, *, include_inactive: bool = False
     ) -> dict[str, object]:
-        """Read one fact, hiding non-verified truth by default."""
         query = "SELECT * FROM facts WHERE id=?"
         values: tuple[object, ...] = (fact_id,)
         if not include_inactive:
@@ -943,7 +908,6 @@ class CoordinationStore:
         return self._decode_knowledge_row(dict(row))
 
     def revoke_fact(self, fact_id: str) -> set[str]:
-        """Revoke one fact and every verified dependent transitively."""
         revoked: set[str] = set()
         pending = [fact_id]
         stamp = timestamp()
@@ -993,7 +957,6 @@ class CoordinationStore:
         pr_id: str | None,
         commit_sha: str | None,
     ) -> dict[str, object]:
-        """Publish an immediately visible, machine-evidenced success skeleton."""
         identity = {
             "title": title,
             "summary": summary,
@@ -1039,7 +1002,6 @@ class CoordinationStore:
         return self.experience(experience_id)
 
     def compact_experiences(self, *, limit: int = 12) -> list[str]:
-        """Keep only the newest compact success cards active in the hot index."""
         if limit < 1:
             raise ValueError("experience limit must be positive")
         with self.connect() as connection:
@@ -1074,7 +1036,6 @@ class CoordinationStore:
         why_it_worked: str,
         limitations: Sequence[str],
     ) -> None:
-        """Apply semantic detail without reclassifying experience as fact."""
         with self.connect() as connection:
             cursor = connection.execute(
                 """
@@ -1093,7 +1054,6 @@ class CoordinationStore:
                 raise KeyError(experience_id)
 
     def experience(self, experience_id: str) -> dict[str, object]:
-        """Read one accepted experience."""
         with self.connect(readonly=True) as connection:
             row = connection.execute(
                 "SELECT * FROM experiences WHERE id=? AND status='accepted'",
@@ -1104,7 +1064,6 @@ class CoordinationStore:
         return self._decode_knowledge_row(dict(row))
 
     def pending_experiences(self, limit: int = 20) -> list[dict[str, object]]:
-        """Return accepted success skeletons awaiting semantic enrichment."""
         with self.connect(readonly=True) as connection:
             rows = connection.execute(
                 """
@@ -1134,7 +1093,6 @@ class CoordinationStore:
     def search_knowledge(
         self, query: str, *, limit: int = 20
     ) -> list[dict[str, object]]:
-        """Deterministically search visible facts and experiences."""
         terms = [term for term in query.casefold().split() if term]
         with self.connect(readonly=True) as connection:
             facts = [
@@ -1172,7 +1130,6 @@ class CoordinationStore:
         return [record for _score, _kind, record in ranked[:limit]]
 
     def knowledge_index(self) -> dict[str, object]:
-        """Return the complete visible run-local knowledge view."""
         visible = self.search_knowledge("", limit=10_000)
         return {
             "version": timestamp(),
@@ -1201,7 +1158,6 @@ class CoordinationStore:
         hypothesis: str,
         parameters: object,
     ) -> dict[str, object]:
-        """Open one soft lane-local experiment lease without suppressing other lanes."""
         stamp = timestamp()
         identity = {
             "lane": lane,
@@ -1272,7 +1228,6 @@ class CoordinationStore:
         reopen_if: Sequence[str],
         next_frontier: str,
     ) -> dict[str, object]:
-        """Close one active record with explicit bounded evidence and reopening scope."""
         if outcome not in EXPERIMENT_OUTCOMES - {"active"}:
             raise ValueError(f"invalid experiment outcome: {outcome}")
         if coverage_count < 0:
@@ -1322,7 +1277,6 @@ class CoordinationStore:
         return self.experiment(experiment_id)
 
     def experiment(self, experiment_id: str) -> dict[str, object]:
-        """Return one experiment-memory record."""
         with self.connect(readonly=True) as connection:
             row = connection.execute(
                 "SELECT * FROM experiments WHERE id=?", (experiment_id,)
@@ -1332,7 +1286,6 @@ class CoordinationStore:
         return self._decode_experiment(dict(row))
 
     def active_experiment(self, lane: str) -> dict[str, object] | None:
-        """Return a lane's unique active soft lease."""
         with self.connect(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM experiments WHERE lane=? AND outcome='active'",
@@ -1343,7 +1296,6 @@ class CoordinationStore:
         return self._decode_experiment(dict(rows[0])) if rows else None
 
     def attach_experiment_report(self, lane: str, report_id: str) -> str | None:
-        """Link a just-published report to the lane's most recently touched record."""
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -1378,7 +1330,6 @@ class CoordinationStore:
         parameters: object,
         limit: int = 3,
     ) -> dict[str, object]:
-        """Classify an intent and return only its most relevant run-local records."""
         if not 1 <= limit <= 20:
             raise ValueError("experiment result limit must be between 1 and 20")
         with self.connect(readonly=True) as connection:
@@ -1446,7 +1397,6 @@ class CoordinationStore:
         }
 
     def experiment_frontier(self) -> dict[str, object]:
-        """Return a tiny prompt-safe board; terminal details stay on demand."""
         with self.connect(readonly=True) as connection:
             counts = {
                 row["outcome"]: int(row["count"])
@@ -1466,7 +1416,6 @@ class CoordinationStore:
         return {"counts": counts, "active": active}
 
     def ledger(self) -> list[dict[str, object]]:
-        """Return the immutable official-main history."""
         with self.connect(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM official_ledger ORDER BY sequence"
@@ -1480,7 +1429,6 @@ class CoordinationStore:
         return decoded
 
     def telemetry(self) -> Iterable[dict[str, object]]:
-        """Yield event-level research telemetry in order."""
         with self.connect(readonly=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM telemetry ORDER BY sequence"

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Run-local CLI for PRs, evaluation receipts, artifacts, and knowledge."""
 
 from __future__ import annotations
 
@@ -16,9 +15,9 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-try:  # The runtime copies this file beside the standalone storage module.
+try:
     from pfc_storage import CoordinationStore, canonical_json, content_id, timestamp
-except ModuleNotFoundError:  # pragma: no cover - used from the source checkout
+except ModuleNotFoundError:  # pragma: no cover
     from parallel_flame_chase_git_pr.storage import (
         CoordinationStore,
         canonical_json,
@@ -47,7 +46,6 @@ CYCLES_PATTERN = re.compile(r"(?im)^\s*CYCLES\s*:\s*([0-9]+)\s*$")
 
 
 def run_git(*arguments: str, cwd: Path | None = None, check: bool = True) -> str:
-    """Run Git without a shell and return text output."""
     result = subprocess.run(
         ["git", *arguments],
         cwd=cwd,
@@ -59,7 +57,6 @@ def run_git(*arguments: str, cwd: Path | None = None, check: bool = True) -> str
 
 
 def git_config(name: str, cwd: Path) -> str | None:
-    """Read an optional repository-local setting."""
     result = subprocess.run(
         ["git", "config", "--get", name],
         cwd=cwd,
@@ -72,7 +69,6 @@ def git_config(name: str, cwd: Path) -> str | None:
 
 
 def sha256_file(path: Path) -> str:
-    """Hash one artifact without loading it into memory."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -81,7 +77,6 @@ def sha256_file(path: Path) -> str:
 
 
 def atomic_copy(source: Path, destination: Path) -> None:
-    """Copy one file into an immutable content-addressed location."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         if sha256_file(destination) != sha256_file(source):
@@ -100,8 +95,6 @@ def atomic_copy(source: Path, destination: Path) -> None:
 
 
 class Context:
-    """Resolved identity and paths for one invocation."""
-
     def __init__(self, arguments: argparse.Namespace) -> None:
         self.cwd = Path.cwd().resolve()
         configured_root = git_config("pfc.run-root", self.cwd)
@@ -143,7 +136,6 @@ def repository_root(context: Context) -> Path:
 
 
 def clean_head(repository: Path) -> tuple[str, str]:
-    """Require a commit-backed, completely clean worktree."""
     status = run_git("status", "--porcelain", "--untracked-files=all", cwd=repository)
     if status:
         raise ValueError("evaluation and PR transitions require a clean worktree")
@@ -154,7 +146,6 @@ def clean_head(repository: Path) -> tuple[str, str]:
 
 
 def workspace_identity(root: Path, patterns: list[str]) -> str:
-    """Hash only frozen task paths for a non-Git Experiment Memory lane."""
     entries: list[tuple[str, str]] = []
     for path in sorted(root.rglob("*")):
         if path.is_symlink() or not path.is_file():
@@ -166,7 +157,6 @@ def workspace_identity(root: Path, patterns: list[str]) -> str:
 
 
 def current_base_ref(context: Context) -> str:
-    """Resolve a Git commit or content identity without introducing Git inheritance."""
     if bool(context.store.meta("git_pr_enabled")):
         return clean_head(repository_root(context))[0]
     return workspace_identity(context.cwd, list(context.store.meta("allowed_paths")))
@@ -182,7 +172,6 @@ def environment_hash() -> str:
 
 
 def command_evaluate(context: Context, arguments: argparse.Namespace) -> int:
-    """Record an external evaluator result against one clean commit/tree."""
     if not (context.is_lane or context.is_orchestrateor):
         raise ValueError("only lanes and the orchestrateor may record evaluations")
     if context.is_orchestrateor and not arguments.pr:
@@ -360,7 +349,6 @@ def validate_pr_paths(
 def verify_receipt_artifacts(
     context: Context, repository: Path, receipt_id: str, head_sha: str
 ) -> None:
-    """Recheck the immutable provisional evidence before freezing a head."""
     receipt = context.store.receipt(receipt_id)
     if receipt["commit_sha"] != head_sha:
         raise ValueError("receipt is not bound to the current head")
