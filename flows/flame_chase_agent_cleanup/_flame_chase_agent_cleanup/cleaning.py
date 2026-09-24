@@ -32,6 +32,8 @@ PLACES_SHOWN = 8
 
 
 class Cleaned(BaseModel):
+    """The cleaner's account of an epoch; every field required, as a shape must be."""
+
     deleted: list[str] = Field(description="what was deleted, item by item, briefly")
     kept: list[str] = Field(
         description="what was kept as essence, item by item, briefly"
