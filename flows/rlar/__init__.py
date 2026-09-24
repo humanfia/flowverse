@@ -13,6 +13,12 @@ class Agents(NamedTuple):
 
 
 class Review(BaseModel):
+    """What one round's review comes to: whether it is over, and what the actor is told.
+
+    The fields are what the reviewer is asked for -- the descriptions here are the whole of
+    the instruction, since they are what the backend is given as the shape to answer in.
+    """
+
     model_config = {"extra": "forbid"}
 
     done: bool = Field(
