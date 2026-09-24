@@ -1,12 +1,3 @@
-"""The compiler flow, driven by scripted stand-ins: every gate shown to gate.
-
-The writer is a stub that answers a canned spec and then writes a scripted source tree per
-attempt; the critic answers canned reviews; the person is the real HumanAgent, absent by
-default and answering only where a test says. What is asserted is the compile around them:
-a good draft lands whole, a refused one is handed back word for word, an ask nothing serves
-is refused before anything is written, and a name already taken is not written over.
-"""
-
 from __future__ import annotations
 
 import json
@@ -62,7 +53,6 @@ def spec(name: str = "pair_loop", needs: tuple[str, ...] = ()) -> dict[str, obje
     }
 
 
-#: A draft that passes every gate: a verdict exit with a round cap beside it.
 GOOD = {
     "pair_loop/__init__.py": '''
     """Two agents take turns until a reviewer says it is done.
@@ -116,8 +106,6 @@ GOOD = {
     ''',
 }
 
-#: A first draft the checker warns about: the compiler refuses an unbounded loop even though
-#: the run allowance would eventually stop its agent turn.
 DEAD = {
     "pair_loop/__init__.py": '''
     """A loop nothing can end."""
@@ -132,7 +120,6 @@ DEAD = {
     ''',
 }
 
-#: A draft the static reading trusts and the stubs catch: its one exit can never be taken.
 STALLING = {
     "pair_loop/__init__.py": '''
     """A loop whose bound is no bound at all."""
@@ -151,8 +138,6 @@ STALLING = {
 
 
 class WriterSession(SessionBase):
-    """Answers the canned spec, then writes the next scripted tree into its cwd."""
-
     shapes: ClassVar[bool] = True
 
     def _stream(
@@ -187,10 +172,8 @@ class WriterAgent(AgentBase):
         trees: list[Mapping[str, str]],
     ) -> None:
         super().__init__(CONFIG, name="writer")
-        #: The spec answers, in order; the last is answered again where more are asked.
         self.blueprints = list(spec_) if isinstance(spec_, list) else [spec_]
         self.trees = list(trees)
-        #: Every write or repair prompt, in order -- what the gates handed back.
         self.asked: list[str] = []
 
     def new(self, cwd: str | os.PathLike[str] | None = None) -> WriterSession:
@@ -198,8 +181,6 @@ class WriterAgent(AgentBase):
 
 
 class CriticSession(SessionBase):
-    """Answers the next canned review, approving where the script ran out."""
-
     shapes: ClassVar[bool] = True
 
     def _stream(
@@ -238,7 +219,6 @@ def compiled(
     config: aot.Config | None = None,
     task: str = "two agents take turns until a reviewer says it is done",
 ) -> WriterAgent:
-    """One compile, in a temporary working directory, and the writer to read back."""
     monkeypatch.chdir(tmp_path)
     writer = WriterAgent(spec_ or spec(), trees if trees is not None else [GOOD])
     agents = aot.Compiling(
@@ -256,10 +236,8 @@ def test_a_good_draft_lands_whole(
     writer = compiled(tmp_path, monkeypatch)
     landed = tmp_path / ".humanize" / "flows" / "pair_loop"
     assert (landed / "__init__.py").is_file()
-    # What landed is a flow: it declares its agents, and reads clean.
     assert drives(landed / "__init__.py") == ("actor", "reviewer")
     assert checked(landed) == ()
-    # One write turn was enough, and the report says what to run.
     assert len(writer.asked) == 1
     out = capsys.readouterr().out
     assert "compiled: pair_loop" in out
@@ -273,7 +251,6 @@ def test_a_refused_draft_is_handed_back_word_for_word(
     writer = compiled(tmp_path, monkeypatch, trees=[DEAD, GOOD])
     assert (tmp_path / ".humanize" / "flows" / "pair_loop" / "__init__.py").is_file()
     assert len(writer.asked) == 2
-    # The second prompt is a repair, carrying the checker's own finding.
     assert "unbounded-loop" in writer.asked[1]
     assert "nothing inside this loop ends it" in writer.asked[1]
 
@@ -312,7 +289,6 @@ def test_an_ask_nothing_serves_is_refused_before_anything_is_written(
         monkeypatch,
         spec_=spec(needs=("interrupting a turn mid-stream",)),
     )
-    # Nobody at the prompt to narrow it: the compile stops, and nothing was written.
     assert not (tmp_path / ".humanize").exists()
     assert writer.asked == []
     out = capsys.readouterr().out
@@ -327,8 +303,6 @@ def test_a_mis_worded_need_is_the_writers_to_restate(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # The first spec claims an ordinary ability as a need; the writer's own round -- not
-    # the person's -- restates it, and the compile goes on to land.
     writer = compiled(
         tmp_path,
         monkeypatch,
@@ -348,7 +322,6 @@ def test_a_name_already_taken_is_not_written_over(
     kept.mkdir(parents=True)
     (kept / "__init__.py").write_text('"""Somebody\'s own flow."""\n')
     compiled(tmp_path, monkeypatch)
-    # The flow that was there is exactly the flow that is there.
     assert (kept / "__init__.py").read_text() == '"""Somebody\'s own flow."""\n'
     assert "already a flow called 'pair_loop'" in capsys.readouterr().out
 
@@ -365,7 +338,6 @@ def test_a_person_may_take_the_draft_the_repairs_ran_out_on(
         human=person,
         config=aot.Config(repairs=0, seconds=30.0),
     )
-    # The draft lands as it stands, unbounded loop and all: the person said so.
     landed = tmp_path / ".humanize" / "flows" / "pair_loop"
     assert (landed / "__init__.py").is_file()
     assert [one.code for one in checked(landed)] == ["unbounded-loop"]
@@ -373,7 +345,6 @@ def test_a_person_may_take_the_draft_the_repairs_ran_out_on(
 
 
 def test_the_compiler_passes_its_own_gates() -> None:
-    """Dogfood: the flow that holds drafts to the contract holds to it itself."""
     assert checked(FLOW) == ()
 
 
