@@ -1,5 +1,3 @@
-"""Where a run keeps what must not live in the repository it cleans."""
-
 from __future__ import annotations
 
 import datetime as dt
@@ -13,7 +11,6 @@ from hmz.flows import home
 
 
 def workspace_key(source: Path) -> str:
-    """A readable, collision-safe directory name for one working repository."""
     plain = "".join(
         character if character.isalnum() else "-" for character in str(source)
     )
@@ -23,7 +20,6 @@ def workspace_key(source: Path) -> str:
 
 
 def managed_parent(flow: str, source: Path) -> Path:
-    """The directory under HUMANIZE_HOME that holds this workspace's runs."""
     parent = (home() / flow / workspace_key(source)).resolve()
     if parent.is_relative_to(source):
         raise RuntimeError("HUMANIZE_HOME must sit outside the cleaned repository")
@@ -31,7 +27,6 @@ def managed_parent(flow: str, source: Path) -> Path:
 
 
 def open_store(flow: str, source: Path, state: dict[str, Any]) -> tuple[Path, bool]:
-    """Reopen the run root a resumed run recorded, or create a fresh one."""
     parent = managed_parent(flow, source)
     run_id = state.get("run_id")
     run_root = state.get("run_root")

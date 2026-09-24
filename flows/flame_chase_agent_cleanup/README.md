@@ -22,5 +22,5 @@ budget: {tokens: 10, hours: 12}
 Each cleaning epoch replaces the repository's git history with one commit. The replaced
 history is archived in the workspace's `history.git`, never deleted, and files over
 `max_tracked_file_mb` (10) are never committed. See
-[`_workspace_cleanup`](../_workspace_cleanup/README.md) for every setting, what an epoch
+[`_flame_chase_agent_cleanup`](_flame_chase_agent_cleanup/README.md) for every setting, what an epoch
 does, how to read the archived history, and where the run keeps its data.

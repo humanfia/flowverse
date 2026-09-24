@@ -1,11 +1,3 @@
-"""Deterministic tree work: listing, manifest, measures, revert point, git, check.
-
-Every file the flow reasons about is a file git would add: `.gitignore` is honoured, so
-ignored build outputs, virtual environments and secrets are never counted as strays, never
-copied into a revert point and never committed. Nor is a file over the tracking limit, or
-a nested repository: those stay on disk, and out of git.
-"""
-
 from __future__ import annotations
 
 import os
@@ -34,8 +26,6 @@ C_SUFFIXES = {
 }
 AUTHOR_NAME = "cleaner"
 AUTHOR_EMAIL = "cleaner@flame.chase"
-# A neutral identity, no hooks and no signing: the user's git config must not decide
-# whether a cleaning can commit.
 _COMMITTING = (
     "-c",
     f"user.name={AUTHOR_NAME}",
@@ -53,16 +43,12 @@ MIB = 1024**2
 
 
 class Measure(NamedTuple):
-    """What the flow counts for itself after a cleaning."""
-
     strays: list[str]
     notes_lines: int
     comment_count: int
 
 
 class Footprint(NamedTuple):
-    """What one revert point copies: the listed tree plus .git."""
-
     files: int
     bytes: int
 
@@ -88,18 +74,10 @@ def _git(
             timeout=GIT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        # A git that cannot run or will not finish is a failed step, not a crash.
         return subprocess.CompletedProcess(["git", *args], -1, "", str(error))
 
 
 def listed(root: Path) -> list[str]:
-    """Every entry git would add under root, and every one root's repository tracks.
-
-    The untracked side is read against an empty scratch repository, so it does not
-    depend on what the agents did to the repository's own index; a file the repository
-    tracks counts whatever `.gitignore` says of it. Symlinks are listed, never entered;
-    a nested repository is listed once, as its directory.
-    """
     with tempfile.TemporaryDirectory(prefix="cleanup-listing-") as scratch:
         index = Path(scratch) / "index.git"
         made = _git("init", "--quiet", "--bare", str(index))
@@ -128,7 +106,6 @@ def listed(root: Path) -> list[str]:
 
 
 def footprint(root: Path) -> Footprint:
-    """How many files and bytes a revert point of this tree copies."""
     files = size = 0
     for rel in listed(root):
         path = root / rel
@@ -155,12 +132,10 @@ def _size(path: Path) -> int:
 
 
 def manifest_path(store: Path) -> Path:
-    """The task-file manifest inside the Humanize-managed run root."""
     return store / "manifest.txt"
 
 
 def ensure_manifest(root: Path, store: Path) -> set[str]:
-    """Record the task-provided files once inside the managed run root."""
     path = manifest_path(store)
     if path.is_symlink():
         raise RuntimeError(f"manifest was replaced by a symlink: {path}")
@@ -170,11 +145,7 @@ def ensure_manifest(root: Path, store: Path) -> set[str]:
     return {line.strip() for line in kept if line.strip()}
 
 
-# -- measures ----------------------------------------------------------------------
-
-
 def _py_comment_lines(text: str) -> int:
-    """Lines carrying a '#' comment, string literals tracked."""
     count = 0
     quote = ""
     commented = False
@@ -218,7 +189,6 @@ def _py_comment_lines(text: str) -> int:
 
 
 def _c_comment_lines(text: str) -> int:
-    """Lines touched by '//' or '/* ... */', string and character literals tracked."""
     count = 0
     quote = ""
     in_block = False
@@ -291,14 +261,6 @@ def under_work_path(relative: str, work_paths: tuple[str, ...]) -> bool:
 
 
 def measure(root: Path, manifest: set[str], work_paths: tuple[str, ...]) -> Measure:
-    """Strays, NEXT.md's length and work-path comment lines, over the listed tree.
-
-    A stray is an entry neither in the manifest nor under a work path: a task may
-    legitimately add files under its work paths, and no rule can tell those from junk,
-    so their contents remain the cleaner's judgment alone. A real root NEXT.md is the
-    one sanctioned flow output; a symlink there counts as stray. A .gitignore never is:
-    what it ignores is what the rest of the epoch leaves alone.
-    """
     entries = listed(root)
     notes = root / NOTES
     strays = [
@@ -318,7 +280,6 @@ def measure(root: Path, manifest: set[str], work_paths: tuple[str, ...]) -> Meas
 
 
 def _notes_lines(root: Path) -> int:
-    """How many lines NEXT.md holds; 0 when absent or a symlink (never followed)."""
     path = root / NOTES
     if path.is_symlink() or not path.is_file():
         return 0
@@ -329,7 +290,6 @@ def _notes_lines(root: Path) -> int:
 
 
 def truncate_notes(root: Path, limit: int) -> None:
-    """Cut NEXT.md to its cap mechanically; a symlink is never followed or written."""
     path = root / NOTES
     if path.is_symlink() or not path.is_file():
         return
@@ -342,7 +302,6 @@ def truncate_notes(root: Path, limit: int) -> None:
 
 
 def delete_strays(root: Path, strays: list[str]) -> None:
-    """Unlink stray files and symlinks, links never followed; directories stay."""
     for rel in strays:
         path = root / rel
         try:
@@ -351,9 +310,6 @@ def delete_strays(root: Path, strays: list[str]) -> None:
             path.unlink(missing_ok=True)
         except OSError:
             print(f"could not delete stray {rel}")
-
-
-# -- the revert point --------------------------------------------------------------
 
 
 def _writable(path: str | Path) -> None:
@@ -373,7 +329,6 @@ def _removed(path: Path) -> None:
 
 
 def _remove(path: Path) -> None:
-    """Remove a file, symlink or tree, read-only directories included; links unfollowed."""
     try:
         _removed(path)
     except PermissionError:
@@ -395,13 +350,6 @@ def _copy(source: Path, target: Path) -> None:
 
 
 def save_tree(root: Path, store: Path) -> Path:
-    """Create the epoch's revert point, or recover one an interrupted epoch left.
-
-    It holds the listed tree and .git as they are, so a failed check or a failed git
-    step can put back exactly what the coding turns left, old history included. It
-    only ever appears whole, by renaming, and leaves the same way, so a revert point
-    that is there is one an epoch never finished with.
-    """
     saved = store / "revert"
     for aside in (store / "revert.partial", store / "revert.dropping"):
         if aside.is_symlink():
@@ -433,12 +381,6 @@ def _saved_ignores(saved: Path) -> dict[str, Path]:
 
 
 def freeze_ignores(root: Path, saved: Path) -> list[str]:
-    """Put every .gitignore back as the revert point holds it; which ones it touched.
-
-    The ignore rules hold for the whole epoch, so whatever they ignored when the tree
-    was saved aside is never counted, committed, deleted or taken away by a restore
-    because the cleaner removed, edited or added a .gitignore.
-    """
     kept = _saved_ignores(saved)
     touched = []
     for rel in listed(root):
@@ -460,7 +402,6 @@ def freeze_ignores(root: Path, saved: Path) -> list[str]:
 
 
 def _clear_changed_types(root: Path, saved: Path) -> None:
-    """Remove what in root is a directory where saved has a file, or the reverse."""
     for directory, dirs, files in os.walk(saved):
         base = Path(directory)
         here = root / base.relative_to(saved)
@@ -480,11 +421,6 @@ def _clear_changed_types(root: Path, saved: Path) -> None:
 
 
 def restore_tree(root: Path, saved: Path) -> None:
-    """Put the listed tree and .git back exactly as the revert point holds them.
-
-    Listed under the ignore rules it was saved under, so an ignored file -- never saved
-    -- is never taken away.
-    """
     _clear_changed_types(root, saved)
     freeze_ignores(root, saved)
     emptied: set[Path] = set()
@@ -502,11 +438,6 @@ def restore_tree(root: Path, saved: Path) -> None:
 
 
 def drop_saved(saved: Path) -> None:
-    """Delete the revert point once the epoch it guarded is settled.
-
-    Renamed aside first, so however the deleting ends, what is left never reads as a
-    revert point an interrupted epoch left.
-    """
     if not os.path.lexists(saved):
         return
     dropping = saved.with_name(saved.name + ".dropping")
@@ -517,8 +448,6 @@ def drop_saved(saved: Path) -> None:
     except OSError as error:
         print(f"could not delete {dropping}: {error}")
 
-
-# -- git -----------------------------------------------------------------------------
 
 _HOOK = """#!/bin/sh
 # Installed by the workspace-cleanup flows: files over {limit} bytes stay out of git.
@@ -538,7 +467,6 @@ NOTED = 20
 
 
 def left_out(root: Path, entries: list[str], limit: int) -> dict[str, str]:
-    """Listed entries that are never committed, and why: too large, or a repository."""
     out: dict[str, str] = {}
     for rel in entries:
         path = root / rel
@@ -564,7 +492,6 @@ def _noted(out: dict[str, str], limit: int) -> str:
 
 
 def _pattern(rel: str) -> str:
-    """An exclude pattern matching exactly this path from the repository's root."""
     escaped = "".join("\\" + ch if ch in "\\*?[" else ch for ch in rel)
     if escaped.endswith(" "):
         escaped = escaped[:-1] + "\\ "
@@ -572,7 +499,6 @@ def _pattern(rel: str) -> str:
 
 
 def _remove_git_entry(root: Path) -> bool:
-    """Remove .git whether directory, gitfile, or symlink; True once it is gone."""
     try:
         _remove(root / ".git")
     except OSError:
@@ -581,7 +507,6 @@ def _remove_git_entry(root: Path) -> bool:
 
 
 def history_repo(store: Path) -> Path:
-    """The one repository every run in this workspace archives its history into."""
     return store.parent / "history.git"
 
 
@@ -603,16 +528,10 @@ def _open_history(store: Path) -> Path:
 def _commit_tree(
     history: Path, work_tree: Path, entries: list[str], message: str, parent: str = ""
 ) -> str:
-    """Commit exactly these entries of work_tree into history; the commit, or "".
-
-    Written straight into the history repository, so a file it already holds -- from an
-    earlier epoch or an earlier run -- is not stored again.
-    """
     at = f"--git-dir={history}"
     with tempfile.TemporaryDirectory(prefix="cleanup-index-") as scratch:
         index = Path(scratch) / "index"
         if entries:
-            # Forced: every entry is one the flow chose, a tracked but ignored file too.
             added = _git(
                 "--literal-pathspecs",
                 at,
@@ -639,16 +558,7 @@ def _commit_tree(
 def erase_history(
     root: Path, store: Path, epoch: int, limit: int, title: str = ""
 ) -> bool:
-    """Replace root's history with one commit of the cleaned tree.
-
-    The commit is made in the history repository and fetched into a fresh repository in
-    root, so the two share it and later epochs archive only what is new. What is left out
-    of it is excluded in the new repository, and its pre-commit hook refuses any file
-    over the limit an agent tries to commit later. Run only once `archive_history` has
-    kept the history this replaces, so what it commits is mostly stored there already.
-    """
     history = _open_history(store)
-    # Listed while the replaced repository is still there, so what it tracks counts.
     entries = listed(root)
     out = left_out(root, entries, limit)
     if not _remove_git_entry(root):
@@ -702,14 +612,6 @@ def erase_history(
 
 
 def archive_history(saved: Path, store: Path, epoch: int, limit: int) -> str | None:
-    """Keep the history an epoch replaced, and the tree the coding turns left.
-
-    Every ref of the replaced repository -- branches, tags, remotes -- is fetched into
-    the workspace's shared history repository under ``<epoch ref>.refs/``. A commit of
-    the tree the coding turns left, uncommitted work included and large files left out,
-    goes on top of the replaced HEAD as the epoch ref itself. Returns that ref, or None
-    if it could not be written; the fetched history is kept either way.
-    """
     history = _open_history(store)
     at = f"--git-dir={history}"
     ref = epoch_ref(store, epoch)
@@ -720,7 +622,6 @@ def archive_history(saved: Path, store: Path, epoch: int, limit: int) -> str | N
         if not head.returncode:
             parent = _git(at, "rev-parse", f"{ref}.head").stdout.strip()
         elif refs.returncode:
-            # A history git cannot read is kept whole rather than dropped.
             kept = history.parent / f"unreadable-{store.name}-epoch-{epoch:03d}.git"
             _remove(kept)
             _copy(saved / ".git", kept)
@@ -740,32 +641,17 @@ def archive_history(saved: Path, store: Path, epoch: int, limit: int) -> str | N
 
 
 def link_history(store: Path, epoch: int) -> None:
-    """Chain the epoch's distilled commit onto its archived tree before cleaning.
-
-    So one `git log` in the history repository reads the whole run -- the original
-    history, then each epoch's tree before and after cleaning -- with nothing to stitch
-    by hand. The working repository's own history stays one commit long.
-    """
     history = history_repo(store)
     at = f"--git-dir={history}"
     ref = epoch_ref(store, epoch)
     grafted = _git(at, "replace", "-f", "--graft", f"{ref}.distilled", ref)
     if grafted.returncode:
         print(f"epoch {epoch}: the distilled commit could not be chained to {ref}")
-    # Pack what this epoch wrote loose, and nothing else; gc joins packs as they gather.
     _git(at, "repack", "-d", "-q")
     _git(at, "gc", "--auto", "--quiet")
 
 
-# -- the check -----------------------------------------------------------------------
-
-
 def run_check(root: Path, command: str, log: Path) -> bool:
-    """Run the configured check in root, held to an hour, its output kept in log.
-
-    The check leads its own process group, and the group is killed and reaped whole
-    once the verdict is in, so nothing of it survives to mutate the tree afterwards.
-    """
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("wb") as out:
         try:
@@ -798,7 +684,6 @@ def run_check(root: Path, command: str, log: Path) -> bool:
 
 
 def _cap(log: Path) -> None:
-    """Keep only the end of a check log that grew past CHECK_LOG_BYTES."""
     try:
         size = log.stat().st_size
         if size <= CHECK_LOG_BYTES:
@@ -812,7 +697,6 @@ def _cap(log: Path) -> None:
 
 
 def tail(log: Path, lines: int = 20) -> str:
-    """The last lines of a check log, for printing next to its verdict."""
     try:
         text = log.read_text(encoding="utf-8", errors="replace")
     except OSError:

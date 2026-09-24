@@ -1,24 +1,28 @@
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import flame_chase_agent_cleanup as flame
 import pytest
-import ralph_loop_agent_cleanup as ralph
-from _workspace_cleanup import Config, loop, storage
 from hmz.flows import Allowance, Question, Stopped
 from hmz.runtime.flowing import configures, declared, drives, offered, resumes
 
 FLOWS = Path(__file__).parents[1] / "flows"
 NAMES = ("flame_chase_agent_cleanup", "ralph_loop_agent_cleanup")
+sys.path[:0] = [*(str(FLOWS / name) for name in NAMES), str(FLOWS)]
+
+import _flame_chase_agent_cleanup as flame_cleanup  # noqa: E402
+import _ralph_loop_agent_cleanup as ralph_cleanup  # noqa: E402
+import flame_chase_agent_cleanup as flame  # noqa: E402
+import ralph_loop_agent_cleanup as ralph  # noqa: E402
+
+CLEANUP = {flame: flame_cleanup, ralph: ralph_cleanup}
 
 
 class Ledger:
-    """A run's allowance counted in turns: the turn after the last raises Stopped."""
-
     def __init__(self, turns: int) -> None:
         self.left = turns
 
@@ -82,17 +86,19 @@ class Human:
 
 @pytest.fixture(autouse=True)
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """The working repository, with Humanize's home beside it rather than inside."""
-    monkeypatch.setattr(storage, "home", lambda: tmp_path / "humanize")
+    for cleanup in CLEANUP.values():
+        monkeypatch.setattr(cleanup.storage, "home", lambda: tmp_path / "humanize")
+        monkeypatch.setattr(
+            cleanup.loop, "time", SimpleNamespace(sleep=lambda _seconds: None)
+        )
     root = tmp_path / "repo"
     root.mkdir()
     monkeypatch.chdir(root)
-    monkeypatch.setattr(loop, "time", SimpleNamespace(sleep=lambda _seconds: None))
     return root
 
 
-def _configured(**overrides: Any) -> Config:
-    return Config(work_paths=("src",), **overrides)
+def _configured(cleanup: Any, **overrides: Any) -> Any:
+    return cleanup.Config(work_paths=("src",), **overrides)
 
 
 def test_flows_are_public_resumable_and_declare_a_token_allowance() -> None:
@@ -106,7 +112,7 @@ def test_flows_are_public_resumable_and_declare_a_token_allowance() -> None:
         "cleaner",
     )
     names = offered(FLOWS)
-    assert "_workspace_cleanup" not in names
+    assert not any(name.startswith("_") for name in names)
     for name in NAMES:
         path = FLOWS / name / "__init__.py"
         assert name in names
@@ -150,7 +156,7 @@ def test_a_run_nobody_set_up_names_work_paths(flow: Any) -> None:
 )
 def test_work_paths_must_be_safe_and_non_overlapping(value: tuple[str, ...]) -> None:
     with pytest.raises(ValueError):
-        Config(work_paths=value)
+        flame_cleanup.Config(work_paths=value)
 
 
 def test_flame_chase_alternates_retries_an_empty_turn_and_cleans_between_turns(
@@ -161,14 +167,16 @@ def test_flame_chase_alternates_retries_an_empty_turn_and_cleans_between_turns(
     first = FakeAgent("first", events, ledger, answers=["", "done"])
     second = FakeAgent("second", events, ledger)
     cleaner = FakeAgent("cleaner", events, ledger)
-    monkeypatch.setattr(loop, "clean_epoch", lambda *_args: events.append("clean"))
+    monkeypatch.setattr(
+        flame_cleanup.loop, "clean_epoch", lambda *_args: events.append("clean")
+    )
     state: dict[str, Any] = {}
 
     with pytest.raises(Stopped):
         flame.run(
             flame.Agents(first, second, cleaner, Human(None)),
             "task",
-            _configured(),
+            _configured(flame_cleanup),
             state,
         )
 
@@ -189,15 +197,18 @@ def test_ralph_hands_each_due_cleanup_to_its_cleaner(
         assert agent is cleaner
         events.append("clean")
 
-    monkeypatch.setattr(loop, "clean_epoch", clean)
+    monkeypatch.setattr(ralph_cleanup.loop, "clean_epoch", clean)
     with pytest.raises(Stopped):
-        ralph.run(ralph.Agents(coder, cleaner, Human(None)), "task", _configured(), {})
+        ralph.run(
+            ralph.Agents(coder, cleaner, Human(None)),
+            "task",
+            _configured(ralph_cleanup),
+            {},
+        )
 
     assert events == ["coder", "coder", "coder", "clean", "coder"]
 
 
-# The flow modules imported above, rather than importlib's: humanize reads a flow by
-# running its file, which replaces what sys.modules holds under the flow's name.
 @pytest.mark.parametrize("flow", [flame, ralph])
 def test_three_empty_turns_in_a_row_end_the_run_and_keep_its_state(
     flow: Any, monkeypatch: pytest.MonkeyPatch
@@ -208,20 +219,22 @@ def test_three_empty_turns_in_a_row_end_the_run_and_keep_its_state(
         FakeAgent(field, events, ledger, answers=[""] * 10)
         for field in flow.Agents._fields[:-1]
     ]
-    monkeypatch.setattr(loop, "clean_epoch", lambda *_args: events.append("clean"))
+    monkeypatch.setattr(
+        CLEANUP[flow].loop, "clean_epoch", lambda *_args: events.append("clean")
+    )
     state: dict[str, Any] = {}
 
-    flow.run(flow.Agents(*agents, Human(None)), "task", _configured(), state)
+    flow.run(
+        flow.Agents(*agents, Human(None)), "task", _configured(CLEANUP[flow]), state
+    )
 
-    assert len(events) == loop.STALLED
+    assert len(events) == CLEANUP[flow].loop.STALLED
     assert len(set(events)) == 1
     assert state["turns"] == 0
     assert "run_root" in state
 
 
 class Long(FakeSession):
-    """A turn the clock ends: it runs past the limit and answers with nothing."""
-
     def __call__(self, prompt: str, **kwargs: Any) -> Any:
         super().__call__(prompt, **kwargs)
         time.sleep(0.15)
@@ -234,7 +247,10 @@ def test_a_turn_the_clock_ended_counts_and_hands_over() -> None:
     first = FakeAgent("first", events, ledger, session=Long)
     second = FakeAgent("second", events, ledger)
     held = _configured(
-        session_timeout_minutes=0.001, idle_timeout_minutes=0, stop_grace_minutes=0
+        flame_cleanup,
+        session_timeout_minutes=0.001,
+        idle_timeout_minutes=0,
+        stop_grace_minutes=0,
     )
     state: dict[str, Any] = {}
 
@@ -258,11 +274,18 @@ def test_a_resumed_run_counts_turns_from_its_last_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    monkeypatch.setattr(loop, "clean_epoch", lambda *_args: events.append("clean"))
+    monkeypatch.setattr(
+        ralph_cleanup.loop, "clean_epoch", lambda *_args: events.append("clean")
+    )
     state: dict[str, Any] = {}
     coder = FakeAgent("coder", events, Ledger(3))
     with pytest.raises(Stopped):
-        ralph.run(ralph.Agents(coder, coder, Human(None)), "task", _configured(), state)
+        ralph.run(
+            ralph.Agents(coder, coder, Human(None)),
+            "task",
+            _configured(ralph_cleanup),
+            state,
+        )
     assert (state["turns"], state["epoch"], state["cleaned_at"]) == (3, 1, 3)
 
     events.clear()
@@ -271,7 +294,7 @@ def test_a_resumed_run_counts_turns_from_its_last_epoch(
         ralph.run(
             ralph.Agents(coder, coder, Human(None)),
             "task",
-            _configured(cleanup_turns=1),
+            _configured(ralph_cleanup, cleanup_turns=1),
             state,
         )
 
@@ -284,13 +307,15 @@ def test_a_large_workspace_is_asked_about_and_not_started_unless_confirmed(
 ) -> None:
     (repo / "a.txt").write_text("a\n")
     (repo / "b.txt").write_text("b\n")
-    monkeypatch.setattr(loop, "FILES_WARNING", 1)
+    monkeypatch.setattr(ralph_cleanup.loop, "FILES_WARNING", 1)
     human = Human(answer)
     agent = FakeAgent("coder", [], Ledger(0))
     state: dict[str, Any] = {}
 
-    with pytest.raises(loop.LargeWorkspace):
-        ralph.run(ralph.Agents(agent, agent, human), "task", _configured(), state)
+    with pytest.raises(ralph_cleanup.loop.LargeWorkspace):
+        ralph.run(
+            ralph.Agents(agent, agent, human), "task", _configured(ralph_cleanup), state
+        )
 
     assert len(human.questions) == 1
     assert "2 files" in human.questions[0].text
@@ -303,15 +328,15 @@ def test_a_confirmed_or_unasked_large_workspace_starts(
 ) -> None:
     (repo / "a.txt").write_text("a\n")
     (repo / "b.txt").write_text("b\n")
-    monkeypatch.setattr(loop, "FILES_WARNING", 1)
+    monkeypatch.setattr(ralph_cleanup.loop, "FILES_WARNING", 1)
     for human, held in (
-        (Human("Start anyway"), _configured()),
-        (Human(None), _configured(confirm_large_workspace_copies=False)),
+        (Human("Start anyway"), _configured(ralph_cleanup)),
+        (Human(None), _configured(ralph_cleanup, confirm_large_workspace_copies=False)),
     ):
         agent = FakeAgent("coder", [], Ledger(0))
         with pytest.raises(Stopped) as raised:
             ralph.run(ralph.Agents(agent, agent, human), "task", held, {})
-        assert not isinstance(raised.value, loop.LargeWorkspace)
+        assert not isinstance(raised.value, ralph_cleanup.loop.LargeWorkspace)
 
 
 def test_a_resumed_run_is_not_asked_again(
@@ -321,13 +346,20 @@ def test_a_resumed_run_is_not_asked_again(
     agent = FakeAgent("coder", [], Ledger(0))
     state: dict[str, Any] = {}
     with pytest.raises(Stopped):
-        ralph.run(ralph.Agents(agent, agent, Human(None)), "task", _configured(), state)
+        ralph.run(
+            ralph.Agents(agent, agent, Human(None)),
+            "task",
+            _configured(ralph_cleanup),
+            state,
+        )
 
-    monkeypatch.setattr(loop, "FILES_WARNING", 0)
+    monkeypatch.setattr(ralph_cleanup.loop, "FILES_WARNING", 0)
     human = Human(None)
     with pytest.raises(Stopped) as raised:
-        ralph.run(ralph.Agents(agent, agent, human), "task", _configured(), state)
-    assert not isinstance(raised.value, loop.LargeWorkspace)
+        ralph.run(
+            ralph.Agents(agent, agent, human), "task", _configured(ralph_cleanup), state
+        )
+    assert not isinstance(raised.value, ralph_cleanup.loop.LargeWorkspace)
     assert human.questions == []
 
 
@@ -337,24 +369,26 @@ def test_run_storage_uses_humanize_home_and_validates_resume(
     source = repo
     state: dict[str, Any] = {}
 
-    root, resumed = storage.open_store("some_flow", source, state)
+    root, resumed = flame_cleanup.storage.open_store("some_flow", source, state)
 
     assert not resumed
     assert root.is_relative_to(tmp_path / "humanize" / "some_flow")
     assert state["run_root"] == str(root)
     assert state["run_id"] == root.name
-    assert storage.open_store("some_flow", source, state) == (root, True)
+    assert flame_cleanup.storage.open_store("some_flow", source, state) == (root, True)
     with pytest.raises(ValueError):
-        storage.open_store("some_flow", source, {**state, "run_root": str(tmp_path)})
+        flame_cleanup.storage.open_store(
+            "some_flow", source, {**state, "run_root": str(tmp_path)}
+        )
     with pytest.raises(ValueError):
-        storage.open_store("some_flow", source, {"turns": 3})
+        flame_cleanup.storage.open_store("some_flow", source, {"turns": 3})
 
 
 def test_run_storage_refuses_humanize_home_inside_cleaned_repository(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = repo
-    monkeypatch.setattr(storage, "home", lambda: source / ".humanize")
+    monkeypatch.setattr(flame_cleanup.storage, "home", lambda: source / ".humanize")
 
     with pytest.raises(RuntimeError):
-        storage.open_store("some_flow", source, {})
+        flame_cleanup.storage.open_store("some_flow", source, {})
