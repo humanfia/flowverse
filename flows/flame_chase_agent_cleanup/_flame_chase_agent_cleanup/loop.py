@@ -1,5 +1,3 @@
-"""The loop both flows run: start, coding turns, and a cleaning epoch when one is due."""
-
 from __future__ import annotations
 
 import time
@@ -15,11 +13,7 @@ from .guard import guarded, limits
 from .storage import open_store
 from .tree import ensure_manifest, footprint, manifest_path
 
-#: Coding turns in a row that may answer with nothing before the loop gives up. A turn
-#: that failed spends nothing, so a token allowance never ends a loop whose account was
-#: refused; three rather than one, because one empty answer is not a reason to stop.
 STALLED = 3
-#: Past either, a workspace is worth asking about before every epoch copies it aside.
 FILES_WARNING = 5_000
 BYTES_WARNING = 1024**3
 _START = "Start anyway"
@@ -27,11 +21,10 @@ _ACCEPTED = frozenset({"a", "1", "y", "yes", "是", "继续", _START.casefold()}
 
 
 class LargeWorkspace(Stopped):
-    """Startup ended at the large-workspace question, before anything was touched."""
+    pass
 
 
 def confirm_size(flow: str, root: Path, held: Config, human: Any) -> None:
-    """Warn about a workspace too large to copy aside every epoch, and ask about it."""
     files, size = footprint(root)
     if files <= FILES_WARNING and size <= BYTES_WARNING:
         return
@@ -66,7 +59,6 @@ def confirm_size(flow: str, root: Path, held: Config, human: Any) -> None:
 def start(
     flow: str, root: Path, kept: dict[str, Any], held: Config, human: Any
 ) -> tuple[Path, set[str]]:
-    """Open or reopen the run's storage and its task manifest."""
     if not kept:
         confirm_size(flow, root, held, human)
     store, resumed = open_store(flow, root, kept)
@@ -89,11 +81,6 @@ def start(
 
 
 def due(held: Config, kept: dict[str, Any]) -> bool:
-    """Whether cleanup_turns coding turns have landed since the last epoch.
-
-    Counted from the last epoch rather than from the first turn, so a run picked up with
-    another cleanup_turns cleans once after that many turns rather than catching up.
-    """
     return (
         bool(held.cleanup_turns)
         and kept["turns"] - kept["cleaned_at"] >= held.cleanup_turns
@@ -101,11 +88,6 @@ def due(held: Config, kept: dict[str, Any]) -> bool:
 
 
 def coding_turn(agent: Any, task: str, root: Path, held: Config, label: str) -> bool:
-    """One fresh-session turn on the task; whether it landed.
-
-    A turn that answered landed, and so did one the clock ended: its edits are on disk,
-    and taking it again would refill a limit it already reached.
-    """
     session = agent.new(cwd=str(root))
     with guarded(session, **limits(held, label)) as watch:
         said = session(task, suppress=True)
@@ -121,11 +103,6 @@ def drive(
     held: Config,
     kept: dict[str, Any],
 ) -> None:
-    """Take turns among the coders, and hand every due epoch to the cleaner.
-
-    Ends by raising `Stopped` once the run's allowance is spent, or by returning after
-    STALLED coding turns in a row answered nothing; either way what it kept stays.
-    """
     root = Path.cwd().resolve()
     store, manifest = start(flow, root, kept, held, human)
     stalled = 0

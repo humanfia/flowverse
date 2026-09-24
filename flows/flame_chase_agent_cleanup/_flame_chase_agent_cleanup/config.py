@@ -1,5 +1,3 @@
-"""What both agent-cleanup flows are set up with."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,7 +6,6 @@ from pydantic import BaseModel, Field, field_validator
 
 
 def validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
-    """Refuse work paths that leave the repository, touch .git, repeat, or overlap."""
     paths = tuple(Path(raw) for raw in value)
     for path in paths:
         if (
@@ -29,12 +26,6 @@ def validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
 
 
 class Config(BaseModel):
-    """The cleanup cadence, the cleaner's limits, and the session guards.
-
-    What a run may spend is not here: `budget:` is the run's allowance, which humanize
-    holds every session to.
-    """
-
     model_config = {"extra": "forbid"}
 
     work_paths: tuple[str, ...] = Field(
@@ -113,7 +104,6 @@ class Config(BaseModel):
 
 
 def required(config: Config | None, flow: str) -> Config:
-    """The config a run was set up with; there is no default for work_paths."""
     if config is None:
         raise ValueError(
             f"{flow} needs work_paths: pass -c with a file saying e.g."

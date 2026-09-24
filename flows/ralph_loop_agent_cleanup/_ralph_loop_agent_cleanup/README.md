@@ -1,12 +1,13 @@
 # Agent workspace cleanup
 
-Shared implementation of the flows that start every coding turn in a fresh session and
-periodically hand the repository to a cleaner agent. It is not a flow of its own.
+Implementation of the flows that start every coding turn in a fresh session and
+periodically hand the repository to a cleaner agent. It is not a flow of its own; each
+flow below keeps its own identical copy, so a change here belongs in the other copy too.
 
 | Flow | Coding agents | Cleaner |
 | --- | --- | --- |
-| [`flame_chase_agent_cleanup`](../flame_chase_agent_cleanup/README.md) | Two, alternating | A third agent |
-| [`ralph_loop_agent_cleanup`](../ralph_loop_agent_cleanup/README.md) | One | A second agent |
+| [`flame_chase_agent_cleanup`](../../flame_chase_agent_cleanup/README.md) | Two, alternating | A third agent |
+| [`ralph_loop_agent_cleanup`](../../ralph_loop_agent_cleanup/README.md) | One | A second agent |
 
 ## Configuration
 
@@ -138,7 +139,7 @@ remote machine.
 ## Layout
 
 ```text
-_workspace_cleanup/
+_ralph_loop_agent_cleanup/
 ├── config.py    # Config and work-path validation
 ├── storage.py   # the managed run root
 ├── tree.py      # listing, manifest, measures, revert point, git, check

@@ -1,5 +1,3 @@
-"""One cleaning epoch: save aside, clean, measure and repair, check, archive history."""
-
 from __future__ import annotations
 
 import time
@@ -34,8 +32,6 @@ PLACES_SHOWN = 8
 
 
 class Cleaned(BaseModel):
-    """The cleaner's account of an epoch; every field required, as a shape must be."""
-
     deleted: list[str] = Field(description="what was deleted, item by item, briefly")
     kept: list[str] = Field(
         description="what was kept as essence, item by item, briefly"
@@ -45,7 +41,6 @@ class Cleaned(BaseModel):
 
 
 def cleaning_prompt(held: Config) -> str:
-    """The epoch's opening prompt; a check is spoken of only when one is configured."""
     work_paths = ", ".join(f"`{path}`" for path in held.work_paths)
     parts = [
         (
@@ -83,7 +78,6 @@ def cleaning_prompt(held: Config) -> str:
 
 
 def places(strays: list[str]) -> str:
-    """Where strays are, by top-level entry with counts, never as full paths."""
     counted = Counter(
         rel.split("/", 1)[0] + ("/" if "/" in rel else "") for rel in strays
     )
@@ -96,7 +90,6 @@ def places(strays: list[str]) -> str:
 
 
 def overages(found: Measure, held: Config) -> list[str]:
-    """Each over-measure, briefly, for the repair prompt and the transcript."""
     overs = []
     if found.strays:
         overs.append(f"{len(found.strays)} stray file(s) in {places(found.strays)}")
@@ -122,7 +115,6 @@ def repair_prompt(overs: list[str]) -> str:
 def _measure(
     held: Config, root: Path, saved: Path, manifest: set[str], epoch: int
 ) -> tuple[Measure, list[str]]:
-    """Measure under the ignore rules the epoch started with."""
     if touched := freeze_ignores(root, saved):
         print(
             f"epoch {epoch}: put back the .gitignore files the cleaner changed: {touched}"
@@ -139,7 +131,6 @@ def _clean(
     manifest: set[str],
     epoch: int,
 ) -> None:
-    """The cleaner's turns and the flow's measures, repairs and mechanical cut."""
     session = cleaner.new(cwd=str(root))
     with guarded(session, **limits(held, f"epoch {epoch} cleaner")) as watch:
         report = session(cleaning_prompt(held), suppress=True, schema=Cleaned)
@@ -208,16 +199,6 @@ def clean_epoch(
     store: Path,
     epoch: int,
 ) -> None:
-    """Clean once between coding turns, so the next turn reads only the essence.
-
-    The whole listed tree and .git are saved aside first. A failed check puts the tree
-    back; a failed git step puts it back with its old history. Interrupted -- stopped,
-    out of allowance, or failed -- the epoch puts the tree back before the run ends, so
-    the repository is never left half-cleaned. The history is archived in the
-    workspace's history repository before it is replaced -- and is not replaced at all
-    if it could not be -- then chained to the commit that replaces it. Files over the
-    tracking limit are never committed.
-    """
     limit = int(held.max_tracked_file_mb * MIB)
     print(f"epoch {epoch}: saving the tree aside as the revert point")
     saved = save_tree(root, store)

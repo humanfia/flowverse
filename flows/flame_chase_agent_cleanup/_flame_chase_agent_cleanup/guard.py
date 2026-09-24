@@ -1,11 +1,3 @@
-"""What one turn is held to on the clock, beyond the run's allowance.
-
-The cut-off is humanize's own per-turn `Budget`: at the wall-clock limit plus the grace
-period the turn is ended and answers with what it said, so a turn that ran long still
-lands. What this adds is what a budget cannot say: a wrap-up request when the limit is
-reached, and a reminder when a turn has spent nothing for a while.
-"""
-
 from __future__ import annotations
 
 import dataclasses
@@ -32,8 +24,6 @@ IDLE = (
 
 @dataclasses.dataclass
 class Watch:
-    """What the guard saw of one turn."""
-
     timed_out: bool = False
 
 
@@ -47,11 +37,6 @@ def _tokens(session: Any) -> float | None:
 
 
 def _capped(current: Budget | None, seconds: float) -> Budget:
-    """The turn's budget with the clock limit added, keeping a tighter clock it had.
-
-    Always cut off where it stands and answering with what was said: a turn the clock
-    ended is a turn that landed, so a budget that raised instead would end the run.
-    """
     if current is None:
         return Budget(seconds=seconds, when="immediately", then="end")
     if current.seconds:
@@ -60,7 +45,6 @@ def _capped(current: Budget | None, seconds: float) -> Budget:
 
 
 def limits(held: Config, label: str) -> dict[str, Any]:
-    """The guard's settings, as a run was set up with them."""
     return {
         "session_timeout_minutes": held.session_timeout_minutes,
         "idle_timeout_minutes": held.idle_timeout_minutes,
@@ -83,7 +67,6 @@ def guarded(
     stop_grace_minutes: float,
     label: str,
 ) -> Iterator[Watch]:
-    """Hold the turn taken inside the block to the clock; yields what was seen."""
     watch = Watch()
     wall = max(session_timeout_minutes, 0.0) * 60.0
     idle = max(idle_timeout_minutes, 0.0) * 60.0
@@ -144,6 +127,5 @@ def guarded(
     finally:
         stop.set()
         thread.join()
-        # The budget may end the turn between two looks of the watch.
         if wall and time.monotonic() - began >= wall:
             watch.timed_out = True

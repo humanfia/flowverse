@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -11,9 +12,20 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _workspace_cleanup import Cleaned, Config, cleaning, guard, loop, tree
 from hmz.coganchor.agents import AgentBase, AgentConfig, Event, SessionBase
 from hmz.flows import Budget, Stopped
+
+FLOW = Path(__file__).parents[1] / "flows" / "flame_chase_agent_cleanup"
+sys.path[:0] = [str(FLOW), str(FLOW.parent)]
+
+from _flame_chase_agent_cleanup import (  # noqa: E402
+    Cleaned,
+    Config,
+    cleaning,
+    guard,
+    loop,
+    tree,
+)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -24,7 +36,6 @@ def _git(root: Path, *args: str) -> str:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    """A task repository with history, an ignored environment and a work path."""
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
     (root / "src" / "main.py").write_text("value = 1\n")
@@ -99,8 +110,6 @@ def test_revert_point_recovers_an_interrupted_epoch_and_spares_ignored_files(
 
 
 class Scripted:
-    """A cleaner whose turns are functions of the prompt, run in the repository."""
-
     def __init__(self, *turns: Callable[[str], Any]) -> None:
         self.turns = list(turns)
         self.prompts: list[str] = []
@@ -483,8 +492,6 @@ def test_a_cleaner_the_clock_ended_gets_no_repairs(repo: Path, store: Path) -> N
 
 
 class Quiet:
-    """A session that spends nothing until told to, recording what it is told."""
-
     def __init__(self, *, moves_when_told: bool = False) -> None:
         self.budget: Budget | None = None
         self.said: list[str] = []
@@ -569,11 +576,8 @@ def test_nothing_is_watched_when_both_limits_are_off() -> None:
 
 
 class Slow(SessionBase):
-    """A humanize session whose turn runs until humanize cuts it off."""
-
     def _stream(self, prompt: str, *, schema: Any = None) -> Iterator[Event]:
         for step in range(200):
-            # Where a real backend's process would be ended by the cut-off.
             if self._cutting():
                 yield Event(kind="result", text=f"cut at step {step}")
                 return
