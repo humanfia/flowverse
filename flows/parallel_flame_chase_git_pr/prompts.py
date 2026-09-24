@@ -1,5 +1,3 @@
-"""Self-contained lane and legacy orchestrateor PR-review instructions."""
-
 from __future__ import annotations
 
 import json
@@ -23,7 +21,6 @@ def lane_protocol(
     knowledge_digest: list[dict[str, object]],
     experiment_frontier: dict[str, object],
 ) -> str:
-    """Explain the additive protocol without changing LaneReport."""
     prefix = f"{shlex.quote(cli)} --run-root {shlex.quote(run_root)} --lane {lane}"
     sections: list[str] = []
     if git_pr_enabled:
@@ -99,7 +96,6 @@ Current compact Frontier Board (terminal details are retrieved only by intent):
 def git_planning_prompt(
     *, objective: str, workspace_map: dict[str, object], skill: str
 ) -> str:
-    """Plan diverse experiments when every lane has equal PR capability."""
     return f"""You are the planning orchestrateor for a Git/PR parallel Flame Chase.
 
 Read the repository and mounted `{skill}` skill. Plan only: do not edit files or execute remote
@@ -128,7 +124,6 @@ def pr_review_prompt(
     allowed_paths: list[str],
     ledger: list[dict[str, object]],
 ) -> str:
-    """Give a trusted coordinator one exact FIFO PR and native Git protocol."""
     pr_id = pr["id"]
     return f"""You are the trusted orchestrateor reviewing the single active FIFO PR `{pr_id}`.
 This is a fresh review session in a run-owned review worktree. You have final scientific judgment:

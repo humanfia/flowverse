@@ -1,5 +1,3 @@
-"""Run-owned shadow repository, protected refs, and source publication."""
-
 from __future__ import annotations
 
 import contextlib
@@ -28,8 +26,6 @@ _EVALUATOR_PATTERN = re.compile(r"MUST run `([^`]+)`", re.IGNORECASE)
 
 @dataclass(frozen=True, slots=True)
 class GitRunPaths:
-    """All Git-owned paths for one run."""
-
     root: Path
 
     @property
@@ -94,7 +90,6 @@ def git(
     check: bool = True,
     text: bool = True,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
-    """Run Git without a shell and retain stderr for protocol failures."""
     return subprocess.run(
         ["git", *arguments],
         cwd=cwd,
@@ -105,7 +100,6 @@ def git(
 
 
 def configure_clone(path: Path, *, lane: str, run_root: Path) -> None:
-    """Give a clone stable attribution and discoverable run context."""
     git("config", "user.name", f"PFC {lane}", cwd=path)
     git("config", "user.email", f"{lane}@parallel-flame-chase.invalid", cwd=path)
     git("config", "pfc.run-root", str(run_root), cwd=path)
@@ -114,7 +108,6 @@ def configure_clone(path: Path, *, lane: str, run_root: Path) -> None:
 
 
 def discover_allowed_paths(source: Path, task_text: str | None = None) -> list[str]:
-    """Extract explicit task boundaries, otherwise freeze baseline file paths."""
     documents = (source / "TASK.md", source / ".flowbench" / "task.md")
     discovered: list[str] = []
     for document in documents:
@@ -166,7 +159,6 @@ def discover_allowed_paths(source: Path, task_text: str | None = None) -> list[s
 
 
 def discover_evaluator_command(source: Path, task_text: str | None = None) -> list[str]:
-    """Freeze an explicitly mandated evaluator command when the task provides one."""
     texts = [task_text] if task_text else []
     for document in (source / "TASK.md", source / ".flowbench" / "task.md"):
         if document.is_file():
@@ -181,7 +173,6 @@ def discover_evaluator_command(source: Path, task_text: str | None = None) -> li
 
 
 def path_allowed(path: str, allowed_paths: list[str]) -> bool:
-    """Apply the frozen allowlist while always protecting control/evaluator files."""
     canonical = PurePosixPath(path).as_posix()
     if canonical == ".git" or any(
         canonical == prefix or canonical.startswith(f"{prefix}/")
@@ -195,7 +186,6 @@ def path_allowed(path: str, allowed_paths: list[str]) -> bool:
 
 
 def changed_paths(repository: Path, base: str, head: str) -> list[str]:
-    """Return every path changed between two commits."""
     result = cast(
         "subprocess.CompletedProcess[bytes]",
         git("diff", "--name-only", "-z", base, head, cwd=repository, text=False),
@@ -206,7 +196,6 @@ def changed_paths(repository: Path, base: str, head: str) -> list[str]:
 def validate_changed_paths(
     repository: Path, base: str, head: str, allowed_paths: list[str]
 ) -> list[str]:
-    """Reject a ready/merge diff that exceeds the task's frozen boundary."""
     paths = changed_paths(repository, base, head)
     rejected = [path for path in paths if not path_allowed(path, allowed_paths)]
     if rejected:
@@ -215,7 +204,6 @@ def validate_changed_paths(
 
 
 def _copy_source(source: Path, destination: Path) -> None:
-    """Copy the baseline without importing the user's Git identity."""
     destination.mkdir(parents=True, exist_ok=False)
     for entry in source.iterdir():
         if entry.name == ".git":
@@ -238,7 +226,6 @@ def initialize_shadow_repository(
     hook_source: Path,
     lanes: tuple[str, ...] = ("lane-1", "lane-2", "lane-3"),
 ) -> str:
-    """Freeze source into main and create isolated lane/integration clones."""
     _copy_source(source, paths.planning)
     git("init", "-b", "main", cwd=paths.planning)
     configure_clone(paths.planning, lane="planning", run_root=paths.root)
@@ -279,7 +266,6 @@ def validate_shadow_repository(
     paths: GitRunPaths,
     lanes: tuple[str, ...] = ("lane-1", "lane-2", "lane-3"),
 ) -> None:
-    """Reject partial or replaced Git state on resume."""
     directories = (
         paths.central,
         paths.planning,
@@ -315,7 +301,6 @@ def validate_shadow_repository(
 
 
 def main_sha(repository: Path) -> str:
-    """Resolve the authoritative central main ref."""
     return cast(
         "subprocess.CompletedProcess[str]",
         git("rev-parse", "refs/heads/main", cwd=repository),
@@ -323,7 +308,6 @@ def main_sha(repository: Path) -> str:
 
 
 def commit_message(repository: Path, commit_sha: str) -> str:
-    """Read an exact commit message."""
     return cast(
         "subprocess.CompletedProcess[str]",
         git("show", "-s", "--format=%B", commit_sha, cwd=repository),
@@ -331,14 +315,12 @@ def commit_message(repository: Path, commit_sha: str) -> str:
 
 
 def pr_trailer(repository: Path, commit_sha: str) -> str | None:
-    """Read the mandatory PFC-PR trailer from a merge commit."""
     message = commit_message(repository, commit_sha)
     matches = re.findall(r"^PFC-PR:\s*(PR\d{6})\s*$", message, re.MULTILINE)
     return matches[-1] if matches else None
 
 
 def commit_parents(repository: Path, commit_sha: str) -> list[str]:
-    """Return commit parents in Git order."""
     line = cast(
         "subprocess.CompletedProcess[str]",
         git("rev-list", "--parents", "-n", "1", commit_sha, cwd=repository),
@@ -349,7 +331,6 @@ def commit_parents(repository: Path, commit_sha: str) -> list[str]:
 def create_fast_path_merge(
     paths: GitRunPaths, *, pr_id: str, prior_sha: str, head_sha: str
 ) -> str:
-    """Publish a deterministic merge whose tree is exactly the evaluated PR head."""
     git("fetch", "origin", cwd=paths.integration)
     current = main_sha(paths.central)
     if current != prior_sha:
@@ -434,7 +415,6 @@ def publish_main(
     prior_sha: str,
     merge_sha: str,
 ) -> list[str]:
-    """Idempotently publish approved changes while rejecting unrelated drift."""
     paths = changed_paths(repository, prior_sha, merge_sha)
     for relative in paths:
         target = source / relative
@@ -462,7 +442,6 @@ def publish_main(
 def write_branch_protection_context(
     paths: GitRunPaths, store: CoordinationStore
 ) -> None:
-    """Persist observability for the server-side hook and human inspection."""
     store.record_telemetry(
         "branch_protection_installed",
         {

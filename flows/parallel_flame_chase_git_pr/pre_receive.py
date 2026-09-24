@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Central-repository branch protection for the local GitHub-like protocol."""
 
 from __future__ import annotations
 
@@ -53,7 +52,6 @@ def digest(path: Path) -> str:
 
 
 def valid_receipt_artifacts(receipt: sqlite3.Row, shared: Path) -> bool:
-    """Verify that staged stdout/stderr still match their bound hashes."""
     root = (shared / "evaluations").resolve()
     for path_field, hash_field in (
         ("stdout_path", "stdout_sha256"),
@@ -154,7 +152,6 @@ def protect_main(repository: Path, database: Path, old: str, new: str) -> None:
 
 
 def protect_lane(database: Path, reference: str, new: str) -> None:
-    """Keep a ready/reviewing branch at its frozen registered head."""
     if set(new) == {"0"}:
         reject("run-owned lane branches are retained and cannot be deleted")
     branch = reference.removeprefix("refs/heads/")
