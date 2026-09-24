@@ -69,5 +69,5 @@ purchase, or other remote-action executor.
 
 The bundled `parallel-flame-chase` skill defines the actor, report, artifact, checkpoint, and
 resume protocol. Small shared units for lifecycle, lane scheduling, workspaces, reports, events,
-checkpoints, and utilities live in the hidden sibling module `flows/_parallel_flame_chase` so both
-public flows reuse isolation and recovery behavior without sharing a public identity.
+checkpoints, and utilities live in the private package
+[`_parallel_flame_chase`](_parallel_flame_chase/README.md) inside this flow.

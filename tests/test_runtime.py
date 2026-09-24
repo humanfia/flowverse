@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-from _parallel_flame_chase.core.models import (
+ROOT = Path(__file__).parents[1]
+FLOW = ROOT / "flows" / "parallel_flame_chase"
+sys.path[:0] = [str(FLOW), str(FLOW.parent)]
+
+import pytest  # noqa: E402
+from _parallel_flame_chase.core.models import (  # noqa: E402
     ArtifactRef,
     CandidateSubmission,
     Deliverable,
@@ -16,9 +21,9 @@ from _parallel_flame_chase.core.models import (
     LaneReport,
     MissionSpec,
 )
-from _parallel_flame_chase.orchestration import state as runtime_state
-from _parallel_flame_chase.runtime import ParallelRuntime, execute
-from hmz.flows import Stopped
+from _parallel_flame_chase.orchestration import state as runtime_state  # noqa: E402
+from _parallel_flame_chase.runtime import ParallelRuntime, execute  # noqa: E402
+from hmz.flows import Stopped  # noqa: E402
 
 
 def spec(title: str, approach: str) -> MissionSpec:
@@ -389,7 +394,6 @@ def test_runtime_isolates_lanes_and_resumes_actor_turn(
     assert all(state["lanes"][lane]["next_actor"] == 1 for lane in state["lanes"])
     assert chosen.coordinator.prompts[0][0] == root / "shared" / "planning-workspace"
 
-    # Simulate a compatible run created before the shared candidate board existed.
     state.pop("candidate_board")
     (root / "shared" / "leaderboard.json").unlink()
     resumed = agents()

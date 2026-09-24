@@ -3,35 +3,38 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
-import pytest
-from _parallel_flame_chase.core.api import BaseConfig, GitPRAgents
-from _parallel_flame_chase.core.models import (
+ROOT = Path(__file__).parents[1]
+FLOW = ROOT / "flows" / "parallel_flame_chase_git_pr"
+sys.path[:0] = [str(FLOW), str(FLOW.parent)]
+
+import pytest  # noqa: E402
+from _parallel_flame_chase_git_pr.core.api import BaseConfig, GitPRAgents  # noqa: E402
+from _parallel_flame_chase_git_pr.core.models import (  # noqa: E402
     InitialPlan,
     LaneBrief,
     LaneReport,
     MissionSpec,
 )
-from _parallel_flame_chase.orchestration import state as runtime_state
-from hmz.flows import Stopped
-from parallel_flame_chase_git_pr import Config
-from parallel_flame_chase_git_pr.repository import (
+from _parallel_flame_chase_git_pr.orchestration import state as runtime_state  # noqa: E402
+from hmz.flows import Stopped  # noqa: E402
+from parallel_flame_chase_git_pr import Config  # noqa: E402
+from parallel_flame_chase_git_pr.repository import (  # noqa: E402
     GitRunPaths,
     create_fast_path_merge,
     initialize_shadow_repository,
     main_sha,
     publish_main,
 )
-from parallel_flame_chase_git_pr.runtime import GitPRRuntime, execute
-from parallel_flame_chase_git_pr.storage import CoordinationStore
+from parallel_flame_chase_git_pr.runtime import GitPRRuntime, execute  # noqa: E402
+from parallel_flame_chase_git_pr.storage import CoordinationStore  # noqa: E402
 
 
 class RuntimeConfig(BaseConfig):
-    """Exercise the shared runtime's independently switchable internal mechanisms."""
-
     git_pr_enabled: bool = True
     global_knowledge_enabled: bool = False
     experiment_memory_enabled: bool = False
