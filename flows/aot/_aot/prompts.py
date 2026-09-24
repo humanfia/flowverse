@@ -33,7 +33,9 @@ create the flow at exactly this path:
 
 as a directory called `{name}` holding the `__init__.py` that is the flow -- plus whatever \
 it imports beside itself (an underscore-named sibling module or package inside the flow's \
-own directory), and a `skills/` directory only if the flow brings skills.
+own directory, imported by its plain name -- `from _myflow import helpers`, never \
+`from ._myflow import ...`, since `__init__.py` runs as a file and not as a package), and a \
+`skills/` directory only if the flow brings skills.
 
 Follow the writing-flows skill you carry: it is the contract this draft will be held to. \
 The compiler will read the draft without running it, drive it with stubs against the worst \
