@@ -1,5 +1,3 @@
-"""Factorial Report Share runtime with local Git/PR and compact knowledge."""
-
 from __future__ import annotations
 
 import hashlib
@@ -13,15 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from _parallel_flame_chase.core.models import InitialPlan, LaneName, LaneReport
-from _parallel_flame_chase.core.utils import (
+from _parallel_flame_chase_git_pr.core.models import InitialPlan, LaneName, LaneReport
+from _parallel_flame_chase_git_pr.core.utils import (
     atomic_json,
     atomic_text,
     close_safely,
     json_copy,
 )
-from _parallel_flame_chase.persistence.workspace import RunPaths, initialize_paths
-from _parallel_flame_chase.report_share import ReportShareRuntime
+from _parallel_flame_chase_git_pr.persistence.workspace import RunPaths, initialize_paths
+from _parallel_flame_chase_git_pr.report_share import ReportShareRuntime
 from hmz.flows import Stopped
 
 if TYPE_CHECKING:
@@ -29,7 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from concurrent.futures import Future
 
-    from _parallel_flame_chase.lanes.runtime import LaneRuntime
+    from _parallel_flame_chase_git_pr.lanes.runtime import LaneRuntime
     from hmz.flows import Session
 
 from .models import PRReviewResult
@@ -66,8 +64,6 @@ CYCLES_PATTERN = re.compile(r"(?im)^\s*CYCLES\s*:\s*([0-9]+)\s*$")
 
 @dataclass(slots=True)
 class PRReviewWork:
-    """Ephemeral handles for the unique active PR review."""
-
     future: Future[PRReviewResult | None] | None = None
     session: Session | None = None
     pr_id: str | None = None
@@ -75,7 +71,6 @@ class PRReviewWork:
 
 
 def run_pr_review(session: Session, prompt: str) -> PRReviewResult | None:
-    """Repair only result shape after the coordinator has acted."""
     current = prompt
     for attempt in range(3):
         try:
@@ -99,8 +94,6 @@ you just completed; use `continue` if neither merge nor explicit rejection compl
 
 
 class GitPRRuntime(ReportShareRuntime):
-    """Single-writer coordinator for the complete 2x2 experimental design."""
-
     mode_name = "git-pr"
     skill_name = "parallel-flame-chase-git-pr"
     orchestrator_role_name = "orchestrateor"
@@ -220,7 +213,6 @@ class GitPRRuntime(ReportShareRuntime):
         )
 
     def _workspace_copy_plan(self, *, resume: bool, revised: bool) -> tuple[int, str]:
-        """Account for the Git planning, lane, and integration working trees."""
         if not resume and bool(getattr(self.config, "git_pr_enabled", True)):
             copies = len(self.lane_names) + 2
             return (
@@ -406,7 +398,7 @@ class GitPRRuntime(ReportShareRuntime):
                 result = session(prompt, suppress=False, schema=InitialPlan)
             except Stopped:
                 raise
-            except Exception as why:  # noqa: BLE001 - backend failures are open-ended
+            except Exception as why:  # noqa: BLE001
                 failures.append(
                     f"attempt {attempt}: {type(why).__name__}: {why}"[:1000]
                 )
@@ -663,7 +655,7 @@ class GitPRRuntime(ReportShareRuntime):
             result = future.result()
         except Stopped:
             raise
-        except Exception as why:  # noqa: BLE001 - preserve backend diagnostics
+        except Exception as why:  # noqa: BLE001
             error = f"{type(why).__name__}: {why}"[:2000]
         close_safely(self.pr_review.session)
         self.pr_review = PRReviewWork()
@@ -746,7 +738,6 @@ class GitPRRuntime(ReportShareRuntime):
         return digest.hexdigest()
 
     def _receipt_score(self, pr: dict[str, object]) -> tuple[int, str]:
-        """Validate the frozen receipt and extract AOPT's objective value."""
         receipt_id = cast("str", pr["provisional_receipt_id"])
         receipt = self.store.receipt(receipt_id)
         expected_command = cast(
@@ -816,7 +807,6 @@ class GitPRRuntime(ReportShareRuntime):
     def _lane_update_context(
         self, lane: LaneName, *, current: str, changed: list[str]
     ) -> dict[str, object]:
-        """Inspect one lane cheaply after fetching the new protected main ref."""
         workspace = self.git_paths.lane(lane)
         fetch = git(
             "fetch",
@@ -899,7 +889,6 @@ class GitPRRuntime(ReportShareRuntime):
         changed: list[str],
         comparison: dict[str, object],
     ) -> None:
-        """Naturally steer one compact update into every active model turn."""
         if not self.main_update_monitor_enabled:
             return
         score = comparison.get("score")
@@ -923,7 +912,7 @@ class GitPRRuntime(ReportShareRuntime):
                 try:
                     runtime.session.interject(message)
                     injected = True
-                except Exception as why:  # noqa: BLE001 - durable fallback is mandatory
+                except Exception as why:  # noqa: BLE001
                     error = f"{type(why).__name__}: {why}"[:1000]
             if not injected:
                 self._emit_system(
@@ -944,7 +933,6 @@ class GitPRRuntime(ReportShareRuntime):
             )
 
     def _process_fast_path(self) -> bool:
-        """Select the best valid receipt and publish its exact tested tree."""
         if not self.git_pr_enabled:
             return False
         active = self.store.active_review()
@@ -1263,7 +1251,6 @@ def execute(
     _sleep: Callable[[float], None] = time.sleep,
     _max_turns: int | None = None,
 ) -> None:
-    """Execute one resumable factorial run."""
     GitPRRuntime(
         agents,
         task,

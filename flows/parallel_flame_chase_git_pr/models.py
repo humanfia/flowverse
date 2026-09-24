@@ -1,10 +1,8 @@
-"""Structured legacy orchestrateor PR-review result for Git/PR mode."""
-
 from __future__ import annotations
 
 from typing import Literal
 
-from _parallel_flame_chase.core.models import ReportItem, StrictModel
+from _parallel_flame_chase_git_pr.core.models import ReportItem, StrictModel
 from pydantic import Field, model_validator
 
 

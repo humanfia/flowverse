@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from pathlib import Path
 from typing import Any
 
-import pytest
-from _parallel_flame_chase.core.models import (
+ROOT = Path(__file__).parents[1]
+FLOW = ROOT / "flows" / "parallel_flame_chase"
+sys.path[:0] = [str(FLOW), str(FLOW.parent)]
+
+import pytest  # noqa: E402
+from _parallel_flame_chase.core.models import (  # noqa: E402
     ArtifactRef,
     CandidateSubmission,
     CheckpointIdentity,
@@ -14,15 +19,15 @@ from _parallel_flame_chase.core.models import (
     LaneCheckpoint,
     LaneReport,
 )
-from _parallel_flame_chase.lanes.prompts import lane_prompt, planning_prompt
-from _parallel_flame_chase.lanes.runtime import run_lane_session
-from _parallel_flame_chase.persistence.checkpoints import checkpoint_report
-from _parallel_flame_chase.persistence.events import ReportBus
-from _parallel_flame_chase.persistence.leaderboard import (
+from _parallel_flame_chase.lanes.prompts import lane_prompt, planning_prompt  # noqa: E402
+from _parallel_flame_chase.lanes.runtime import run_lane_session  # noqa: E402
+from _parallel_flame_chase.persistence.checkpoints import checkpoint_report  # noqa: E402
+from _parallel_flame_chase.persistence.events import ReportBus  # noqa: E402
+from _parallel_flame_chase.persistence.leaderboard import (  # noqa: E402
     empty_leaderboard,
     with_submission,
 )
-from _parallel_flame_chase.persistence.workspace import (
+from _parallel_flame_chase.persistence.workspace import (  # noqa: E402
     RunPaths,
     SourceLock,
     WorkspaceStats,
@@ -62,8 +67,6 @@ def test_prompts_name_the_base_skill_and_fresh_session_contract() -> None:
 
 
 def test_agent_output_schemas_require_every_object_property() -> None:
-    """Codex strict structured output rejects optional object properties."""
-
     def inspect(value: object, path: str) -> None:
         if isinstance(value, dict):
             properties = value.get("properties")

@@ -1,5 +1,3 @@
-"""Targeted runtime-authored report delivery for PR and knowledge events."""
-
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +5,7 @@ import json
 import uuid
 from typing import TYPE_CHECKING
 
-from _parallel_flame_chase.core.utils import JSONL_LINE_LIMIT, append_jsonl, now
+from _parallel_flame_chase_git_pr.core.utils import JSONL_LINE_LIMIT, append_jsonl, now
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,7 +22,6 @@ def publish_system_report(
     summary: str,
     payload: dict[str, object],
 ) -> dict[str, object]:
-    """Append one separately typed report to each intended lane."""
     record: dict[str, object] = {
         "version": 1,
         "report_id": uuid.uuid4().hex,
@@ -47,7 +44,6 @@ def unread_system_reports(
     path: Path,
     offset: object,
 ) -> tuple[list[dict[str, object]], int]:
-    """Read one bounded at-least-once batch without mutating its cursor."""
     start_offset = offset if isinstance(offset, int) and offset >= 0 else 0
     if path.stat().st_size < start_offset:
         start_offset = 0
