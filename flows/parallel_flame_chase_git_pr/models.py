@@ -7,6 +7,8 @@ from pydantic import Field, model_validator
 
 
 class PRReviewResult(StrictModel):
+    """What the orchestrateor did in one fresh PR-review session."""
+
     pr_id: str = Field(min_length=1, max_length=100)
     verdict: Literal["merged", "rejected", "continue"]
     summary: str = Field(min_length=1, max_length=4000)

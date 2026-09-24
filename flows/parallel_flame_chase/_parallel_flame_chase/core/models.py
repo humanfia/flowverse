@@ -27,6 +27,8 @@ class StrictModel(BaseModel):
 
 
 class ArtifactRef(StrictModel):
+    """One explicit file a lane publishes under its shared artifact directory."""
+
     path: str = Field(min_length=1, max_length=1000)
     description: str = Field(min_length=1, max_length=2000)
 
@@ -46,6 +48,8 @@ class ArtifactRef(StrictModel):
 
 
 class Deliverable(StrictModel):
+    """A reconstructable result offered to the coordinator and integration lane."""
+
     title: str = Field(min_length=1, max_length=200)
     approach_class: str = Field(min_length=1, max_length=200)
     artifacts: list[ArtifactRef] = Field(min_length=1, max_length=20)
@@ -54,6 +58,8 @@ class Deliverable(StrictModel):
 
 
 class CandidateSubmission(StrictModel):
+    """One evaluator-accepted candidate offered to the shared leaderboard."""
+
     title: str = Field(min_length=1, max_length=200)
     metric: str = Field(min_length=1, max_length=200)
     value: float
@@ -87,6 +93,8 @@ class CandidateSubmission(StrictModel):
 
 
 class LaneReport(StrictModel):
+    """The complete result of one actor turn."""
+
     status: Literal[
         "progress", "deliverable_ready", "no_result", "blocked", "turn_failed"
     ]
@@ -129,6 +137,8 @@ class LaneCheckpoint(StrictModel):
 
 
 class MissionSpec(StrictModel):
+    """A falsifiable unit of work assigned to one lane."""
+
     title: str = Field(min_length=1, max_length=200)
     objective: str = Field(min_length=1, max_length=8000)
     success_criteria: list[Criterion] = Field(min_length=1, max_length=12)
@@ -142,11 +152,15 @@ class MissionSpec(StrictModel):
 
 
 class LaneBrief(StrictModel):
+    """The coordinator's initial assignment for one fixed lane."""
+
     lane: LaneName
     mission: MissionSpec
 
 
 class InitialPlan(StrictModel):
+    """Exactly one distinct initial mission for every lane."""
+
     lanes: list[LaneBrief] = Field(min_length=3, max_length=3)
 
     @model_validator(mode="after")
