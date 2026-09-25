@@ -18,12 +18,7 @@ from typing import Any
 try:
     from pfc_storage import CoordinationStore, canonical_json, content_id, timestamp
 except ModuleNotFoundError:  # pragma: no cover
-    from parallel_flame_chase_git_pr.storage import (
-        CoordinationStore,
-        canonical_json,
-        content_id,
-        timestamp,
-    )
+    from .storage import CoordinationStore, canonical_json, content_id, timestamp
 
 PROTECTED_PREFIXES = (".git", ".flowbench", ".pfc")
 SECRET_MARKERS = (
@@ -124,8 +119,8 @@ class Context:
         return self.lane in set(self.store.meta("lanes"))
 
     @property
-    def is_orchestrateor(self) -> bool:
-        return self.lane == "orchestrateor"
+    def is_orchestrator(self) -> bool:
+        return self.lane == "orchestrator"
 
 
 def repository_root(context: Context) -> Path:
@@ -172,9 +167,9 @@ def environment_hash() -> str:
 
 
 def command_evaluate(context: Context, arguments: argparse.Namespace) -> int:
-    if not (context.is_lane or context.is_orchestrateor):
-        raise ValueError("only lanes and the orchestrateor may record evaluations")
-    if context.is_orchestrateor and not arguments.pr:
+    if not (context.is_lane or context.is_orchestrator):
+        raise ValueError("only lanes and the orchestrator may record evaluations")
+    if context.is_orchestrator and not arguments.pr:
         raise ValueError("a staging evaluation requires --pr")
     if context.is_lane and arguments.pr:
         pr = context.store.pr(arguments.pr)
@@ -260,9 +255,9 @@ def command_evaluate(context: Context, arguments: argparse.Namespace) -> int:
     receipt = {
         "id": receipt_id,
         "lane": context.lane,
-        "role": "orchestrateor" if context.is_orchestrateor else "lane",
+        "role": "orchestrator" if context.is_orchestrator else "lane",
         "pr_id": arguments.pr,
-        "kind": "staging" if context.is_orchestrateor else "provisional",
+        "kind": "staging" if context.is_orchestrator else "provisional",
         "commit_sha": commit_sha,
         "tree_sha": tree_sha,
         "command_json": canonical_json(arguments.command),
@@ -447,8 +442,8 @@ def command_pr_show(context: Context, arguments: argparse.Namespace) -> int:
 
 
 def command_pr_reject(context: Context, arguments: argparse.Namespace) -> int:
-    if not context.is_orchestrateor:
-        raise ValueError("only the orchestrateor may reject an active PR")
+    if not context.is_orchestrator:
+        raise ValueError("only the orchestrator may reject an active PR")
     record = context.store.reject_pr(pr_id=arguments.pr_id, reason=arguments.reason)
     print(json.dumps(record, ensure_ascii=False, indent=2))
     return 0
