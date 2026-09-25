@@ -1,35 +1,57 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-from hmz.runtime.flowing import configures, drives, offered, resumes
-from hmz.runtime.flowing.skills import brought
+from hmz.flows import Outworlder, PermissionKind, load
+
+FLOWS = Path(__file__).parents[1] / "flows"
+GIT_PR = FLOWS / "parallel_flame_chase_git_pr"
+SKILL = "parallel-flame-chase-git-pr"
 
 
 def test_only_canonical_git_pr_lite_is_offered() -> None:
-    flows = Path(__file__).parents[1] / "flows"
-    names = set(offered(flows))
-    git_pr = flows / "parallel_flame_chase_git_pr" / "__init__.py"
+    names = {path.name for path in FLOWS.iterdir() if (path / "__init__.py").is_file()}
+    flow: Any = load(str(GIT_PR))
+    declared = flow.describe()
 
     assert "parallel_flame_chase" in names
     assert "parallel_flame_chase_git_pr" in names
-    assert drives(git_pr) == (
-        "orchestrateor",
+    assert declared.name == "parallel_flame_chase_git_pr"
+    assert declared.resumable
+    assert not declared.hidden
+    assert [role.name for role in declared.agents] == [
+        "orchestrator",
         "lane_1_actor_a",
         "lane_1_actor_b",
         "lane_2_actor_a",
         "lane_2_actor_b",
         "lane_3_actor_a",
         "lane_3_actor_b",
-    )
-    assert resumes(git_pr)
-    assert [skill.name for skill in brought(git_pr.parent)] == [
-        "parallel-flame-chase-git-pr"
+        "human",
     ]
+    human = declared.agent("human")
+    assert human.auto
+    assert human.declared is Outworlder
+    for role in declared.agents:
+        if role.name == "human":
+            continue
+        assert not role.auto
+        assert role.required
+        assert role.harness is None
+        assert role.capabilities == frozenset()
+        assert role.skills == (SKILL,)
+        expected = (
+            PermissionKind.READ if role.name == "orchestrator" else PermissionKind.ALL
+        )
+        assert role.permission.user == expected
+    [workspace] = declared.envs
+    assert workspace.name == "workspace"
+    assert workspace.auto
+    assert (GIT_PR / "skills" / SKILL / "SKILL.md").is_file()
 
-    config = configures(git_pr)
-    assert config is not None
-    assert set(config.model_fields) == {
+    params = declared.params
+    assert set(params.model_fields) == {
         "rest_seconds",
         "resume_mode",
         "confirm_large_workspace_copies",
@@ -41,7 +63,7 @@ def test_only_canonical_git_pr_lite_is_offered() -> None:
         "token_efficient_enabled",
         "main_update_monitor_enabled",
     }
-    assert config().model_dump() == {
+    assert params().model_dump() == {
         "rest_seconds": 1.0,
         "resume_mode": "auto",
         "confirm_large_workspace_copies": False,

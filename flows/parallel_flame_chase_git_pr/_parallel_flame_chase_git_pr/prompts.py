@@ -1,34 +1,29 @@
 from __future__ import annotations
 
 import json
+import shlex
+
+SESSION_PROTOCOL = (
+    "Your partner alternates with you; leave durable work and evidence, "
+    "not conversational memory."
+)
 
 
 def _document(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
-def planning_prompt(
-    *,
-    objective: str,
-    workspace_map: dict[str, object],
-    skill: str = "parallel-flame-chase",
-    role_name: str = "coordinator",
-    cadence: str = (
-        "This is the only coordinator turn; lanes will subsequently self-coordinate "
-        "through durable reports."
-    ),
+def git_planning_prompt(
+    *, objective: str, workspace_map: dict[str, object], skill: str
 ) -> str:
-    return f"""You are the planning {role_name} for a generic parallel Flame Chase.
+    return f"""You are the planning orchestrator for a Git/PR parallel Flame Chase.
 
-Read the repository and the mounted `{skill}` skill before deciding. Plan only:
-do not edit the repository, execute remote actions, or start implementation. Split the objective
-into exactly three materially different lanes. Lane 1 is the sole integration owner and works in
-the original source. Lanes 2 and 3 work in private snapshots and must publish reconstructable
-artifact packages. All three lanes may independently use task-provided local evaluators, submit
-hashed candidate packages, and compare against the same runtime-owned leaderboard. Plan useful
-candidate-producing work for every lane without weakening Lane 1's exclusive source-integration
-ownership. Make each mission falsifiable, information-seeking, and independently useful. Avoid
-three cosmetic variants of one approach. {cadence}
+Read the repository and mounted `{skill}` skill. Plan only: do not edit files or execute remote
+actions. Split the objective into exactly three materially different, falsifiable experiment
+lanes. All three lanes have isolated clones, equal ability to test, and equal ability to propose
+one frozen ready PR at a time. There is no privileged integration lane: later integration is a
+deterministic receipt-verified best-score fast path. Favor complementary information gain over
+cosmetic variants, and make every lane independently useful. This is the only planning turn.
 
 Objective:
 {objective}
@@ -40,6 +35,38 @@ Return only the structured InitialPlan requested by the runtime.
 """
 
 
+def lane_protocol(
+    *, lane: str, run_root: str, cli: str, allowed_paths: list[str]
+) -> str:
+    prefix = f"{shlex.quote(cli)} --run-root {shlex.quote(run_root)} --lane {lane}"
+    return f"""This lane owns exactly this writable Git clone. Code/lightweight results belong
+in Git; large evaluator outputs belong in the external object store. Start each new experiment
+from the latest `origin/main` on a branch named `{lane}/<experiment>`. A newer ready candidate
+supersedes your older queued candidate. Never rewrite a ready PR head. Commit, push the exact
+branch, and use:
+
+  {prefix} evaluate -- <official task evaluator command>
+  {prefix} pr open --draft --title "..." --hypothesis "..."
+  {prefix} pr ready PRxxxxxx --receipt R...
+
+`evaluate` is a recorder, not an evaluator: it preserves the external command's result and only
+a successful receipt from the exact official command, bound to a clean pushed head/tree, qualifies
+a PR. The runtime prioritizes the lowest `CYCLES` value and publishes that exact tested tree only
+when it improves official main; there is no second model review or second evaluator run. Git
+metadata mentioned in LaneReport is informational; the PR registry and receipts are authoritative.
+The frozen allowed path patterns are {_document(allowed_paths)}; `.git`, `.flowbench`, and `.pfc`
+are always protected."""
+
+
+def lane_ownership(lane: str) -> str:
+    return (
+        f"You are {lane}, an equal PR-authoring research lane. Work only in your assigned "
+        "run-owned clone. Do not edit the original source, another lane's clone, the central "
+        "repository, or the orchestrator integration workspace. The source changes only "
+        "after a receipt-verified candidate is selected and published by the runtime."
+    )
+
+
 def lane_prompt(
     *,
     objective: str,
@@ -47,44 +74,18 @@ def lane_prompt(
     actor_role: str,
     turn: int,
     workspace_map: dict[str, object],
-    mission: dict[str, object] | None,
     initial_brief: dict[str, object],
     unread_reports: list[dict[str, object]],
     checkpoint_path: str,
     artifact_root: str,
     identity: dict[str, object],
-    integration_item: dict[str, object] | None,
     runtime_status: dict[str, object],
-    candidate_board: dict[str, object] | None = None,
-    leaderboard_path: str = "shared/leaderboard.json",
-    skill: str = "parallel-flame-chase",
-    previous_lane_report: dict[str, object] | None = None,
-    mode_instructions: str = "",
-    ownership_instructions: str | None = None,
-    session_protocol: str = (
-        "Your partner alternates with you; leave durable work and evidence, "
-        "not conversational memory."
-    ),
+    candidate_board: dict[str, object],
+    leaderboard_path: str,
+    skill: str,
+    previous_lane_report: dict[str, object] | None,
+    mode_instructions: str,
 ) -> str:
-    ownership = ownership_instructions or (
-        (
-            "You are Lane 1, the sole integration owner. You may edit the original source. "
-            "Integrate other lanes only from validated artifact packages and keep the source "
-            "coherent."
-        )
-        if lane == "lane-1"
-        else (
-            "You are a private research lane. Work only in your snapshot. Do not edit the "
-            "original source. Publish every offered deliverable as explicit files under your "
-            "artifact root, with enough integration notes for Lane 1 to reconstruct it."
-        )
-    )
-    mission_text = _document(mission if mission is not None else initial_brief)
-    integration_text = (
-        _document(integration_item)
-        if integration_item is not None
-        else "No accepted integration package is assigned this turn."
-    )
     same_lane_section = (
         ""
         if previous_lane_report is None
@@ -99,16 +100,11 @@ Continue correct work, repair stale or false claims, and record what you adopted
 your own report.
 """
     )
-    specialized_section = (
-        ""
-        if not mode_instructions
-        else f"\nMode-specific collaboration protocol:\n{mode_instructions}\n"
-    )
     return f"""You are {actor_role}, taking turn {turn} for {lane} in a generic parallel Flame
 Chase. This is a fresh session. Read the repository, TASK.md when present, and the mounted
-`{skill}` skill. {session_protocol}
+`{skill}` skill. {SESSION_PROTOCOL}
 
-{ownership}
+{lane_ownership(lane)}
 
 Do substantive work now. Test claims proportionally. Do not invoke remote release, deployment,
 competition submission, purchase, or messaging actions: this flow has no remote-action authority.
@@ -127,19 +123,16 @@ direction when results are comparable. Before comparing or choosing work, inspec
 leaderboard at `{leaderboard_path}`; it may change while this session runs.
 
 Current cross-lane candidate leaderboard:
-{_document(candidate_board or {"best": None, "leaders": []})}
+{_document(candidate_board)}
 
 Objective:
 {objective}
 
 Current mission or base lane brief:
-{mission_text}
+{_document(initial_brief)}
 
 Lane-local runtime status from the preceding attempt:
 {_document(runtime_status)}
-
-Accepted integration work (Lane 1 only):
-{integration_text}
 
 Workspace ownership:
 {_document(workspace_map)}
@@ -147,7 +140,10 @@ Workspace ownership:
 Reports from other lanes not yet acknowledged by this lane:
 {_document(unread_reports)}
 {same_lane_section}
-{specialized_section}
+
+Mode-specific collaboration protocol:
+{mode_instructions}
+
 
 Your artifact root is `{artifact_root}`. Artifact paths in a deliverable are relative to that
 root. You may update `{checkpoint_path}` during meaningful work using the LaneCheckpoint schema
@@ -175,4 +171,10 @@ outside the structured report.
 """
 
 
-__all__ = ["lane_prompt", "lane_repair_prompt", "planning_prompt"]
+__all__ = [
+    "git_planning_prompt",
+    "lane_ownership",
+    "lane_prompt",
+    "lane_protocol",
+    "lane_repair_prompt",
+]
