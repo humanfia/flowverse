@@ -227,8 +227,9 @@ async def test_rounds_run_to_max_and_exit_through_the_methodology_analysis(
     )
     assert "maxiter" in (loop / "methodology-analysis-prompt.md").read_text()
     assert git(repo, "log", "--format=%s", "-1") == "round 2, turn 2"
-    # The compliance check's session is the loop's; each review's went with the review.
-    assert released == [False, True, True]
+    # Every reviewer session is closed once nothing holds it: each review's went with the
+    # review, and the compliance check's as soon as the loop let go of it.
+    assert released == [True, True, True]
 
 
 @pytest.mark.asyncio
