@@ -1,29 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
-import time
 import uuid
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Awaitable, Callable, MutableMapping
 from pathlib import Path
 from typing import Any, cast
 
-from hmz.flows import Question, Stopped, home
+from hmz.flows import EnvError, EnvPermissionDenied, FlowParams
 
-from ..core.api import (
-    DEFAULT_WORKSPACE_COPY_WARNING_THRESHOLD_BYTES,
-    DEFAULT_WORKSPACE_FILE_WARNING_THRESHOLD,
-)
+from ..core.api import SKILL
 from ..core.models import LANES, InitialPlan, LaneName
-from ..core.utils import (
-    atomic_json,
-    atomic_text,
-    close_safely,
-    json_copy,
-    now,
-    task_fingerprint,
-    workspace_key,
-)
+from ..core.utils import json_bytes, json_copy, now, task_fingerprint
 from ..lanes.prompts import planning_prompt
 from ..lanes.runtime import LaneRuntime
 from ..persistence.events import ReportBus
@@ -32,14 +20,18 @@ from ..persistence.workspace import (
     RunPaths,
     SourceLock,
     WorkspaceStats,
-    initialize_paths,
-    inspect_workspace_stats,
+    commit_files,
+    initialize_run,
+    inspect_workspace,
     snapshot,
-    validate_runtime_layout,
+    validate_layout,
 )
 
 STATE_VERSION = 1
 PROTOCOL_VERSION = 1
+STATE_KEY = "control"
+RUN_PREFIX = "parallel_flame_chase"
+EVENT_LIMIT = 200
 CONTINUATION_MARKERS = {
     "continue",
     "continue.",
@@ -55,11 +47,11 @@ _ACCEPTED_CONFIRMATIONS = frozenset(
 )
 
 
-class WorkspaceStartupCancelled(Stopped):
+class WorkspaceStartupCancelled(Exception):
     pass
 
 
-def _confirmed(answer: str | None) -> bool:
+def _confirmed(answer: object) -> bool:
     if not isinstance(answer, str):
         return False
     normalized = answer.strip().casefold()
@@ -68,52 +60,56 @@ def _confirmed(answer: str | None) -> bool:
     return normalized.startswith("a. start anyway")
 
 
-def _positive_int(value: object, fallback: int) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        return fallback
-    return value
-
-
 class RuntimeState:
     mode_name = "base"
-    skill_name = "parallel-flame-chase"
+    skill_name = SKILL
     planning_cadence = (
         "This is the only coordinator turn; lanes will subsequently self-coordinate "
         "through durable reports."
     )
     orchestrator_role_name = "coordinator"
     replan_on_objective_revision = True
-    executor_workers = 4
     lane_names: tuple[LaneName, ...] = LANES
+    default_max_turns: int | None = None
+
+    @staticmethod
+    async def default_sleep(seconds: float) -> None:
+        await asyncio.sleep(seconds)
 
     def __init__(
         self,
         agents: Any,
+        envs: Any,
         task: str,
-        config: Any,
-        state: dict[str, Any] | None,
+        params: Any,
+        state: MutableMapping[str, Any] | None,
         *,
+        planner: Any,
+        lane_turn: Any,
         clock: Callable[[], dt.datetime] | None = None,
-        sleeper: Callable[[float], None] = time.sleep,
+        sleeper: Callable[[float], Awaitable[object]] | None = None,
         max_turns: int | None = None,
     ) -> None:
         self.agents = agents
+        self.workspace = envs["workspace"]
         self.raw_task = task
-        self.config = config
-        self.state = state if state is not None else {}
+        self.params = params
+        self.state: MutableMapping[str, Any] = state if state is not None else {}
+        self.planner = planner
+        self.lane_turn = lane_turn
         self.clock = clock or (lambda: dt.datetime.now(dt.UTC))
-        self.sleeper = sleeper
-        self.max_turns = max_turns
-        self.source = Path.cwd().resolve()
+        self.sleeper = sleeper or self.default_sleep
+        self.max_turns = self.default_max_turns if max_turns is None else max_turns
+        self.source = str(self.workspace.workdir)
+        self.previous: dict[str, Any] = {}
         self.control: dict[str, Any] = {}
+        self.store: Any = None
         self.paths: RunPaths
         self.bus: ReportBus
+        self.lock: SourceLock | None = None
         self.lanes: dict[LaneName, LaneRuntime] = {}
+        self.lane_workspaces: dict[LaneName, Any] = {}
         self._workspace_stats: WorkspaceStats | None = None
-        self.executor = ThreadPoolExecutor(
-            max_workers=self.executor_workers,
-            thread_name_prefix="parallel-flame",
-        )
         self.completed_turns = 0
 
     @property
@@ -126,7 +122,7 @@ class RuntimeState:
     def _validate_mode_control(self) -> None:
         pass
 
-    def _prepare_mode(self, objective: str, *, revised: bool) -> None:
+    async def _prepare_mode(self, objective: str, *, revised: bool) -> None:
         pass
 
     def _before_persist(self) -> None:
@@ -135,30 +131,39 @@ class RuntimeState:
     def _manifest_fields(self) -> dict[str, object]:
         return {}
 
-    def _initialize_mode_paths(self) -> None:
-        pass
+    def _event(self, event: dict[str, object]) -> None:
+        events = cast("list[dict[str, object]]", self.control["events"])
+        events.append(event)
+        del events[:-EVENT_LIMIT]
 
-    def _validate_mode_layout(self) -> None:
-        pass
+    async def _task_file(self) -> str | None:
+        try:
+            data = await self.workspace.read("TASK.md")
+        except EnvPermissionDenied:
+            raise
+        except (FileNotFoundError, EnvError):
+            return None
+        return data.decode("utf-8")
 
-    def _validate_layout(self) -> None:
-        validate_runtime_layout(self.paths, self.lane_names)
-        self._validate_mode_layout()
-
-    def _resolve_objective(self) -> tuple[str, bool, bool]:
+    async def _resolve_objective(self) -> tuple[str, bool, bool]:
+        stored = self.state[STATE_KEY] if STATE_KEY in self.state else {}
+        if not isinstance(stored, dict):
+            stored = {}
+        stored = cast("dict[str, Any]", stored)
         if (
-            self.state.get("version") == STATE_VERSION
-            and self.state.get("protocol") != PROTOCOL_VERSION
+            stored.get("version") == STATE_VERSION
+            and stored.get("protocol") != PROTOCOL_VERSION
         ):
             raise ValueError("unsupported parallel Flame Chase state protocol")
         marker = self.raw_task.strip().casefold() in CONTINUATION_MARKERS
-        previous = self.state if self.state.get("version") == STATE_VERSION else {}
-        previous_source = previous.get("source") == str(self.source)
-        forced_fresh = getattr(self.config, "resume_mode", "auto") == "fresh"
-        task_file = self.source / "TASK.md"
+        previous = stored if stored.get("version") == STATE_VERSION else {}
+        self.previous = previous
+        previous_source = previous.get("source") == self.source
+        forced_fresh = self.params.resume_mode == "fresh"
         if marker:
-            if task_file.is_file():
-                objective = task_file.read_text(encoding="utf-8").strip()
+            task_text = await self._task_file()
+            if task_text is not None:
+                objective = task_text.strip()
             elif previous_source and isinstance(previous.get("objective"), str):
                 objective = cast("str", previous["objective"]).strip()
             else:
@@ -226,14 +231,13 @@ class RuntimeState:
     def _new_control(self, objective: str) -> dict[str, Any]:
         stamp = self.clock().astimezone(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
         run_id = f"{stamp}-{uuid.uuid4().hex[:10]}"
-        root = home() / "parallel_flame_chase" / workspace_key(self.source) / run_id
         control: dict[str, Any] = {
             "version": STATE_VERSION,
             "protocol": PROTOCOL_VERSION,
             "mode": self._mode,
             "run_id": run_id,
-            "run_root": str(root),
-            "source": str(self.source),
+            "run_root": None,
+            "source": self.source,
             "objective": objective,
             "task_fingerprint": task_fingerprint(objective),
             "status": "starting",
@@ -258,80 +262,8 @@ class RuntimeState:
         control.update(self._new_mode_control())
         return control
 
-    def _workspace_map(self) -> dict[str, object]:
-        return {
-            "version": 1,
-            "run_id": self.control["run_id"],
-            "source": str(self.source),
-            "shared": str(self.paths.shared),
-            "lanes": {
-                "lane-1": {
-                    "workspace": str(self.source),
-                    "ownership": "original-source-and-integration",
-                },
-                "lane-2": {
-                    "workspace": str(self.paths.workspace("lane-2")),
-                    "ownership": "private-snapshot",
-                },
-                "lane-3": {
-                    "workspace": str(self.paths.workspace("lane-3")),
-                    "ownership": "private-snapshot",
-                },
-            },
-            "artifact_roots": {
-                lane: str(self.paths.artifact_root(lane)) for lane in self.lane_names
-            },
-            "checkpoints": {
-                lane: str(self.paths.checkpoint(lane)) for lane in self.lane_names
-            },
-            "candidate_submissions": {
-                "all_lanes_may_submit": True,
-                "local_evaluator_only": True,
-                "report_field": "submission",
-                "requires_reconstructable_deliverable": True,
-                "leaderboard": str(self.paths.leaderboard),
-                "current": json_copy(self.control["candidate_board"]),
-            },
-            "remote_actions": "not-authorized-by-this-flow",
-        }
-
-    def _plan(self, objective: str, cwd: Path | None = None) -> InitialPlan:
-        prompt = planning_prompt(
-            objective=objective,
-            workspace_map=self._workspace_map(),
-            skill=self.skill_name,
-            role_name=self.orchestrator_role_name,
-            cadence=self.planning_cadence,
-        )
-        failures: list[str] = []
-        for attempt in range(1, 4):
-            session = self.agents.coordinator.new(cwd=cwd or self.paths.planning)
-            try:
-                result = session(prompt, suppress=False, schema=InitialPlan)
-            except Stopped:
-                raise
-            except Exception as why:  # noqa: BLE001
-                failures.append(
-                    f"attempt {attempt}: {type(why).__name__}: {why}"[:1000]
-                )
-                result = None
-            finally:
-                close_safely(session)
-            if result is not None:
-                return result
-            if len(failures) < attempt:
-                failures.append(
-                    f"attempt {attempt}: coordinator returned no structured plan"
-                )
-        raise RuntimeError(
-            f"initial coordinator failed after 3 fresh sessions: {failures}"
-        )
-
-    def _validate_plan(self, value: object) -> Any:
-        return InitialPlan.model_validate(value)
-
-    def _resume_run(self, objective: str) -> None:
-        self.control = json_copy(self.state)
+    def _resume_control(self, objective: str) -> None:
+        self.control = json_copy(self.previous)
         if "candidate_board" not in self.control:
             run_id = self.control.get("run_id")
             if not isinstance(run_id, str) or not run_id:
@@ -343,45 +275,61 @@ class RuntimeState:
             task_fingerprint=task_fingerprint(objective),
             updated_at=now(),
         )
-        expected_root = (
-            home() / "parallel_flame_chase" / workspace_key(self.source)
-        ).resolve()
-        resumed_root = Path(cast("str", self.control["run_root"])).resolve()
-        if not resumed_root.is_relative_to(
-            expected_root
-        ) or resumed_root.name != self.control.get("run_id"):
-            raise ValueError(
-                "resumable run_root is outside this workspace's runtime home"
-            )
-        self.paths = RunPaths(resumed_root, self.source)
-        required = (
-            self.paths.root,
-            self.paths.shared,
-            self.paths.reports,
-            *(
-                self.paths.private / lane
-                for lane in self.lane_names
-                if lane != "lane-1"
-            ),
-            *(self.paths.reports / f"{lane}.jsonl" for lane in self.lane_names),
-        )
-        if not all(path.exists() for path in required):
-            raise RuntimeError(
-                "resumable run is incomplete; refusing to recreate lost state"
-            )
-        self._validate_layout()
-        initialize_paths(self.paths, make_snapshots=False, lanes=self.lane_names)
 
-    def _create_run(self, objective: str) -> None:
-        self.control = self._new_control(objective)
-        self.paths = RunPaths(Path(cast("str", self.control["run_root"])), self.source)
-        self.paths.root.mkdir(parents=True, exist_ok=False)
-        initialize_paths(
-            self.paths,
-            make_snapshots=True,
-            lanes=self.lane_names,
-            source_size=self._workspace_statistics().total_bytes,
+    def _workspace_map(self) -> dict[str, object]:
+        paths = self.paths
+        return {
+            "version": 1,
+            "run_id": self.control["run_id"],
+            "source": self.source,
+            "shared": str(paths.shared),
+            "lanes": {
+                lane: {
+                    "workspace": (
+                        self.source if lane == "lane-1" else str(paths.workspace(lane))
+                    ),
+                    "ownership": (
+                        "original-source-and-integration"
+                        if lane == "lane-1"
+                        else "private-snapshot"
+                    ),
+                }
+                for lane in self.lane_names
+            },
+            "artifact_roots": {
+                lane: str(paths.artifact_root(lane)) for lane in self.lane_names
+            },
+            "checkpoints": {
+                lane: str(paths.checkpoint(lane)) for lane in self.lane_names
+            },
+            "candidate_submissions": {
+                "all_lanes_may_submit": True,
+                "local_evaluator_only": True,
+                "report_field": "submission",
+                "requires_reconstructable_deliverable": True,
+                "leaderboard": str(paths.leaderboard),
+                "current": json_copy(self.control["candidate_board"]),
+            },
+            "remote_actions": "not-authorized-by-this-flow",
+        }
+
+    async def _plan(self, objective: str, place: Any) -> InitialPlan:
+        prompt = planning_prompt(
+            objective=objective,
+            workspace_map=self._workspace_map(),
+            skill=self.skill_name,
+            role_name=self.orchestrator_role_name,
+            cadence=self.planning_cadence,
         )
+        return await self.planner(
+            prompt,
+            agents={"coordinator": self.agents["coordinator"]},
+            envs={"place": place},
+            params=FlowParams(),
+        )
+
+    def _validate_plan(self, value: object) -> Any:
+        return InitialPlan.model_validate(value)
 
     def _workspace_copy_plan(self, *, resume: bool, revised: bool) -> tuple[int, str]:
         if not resume:
@@ -393,23 +341,17 @@ class RuntimeState:
             return 1, "1 revised-objective planning snapshot"
         return 0, ""
 
-    def _workspace_statistics(self) -> WorkspaceStats:
+    async def _workspace_statistics(self) -> WorkspaceStats:
         if self._workspace_stats is None:
-            self._workspace_stats = inspect_workspace_stats(self.source)
+            self._workspace_stats = await inspect_workspace(self.workspace)
         return self._workspace_stats
 
-    def _confirm_workspace_copies(self, *, copies: int, description: str) -> None:
+    async def _confirm_workspace_copies(self, *, copies: int, description: str) -> None:
         if copies < 1:
             return
-        stats = self._workspace_statistics()
-        file_threshold = _positive_int(
-            getattr(self.config, "workspace_file_warning_threshold", None),
-            DEFAULT_WORKSPACE_FILE_WARNING_THRESHOLD,
-        )
-        byte_threshold = _positive_int(
-            getattr(self.config, "workspace_copy_warning_threshold_bytes", None),
-            DEFAULT_WORKSPACE_COPY_WARNING_THRESHOLD_BYTES,
-        )
+        stats = await self._workspace_statistics()
+        file_threshold = self.params.workspace_file_warning_threshold
+        byte_threshold = self.params.workspace_copy_warning_threshold_bytes
         estimated_bytes = stats.total_bytes * copies
         if stats.regular_files <= file_threshold and estimated_bytes <= byte_threshold:
             return
@@ -423,63 +365,92 @@ class RuntimeState:
             "bytes. No new workspace copy has been created yet."
         )
         print(warning)
-        if getattr(self.config, "confirm_large_workspace_copies", False) is not True:
+        if not self.params.confirm_large_workspace_copies:
             print("Interactive confirmation is disabled; continuing startup.")
             return
-        human = getattr(self.agents, "human", None)
-        asked = cast(
-            "Callable[[Question], str | None] | None",
-            getattr(human, "asked", None),
-        )
-        if not callable(asked):
+        human = self.agents.get("human")
+        if human is None or human.away:
             print("No interactive confirmation is available; startup cancelled.")
             raise WorkspaceStartupCancelled(
                 "large workspace startup requires confirmation"
             )
-        answer = asked(
-            Question(
-                text=f"{warning}\n\nStart anyway and create these workspace copies?",
-                options=_CONFIRMATION_OPTIONS,
-            )
+        session = await human.spawn(env=self.workspace)
+        answer = await human.run(
+            f"{warning}\n\nStart anyway and create these workspace copies?\n"
+            f"Answer with one of: {', '.join(_CONFIRMATION_OPTIONS)}.",
+            session=session,
         )
         if not _confirmed(answer):
             print("Parallel Flame Chase startup cancelled; no new copies were created.")
             raise WorkspaceStartupCancelled("large workspace startup cancelled")
 
-    def _open_run(self, objective: str, resume: bool) -> None:
-        if resume:
-            self._resume_run(objective)
-        else:
-            self._create_run(objective)
-        self._initialize_mode_paths()
-        self.bus = ReportBus(self.paths, self.lane_names)
-        atomic_text(self.paths.root / "objective.md", objective + "\n")
-        atomic_json(self.paths.workspace_map, self._workspace_map())
-        self._validate_layout()
+    async def _validate_layout(self) -> None:
+        await validate_layout(self.store, self.paths, self.lane_names)
 
-    def _planning_workspace(self, objective: str) -> Path:
-        workspace = (
-            self.paths.shared / "planning-revisions" / task_fingerprint(objective)[:16]
+    async def _commit(self, files: dict[Path, bytes]) -> None:
+        await commit_files(self.store, self.paths, self.lane_names, files)
+
+    async def _subdir(self, path: Path) -> Any:
+        return await self.store.derive_subdir(
+            subdir=path.relative_to(self.paths.root).as_posix()
         )
-        if not workspace.exists():
-            snapshot(self.source, workspace, self._workspace_statistics().total_bytes)
-        return workspace
 
-    def _prepare_plan(self, objective: str, *, resume: bool, revised: bool) -> None:
+    async def _open_run(self, objective: str, resume: bool) -> None:
+        self.store = await self.workspace.derive_scratch(
+            f"{RUN_PREFIX}-{self.control['run_id']}"
+        )
+        self.paths = RunPaths(Path(str(self.store.workdir)))
+        self.control["run_root"] = str(self.paths.root)
+        stats = self._workspace_stats
+        await initialize_run(
+            self.workspace,
+            self.paths,
+            self.lane_names,
+            fresh=not resume,
+            size=None if stats is None else stats.total_bytes,
+        )
+        for lane in self.lane_names:
+            self.lane_workspaces[lane] = (
+                self.workspace
+                if lane == "lane-1"
+                else await self._subdir(self.paths.workspace(lane))
+            )
+        self.bus = ReportBus(self.store, self.lane_names)
+        await self.bus.open()
+        await self._commit(
+            {
+                self.paths.objective: (objective + "\n").encode(),
+                self.paths.workspace_map: json_bytes(self._workspace_map()),
+            }
+        )
+
+    async def _planning_workspace(self, objective: str) -> Any:
+        revision = int(self.control.get("replans", 0)) + 1
+        destination = (
+            self.paths.planning_revisions
+            / f"{task_fingerprint(objective)[:16]}-{revision}"
+        )
+        await snapshot(self.workspace, destination)
+        return await self._subdir(destination)
+
+    async def _prepare_plan(
+        self, objective: str, *, resume: bool, revised: bool
+    ) -> None:
         replan = resume and revised and self.replan_on_objective_revision
         needs_plan = not resume or self.control.get("plan") is None or replan
         if not needs_plan:
             return
-        planning_cwd = (
-            self._planning_workspace(objective)
+        place = (
+            await self._planning_workspace(objective)
             if resume and revised
-            else self.paths.planning
+            else await self._subdir(self.paths.planning)
         )
-        plan = self._plan(objective, planning_cwd)
+        plan = await self._plan(objective, place)
         self.control["plan"] = plan.model_dump(mode="json")
         if not replan:
             return
-        self.control["events"].append(
+        self.control["replans"] = int(self.control.get("replans", 0)) + 1
+        self._event(
             {
                 "at": now(),
                 "kind": "objective_replanned",
@@ -492,44 +463,40 @@ class RuntimeState:
             lane_state["consecutive_failures"] = 0
 
     def _prepare_lanes(self) -> None:
-        pairs = {
-            "lane-1": (self.agents.lane_1_actor_a, self.agents.lane_1_actor_b),
-            "lane-2": (self.agents.lane_2_actor_a, self.agents.lane_2_actor_b),
-            "lane-3": (self.agents.lane_3_actor_a, self.agents.lane_3_actor_b),
-        }
-        for lane in LANES:
+        for lane in self.lane_names:
             lane_state = cast("dict[str, Any]", self.control["lanes"][lane])
+            role = lane.replace("-", "_")
             self.lanes[lane] = self._make_lane_runtime(
                 lane=lane,
-                actors=pairs[lane],
-                workspace=self.paths.workspace(lane),
+                actors=(self.agents[f"{role}_actor_a"], self.agents[f"{role}_actor_b"]),
+                workspace=self.lane_workspaces[lane],
                 actor_at=int(lane_state.get("next_actor", 0)) % 2,
             )
 
     def _make_lane_runtime(self, **fields: Any) -> LaneRuntime:
         return LaneRuntime(**fields)
 
-    def _source_lock(self) -> SourceLock:
-        return SourceLock(
-            home()
-            / "parallel_flame_chase"
-            / "locks"
-            / f"{workspace_key(self.source)}.lock",
-            self.source,
-            cast("str", self.control["run_id"]),
-        )
-
-    def prepare(self) -> SourceLock:
-        objective, resume, revised = self._resolve_objective()
+    async def prepare(self) -> None:
+        objective, resume, revised = await self._resolve_objective()
         copies, description = self._workspace_copy_plan(resume=resume, revised=revised)
-        self._confirm_workspace_copies(copies=copies, description=description)
-        self._open_run(objective, resume)
-        self._prepare_plan(objective, resume=resume, revised=revised)
-        self._prepare_mode(objective, revised=revised)
+        await self._confirm_workspace_copies(copies=copies, description=description)
+        if resume:
+            self._resume_control(objective)
+        else:
+            self.control = self._new_control(objective)
+        self.lock = SourceLock(self.workspace, cast("str", self.control["run_id"]))
+        await self.lock.acquire()
+        await self._open_run(objective, resume)
+        await self._prepare_plan(objective, resume=resume, revised=revised)
+        await self._prepare_mode(objective, revised=revised)
         self._prepare_lanes()
         self.control["status"] = "running"
-        self._persist()
-        return self._source_lock()
+        await self._persist()
+
+    async def release(self) -> None:
+        lock, self.lock = self.lock, None
+        if lock is not None:
+            await lock.release()
 
     def _manifest(self) -> dict[str, object]:
         manifest: dict[str, object] = {
@@ -538,7 +505,7 @@ class RuntimeState:
             "mode": self._mode,
             "run_id": self.control.get("run_id"),
             "status": self.control.get("status"),
-            "source": str(self.source),
+            "source": self.source,
             "objective_fingerprint": self.control.get("task_fingerprint"),
             "updated_at": now(),
             "lanes": json_copy(self.control.get("lanes", {})),
@@ -548,12 +515,14 @@ class RuntimeState:
         manifest.update(self._manifest_fields())
         return manifest
 
-    def _persist(self) -> None:
-        self._validate_layout()
+    async def _persist(self) -> None:
         self._before_persist()
         self.control["updated_at"] = now()
-        self.state.clear()
-        self.state.update(json_copy(self.control))
-        atomic_json(self.paths.state_mirror, self.control)
-        atomic_json(self.paths.manifest, self._manifest())
-        atomic_json(self.paths.leaderboard, self.control["candidate_board"])
+        self.state[STATE_KEY] = self.control
+        await self._commit(
+            {
+                self.paths.state_mirror: json_bytes(self.control),
+                self.paths.manifest: json_bytes(self._manifest()),
+                self.paths.leaderboard: json_bytes(self.control["candidate_board"]),
+            }
+        )
