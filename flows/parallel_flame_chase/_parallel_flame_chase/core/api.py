@@ -1,56 +1,81 @@
-from typing import Annotated, Literal, NamedTuple, TypeAlias
+from typing import Literal
 
-from hmz.flows import Agent, AgentDefaults, Person
-from pydantic import BaseModel, Field
+from hmz.flows import (
+    Agent,
+    AgentCollection,
+    Env,
+    EnvCollection,
+    FilesEnvMixin,
+    FlowParams,
+    LocalEnv,
+    Outworlder,
+    Permission,
+    PermissionKind,
+    ScratchDirEnvMixin,
+    ShellEnvMixin,
+    TemporaryClonedDirEnvMixin,
+)
+from pydantic import Field
 
-NoGoals: TypeAlias = Annotated[Agent, AgentDefaults(goals=False)]
 DEFAULT_WORKSPACE_FILE_WARNING_THRESHOLD = 5_000
 DEFAULT_WORKSPACE_COPY_WARNING_THRESHOLD_BYTES = 1024**3
+SKILL = "parallel-flame-chase"
 
 
-class Agents(NamedTuple):
-    coordinator: NoGoals
-    lane_1_actor_a: NoGoals
-    lane_1_actor_b: NoGoals
-    lane_2_actor_a: NoGoals
-    lane_2_actor_b: NoGoals
-    lane_3_actor_a: NoGoals
-    lane_3_actor_b: NoGoals
-    human: Person
+class Actor(Agent):
+    """A coordinator or lane actor: no `/goal`, the flow's skill, and full local reach.
+
+    Lanes write artifacts and checkpoints into the run directory beside their workspace and
+    run task-provided builds, tests and evaluators, so every scope is writable.
+    """
+
+    _permission = Permission(
+        local=PermissionKind.ALL,
+        user=PermissionKind.ALL,
+        system=PermissionKind.ALL,
+        online=PermissionKind.ALL,
+    )
+    _skills = (SKILL,)
 
 
-class OrchestrateorAgents(NamedTuple):
-    orchestrateor: NoGoals
-    lane_1_actor_a: NoGoals
-    lane_1_actor_b: NoGoals
-    lane_2_actor_a: NoGoals
-    lane_2_actor_b: NoGoals
-    lane_3_actor_a: NoGoals
-    lane_3_actor_b: NoGoals
-
-    @property
-    def coordinator(self) -> NoGoals:
-        return self.orchestrateor
+class Agents(AgentCollection):
+    coordinator: Actor
+    lane_1_actor_a: Actor
+    lane_1_actor_b: Actor
+    lane_2_actor_a: Actor
+    lane_2_actor_b: Actor
+    lane_3_actor_a: Actor
+    lane_3_actor_b: Actor
+    human: Outworlder
 
 
-class GitPRAgents(NamedTuple):
-    orchestrateor: NoGoals
-    lane_1_actor_a: NoGoals
-    lane_1_actor_b: NoGoals
-    lane_2_actor_a: NoGoals
-    lane_2_actor_b: NoGoals
-    lane_3_actor_a: NoGoals
-    lane_3_actor_b: NoGoals
-    human: Person
-
-    @property
-    def coordinator(self) -> NoGoals:
-        return self.orchestrateor
+class Workspace(
+    LocalEnv,
+    ShellEnvMixin,
+    FilesEnvMixin,
+    TemporaryClonedDirEnvMixin,
+    ScratchDirEnvMixin,
+):
+    """The source workspace: Lane 1's, and what every snapshot and run directory comes from."""
 
 
-class BaseConfig(BaseModel):
-    model_config = {"extra": "forbid"}
+class Envs(EnvCollection):
+    workspace: Workspace
 
+
+class PlanAgents(AgentCollection):
+    coordinator: Actor
+
+
+class TurnAgents(AgentCollection):
+    actor: Actor
+
+
+class TurnEnvs(EnvCollection):
+    place: Env
+
+
+class Params(FlowParams):
     rest_seconds: float = Field(
         default=1.0,
         ge=0.05,

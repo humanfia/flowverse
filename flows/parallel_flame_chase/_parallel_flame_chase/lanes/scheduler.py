@@ -1,19 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any, cast
 
-from hmz.flows import Stopped
+from hmz.flows import FlowParams
 
 from ..core.models import LaneName, LaneReport
-from ..core.utils import close_safely, json_copy, now
+from ..core.utils import json_copy, now
 from ..orchestration.state import RuntimeState
-from ..persistence.checkpoints import checkpoint_fingerprint, checkpoint_report
+from ..persistence.checkpoints import checkpoint_report
 from ..persistence.events import ReportBus
 from ..persistence.leaderboard import with_submission
-from ..persistence.workspace import validate_deliverable
+from ..persistence.workspace import checkpoint_state, validate_deliverable
 from .prompts import lane_prompt
-from .runtime import LaneRuntime, run_lane_session
+from .runtime import STOPPING, LaneRuntime, reason
 
 
 class LaneScheduler(RuntimeState):
@@ -86,15 +87,24 @@ class LaneScheduler(RuntimeState):
     def _stopped_turn_error(self, runtime: LaneRuntime) -> str | None:
         return None
 
-    def _schedule_lane(self, runtime: LaneRuntime) -> None:
+    async def _take_turn(self, actor: Any, workspace: Any, prompt: str) -> LaneReport:
+        return await self.lane_turn(
+            prompt,
+            agents={"actor": actor},
+            envs={"place": workspace},
+            params=FlowParams(),
+        )
+
+    async def _schedule_lane(self, runtime: LaneRuntime) -> None:
         lane = runtime.lane
         durable = cast("dict[str, Any]", self.control["lanes"][lane])
-        if runtime.future is not None or durable.get("blocked"):
+        if runtime.task is not None or durable.get("blocked"):
             return
         allowed, mission_document = self._lane_context(lane)
         if not allowed:
             return
-        self._validate_layout()
+        await self._validate_layout()
+        paths = self.paths
         cursors = cast("dict[str, Any]", self.control["bus_cursors"])
         unread, acknowledgements = self._unread_reports(lane, cursors)
         identity = self._identity(lane)
@@ -111,12 +121,12 @@ class LaneScheduler(RuntimeState):
             mission=mission_document,
             initial_brief=self._initial_brief(lane),
             unread_reports=unread,
-            checkpoint_path=str(self.paths.checkpoint(lane)),
-            artifact_root=str(self.paths.artifact_root(lane)),
+            checkpoint_path=str(paths.checkpoint(lane)),
+            artifact_root=str(paths.artifact_root(lane)),
             identity=identity,
             integration_item=self._integration_item(lane),
             candidate_board=json_copy(self.control["candidate_board"]),
-            leaderboard_path=str(self.paths.leaderboard),
+            leaderboard_path=str(paths.leaderboard),
             runtime_status={
                 "consecutive_failures": int(durable.get("consecutive_failures", 0)),
                 "last_error": durable.get("last_error"),
@@ -129,19 +139,14 @@ class LaneScheduler(RuntimeState):
         )
         runtime.identity = identity
         runtime.pending_ack = acknowledgements
-        runtime.checkpoint_before = checkpoint_fingerprint(self.paths.checkpoint(lane))
+        runtime.checkpoint_before, _ = await checkpoint_state(
+            self.store, paths.checkpoint(lane), text=False
+        )
         self._after_lane_scheduled(runtime)
-        try:
-            session = actor.new(cwd=runtime.workspace)
-            runtime.session = session
-            runtime.future = self.executor.submit(run_lane_session, session, prompt)
-        except Stopped:
-            raise
-        except Exception as why:  # noqa: BLE001
-            close_safely(runtime.session)
-            runtime.session = None
-            self._record_failure(runtime, f"actor session could not start: {why}")
-            self._persist()
+        runtime.task = asyncio.create_task(
+            self._take_turn(actor, runtime.workspace, prompt),
+            name=f"parallel-flame-{lane}",
+        )
 
     def _report_header(
         self,
@@ -163,7 +168,7 @@ class LaneScheduler(RuntimeState):
             "recovered_from_checkpoint": recovered,
         }
 
-    def _record_report(
+    async def _record_report(
         self,
         runtime: LaneRuntime,
         report: LaneReport,
@@ -171,10 +176,11 @@ class LaneScheduler(RuntimeState):
         recovered: bool,
     ) -> None:
         lane = runtime.lane
-        self._validate_layout()
         durable = cast("dict[str, Any]", self.control["lanes"][lane])
         artifacts = (
-            validate_deliverable(self.paths.artifact_root(lane), report.deliverable)
+            await validate_deliverable(
+                self.store, self.paths.artifact_root(lane), report.deliverable
+            )
             if report.deliverable is not None
             else []
         )
@@ -193,10 +199,10 @@ class LaneScheduler(RuntimeState):
                 record,
                 cast("tuple[str, ...]", self.lane_names),
             )
-        self.bus.publish(lane, record)
+        await self.bus.publish(lane, record)
         if updated_board is not None and candidate is not None:
             self.control["candidate_board"] = updated_board
-            self.control["events"].append(
+            self._event(
                 {
                     "at": header["at"],
                     "kind": (
@@ -229,7 +235,7 @@ class LaneScheduler(RuntimeState):
         )
         self.completed_turns += 1
 
-    def _record_failure(self, runtime: LaneRuntime, error: str) -> None:
+    async def _record_failure(self, runtime: LaneRuntime, error: str) -> None:
         lane = runtime.lane
         durable = cast("dict[str, Any]", self.control["lanes"][lane])
         failure = {
@@ -245,14 +251,14 @@ class LaneScheduler(RuntimeState):
             "submission": None,
             "artifacts": [],
         }
-        self.bus.publish(lane, failure)
+        await self.bus.publish(lane, failure)
         self.control["latest_reports"][lane] = json_copy(failure)
         durable["next_actor"] = self._next_actor(runtime)
         durable["consecutive_failures"] = (
             int(durable.get("consecutive_failures", 0)) + 1
         )
         durable["last_error"] = error[:2000]
-        self.control["events"].append(
+        self._event(
             {
                 "at": now(),
                 "kind": "turn_failed",
@@ -267,25 +273,25 @@ class LaneScheduler(RuntimeState):
             return
         self._handle_pair_failure(runtime, error)
 
-    def _collect_lane(self, runtime: LaneRuntime) -> None:
-        future = runtime.future
-        if future is None or not future.done():
+    async def _collect_lane(self, runtime: LaneRuntime) -> None:
+        task = runtime.task
+        if task is None or not task.done():
             return
-        runtime.future = None
+        runtime.task = None
         result: LaneReport | None = None
         recovered = False
         error: str | None = None
         try:
-            result = future.result()
-        except Stopped:
+            result = task.result()
+        except STOPPING:
             error = self._stopped_turn_error(runtime)
             if error is None:
                 raise
         except Exception as why:  # noqa: BLE001
-            error = f"{type(why).__name__}: {why}"[:2000]
+            error = reason(why)[:2000]
         if result is None:
             result = checkpoint_report(
-                self.paths.checkpoint(runtime.lane),
+                await checkpoint_state(self.store, self.paths.checkpoint(runtime.lane)),
                 runtime.checkpoint_before,
                 runtime.identity,
             )
@@ -296,7 +302,7 @@ class LaneScheduler(RuntimeState):
             for key in ("run_id", "lane", "mission_id", "generation")
         )
         if stale:
-            self.control["events"].append(
+            self._event(
                 {
                     "at": now(),
                     "kind": "stale_turn_discarded",
@@ -306,17 +312,17 @@ class LaneScheduler(RuntimeState):
             )
         elif result is not None and result.status != "turn_failed":
             try:
-                self._record_report(runtime, result, recovered=recovered)
+                await self._record_report(runtime, result, recovered=recovered)
             except (OSError, ValueError) as why:
-                self._record_failure(runtime, f"invalid deliverable/report: {why}")
+                await self._record_failure(
+                    runtime, f"invalid deliverable/report: {why}"
+                )
         else:
-            self._record_failure(
+            await self._record_failure(
                 runtime,
                 error
                 or (result.summary if result is not None else None)
                 or "actor returned no structured report",
             )
-        close_safely(runtime.session)
-        runtime.session = None
         runtime.pending_ack.clear()
-        self._persist()
+        await self._persist()

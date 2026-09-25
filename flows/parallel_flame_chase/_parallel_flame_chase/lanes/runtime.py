@@ -1,42 +1,64 @@
 from __future__ import annotations
 
-from concurrent.futures import Future
+import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
+from typing import Any
 
-from hmz.flows import Agent, Session, Stopped
+from hmz.flows import BudgetExceeded, FlowCancelled, OutputSchemaError
 
-from ..core.models import LaneName, LaneReport
+from ..core.models import InitialPlan, LaneName, LaneReport
 from .prompts import lane_repair_prompt
+
+STOPPING = (BudgetExceeded, FlowCancelled)
+REPAIRS = 2
+PLANNING_ATTEMPTS = 3
 
 
 @dataclass(slots=True)
 class LaneRuntime:
     lane: LaneName
-    actors: tuple[Agent, Agent]
-    workspace: Path
-    future: Future[LaneReport | None] | None = None
-    session: Session | None = None
+    actors: tuple[Any, Any]
+    workspace: Any
+    task: asyncio.Task[LaneReport] | None = None
     identity: dict[str, object] = field(default_factory=dict)
     actor_at: int = 0
     pending_ack: dict[str, int] = field(default_factory=dict)
-    checkpoint_before: tuple[int, int, str] | None = None
+    checkpoint_before: str | None = None
 
 
-def run_lane_session(session: Session, prompt: str) -> LaneReport | None:
+def reason(error: BaseException) -> str:
+    """What went wrong, with the causes a harness keeps behind its own message."""
+    said = [f"{type(error).__name__}: {error}"]
+    cause = error.__cause__
+    while cause is not None and len(said) < 4:
+        said.append(f"{type(cause).__name__}: {cause}")
+        cause = cause.__cause__
+    return "\ncaused by ".join(said)
+
+
+async def run_lane_session(actor: Any, place: Any, prompt: str) -> LaneReport:
+    session = await actor.spawn(env=place)
     current = prompt
-    for number in range(1, 4):
+    for _ in range(REPAIRS):
         try:
-            report = session(current, suppress=False, schema=LaneReport)
-        except Stopped:
+            return await actor.run(current, session=session, output_schema=LaneReport)
+        except OutputSchemaError as why:
+            current = lane_repair_prompt(reason(why)[:2000])
+    return await actor.run(current, session=session, output_schema=LaneReport)
+
+
+async def run_initial_plan(coordinator: Any, place: Any, prompt: str) -> InitialPlan:
+    failures: list[str] = []
+    for attempt in range(1, PLANNING_ATTEMPTS + 1):
+        try:
+            session = await coordinator.spawn(env=place)
+            return await coordinator.run(
+                prompt, session=session, output_schema=InitialPlan
+            )
+        except STOPPING:
             raise
-        except ValueError as why:
-            if number == 3:
-                raise
-            current = lane_repair_prompt(f"{type(why).__name__}: {why}"[:2000])
-            continue
-        if report is not None:
-            return report
-        if number < 3:
-            current = lane_repair_prompt("the actor returned no structured report")
-    return None
+        except Exception as why:  # noqa: BLE001
+            failures.append(f"attempt {attempt}: {reason(why)}"[:1000])
+    raise RuntimeError(
+        f"initial coordinator failed after {PLANNING_ATTEMPTS} fresh sessions: {failures}"
+    )
