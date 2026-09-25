@@ -6,46 +6,56 @@ flow below keeps its own identical copy, so a change here belongs in the other c
 
 | Flow | Coding agents | Cleaner |
 | --- | --- | --- |
-| [`flame_chase_agent_cleanup`](../../flame_chase_agent_cleanup/README.md) | Two, alternating | A third agent |
-| [`ralph_loop_agent_cleanup`](../../ralph_loop_agent_cleanup/README.md) | One | A second agent |
+| [`flame_chase_agent_cleanup`](../../flame_chase_agent_cleanup/README.md) | `first_chaser` and `second_chaser`, alternating | `cleaner` |
+| [`ralph_loop_agent_cleanup`](../../ralph_loop_agent_cleanup/README.md) | `agent` | `cleaner` |
 
-## Configuration
+Both flows are resumable (`hmz exec --resume`). Every agent role asks for
+`SteeringAgentMixin`, so it takes a harness that can be told something mid-turn: Claude
+Code, Codex, Kimi Code or pi. The `human` role is whoever started the run, and the
+`workspace` environment is the directory the run started in; neither is given with `-a` or
+`-e`.
 
-Both flows take the same settings. `work_paths` is required: safe, non-overlapping paths
-relative to the repository, where agents may create or revise task work.
+## Params
 
-```yaml
-work_paths: [src]
-cleanup_turns: 3                     # counted coding turns since the last epoch; 0 never cleans
-next_lines: 10                       # the most lines NEXT.md may hold
-comment_lines: 30                    # comment-line cap under work_paths, printed only
-repairs: 2                           # over-measures handed back to the cleaner
-check_command: ""                    # correctness check after cleaning; empty skips it
-session_timeout_minutes: 240         # per turn, then a wrap-up request
-stop_grace_minutes: 10               # after the request, the turn is cut off
-idle_timeout_minutes: 20             # without token progress, a reminder
-max_tracked_file_mb: 10              # larger files are never committed
-confirm_large_workspace_copies: true # ask before cleaning a large workspace
-budget:                              # the run's allowance, held by humanize
-  tokens: 10                         # millions of output tokens (the flows' default)
-  hours: 12
-  dollars: 100
+Both flows take the same params, each as `-p key=value`. `work_paths` is required: safe,
+non-overlapping paths relative to the repository, where agents may create or revise task
+work, comma-separated (`-p work_paths=src,include`) or as a JSON list.
+
+```text
+work_paths                            # required, e.g. src or src,include
+cleanup_turns=3                       # counted coding turns since the last epoch; 0 never cleans
+next_lines=10                         # the most lines NEXT.md may hold
+comment_lines=30                      # comment-line cap under work_paths, printed only
+repairs=2                             # over-measures handed back to the cleaner
+check_command=""                      # correctness check after cleaning; empty skips it
+session_timeout_minutes=240           # per turn, then a wrap-up request
+stop_grace_minutes=10                 # after the request, the turn is cut off
+idle_timeout_minutes=20               # without token progress, a reminder
+max_tracked_file_mb=10                # larger files are never committed
+confirm_large_workspace_copies=true   # ask before cleaning a large workspace
 ```
 
-`budget:` is humanize's run allowance, not a flow setting. Whichever of hours, millions
-of output tokens or dollars is reached first stops the run. Both flows declare
-`Allowance(tokens=10.0)` by default.
+The flows set no budget of their own. `-b duration=12h,cost=100` (or `output_tokens=`) is
+the run's, and whichever limit is reached first stops the run; an epoch it stops is put
+back first.
 
 ## Turns
 
-A coding turn counts when it answers, and also when the clock ended it: its edits are on
-disk, so it is not taken again. A turn that answered nothing is taken again on the same
-seat, and three of those in a row end the run. Cleaner turns never count.
+Every coding turn is a fresh session, and runs as a hidden subflow (`turn`), so the session
+and whatever harness process serves it end with the turn. A cleaning epoch is one subflow
+(`epoch`) in the same way, its cleaner keeping one session through its repairs.
 
-After `session_timeout_minutes` the turn is asked to wrap up. `stop_grace_minutes` later,
-humanize cuts it off through its per-turn `Budget`, and the turn answers with what it said.
-An idle reminder goes out once per stretch of `idle_timeout_minutes` without token
-progress; it never ends a turn. `0` disables either limit.
+A coding turn counts when it answers, and also when the clock or the run's end cut it
+short: its edits are on disk, so it is not taken again. A turn that answered nothing, or
+whose harness failed short of an unrecoverable failure, is taken again on the same seat,
+and three of those in a row end the run. A turn a budget refused never started, and does
+not count. Cleaner turns never count.
+
+After `session_timeout_minutes` the turn is steered to wrap up. `stop_grace_minutes` later,
+humanize cuts it off through the turn's own budget, which is hard (`graceful=False`); where
+the run's own budget ends sooner and gracefully, the flow cuts the turn itself shortly
+after. An idle reminder is steered in once per stretch of `idle_timeout_minutes` without
+the session's output tokens or cost moving; it never ends a turn. `0` disables either limit.
 
 ## Cleaning epochs
 
@@ -65,8 +75,8 @@ Every `cleanup_turns` counted turns since the last epoch, between turns:
 5. The history is archived, then replaced by one commit, `epoch N: distilled tree`. After
    a failed check, the commit says the cleaning was reverted instead.
 
-An epoch interrupted for any reason (stopped, out of allowance, or failed) restores the
-tree before the run ends.
+An epoch interrupted for any reason (stopped, out of budget, cancelled, or failed) restores
+the tree before the run ends.
 
 The ignore rules hold for the whole epoch. A file `.gitignore` ignored when the tree was
 saved aside is never counted as a stray, copied into the revert point, taken away by a
@@ -112,16 +122,18 @@ The chain is made with `git replace`, which a clone does not carry by default. F
 ## Large workspaces
 
 Before a fresh run starts, the flow counts what a revert point would copy. That is the
-listed tree plus `.git`. Past 5,000 files or 1 GiB it prints a warning and asks the person
-at the prompt whether to start. If nobody answers, as under `hmz exec`, the run does not
-start. Add `.gitignore` rules, or set `confirm_large_workspace_copies: false` to only warn.
+listed tree plus `.git`. Past 5,000 files or 1 GiB it prints a warning and asks the
+`human` whether to start. If nobody answers, as under `hmz exec`, where nobody is there to,
+the run does not start. Add `.gitignore` rules, or pass
+`-p confirm_large_workspace_copies=false` to only warn.
 
 ## Storage
 
-Everything the flows keep lives under Humanize's managed home, outside the repository:
+Everything the flows keep lives under Humanize's home, outside the repository, so it
+outlives every run and is never taken for a stray:
 
 ```text
-$HUMANIZE_HOME/<flow>/<workspace-key>/
+$HUMANIZE_HOME/<flow>/<workspace-key>/   # ~/.humanize/... unless HUMANIZE_HOME is set
 ├── history.git                  # every run's archived history, stored once
 └── <run-id>/
     ├── manifest.txt             # the task's own files, recorded at the first start
@@ -133,17 +145,18 @@ A run root holds only a manifest and check logs once its epochs are done. Resumi
 it; a fresh run gets a new one. Each epoch packs what it added to `history.git`, and
 `git gc --auto` joins the packs as they gather.
 
-The flows run their tree and git work locally. They are not meant for agents anchored on a
-remote machine.
+The flows do their tree and git work through the workspace environment's shell: `bash`,
+`git` and the usual POSIX tools, in the workspace, never on the event loop.
 
 ## Layout
 
 ```text
 _ralph_loop_agent_cleanup/
-├── config.py    # Config and work-path validation
+├── roles.py     # the role types: Worker, Workspace
+├── config.py    # Config, the params, and work-path validation
 ├── storage.py   # the managed run root
 ├── tree.py      # listing, manifest, measures, revert point, git, check
-├── guard.py     # wrap-up request, idle reminder, per-turn cut-off
+├── guard.py     # wrap-up steer, idle reminder, per-turn cut-off
 ├── cleaning.py  # prompts and one cleaning epoch
-└── loop.py      # start, large-workspace question, cadence, one coding turn
+└── loop.py      # start, large-workspace question, cadence, the turn and epoch subflows
 ```

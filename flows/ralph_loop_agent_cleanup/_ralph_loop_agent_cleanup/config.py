@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
+import json
+from pathlib import PurePosixPath
 
-from pydantic import BaseModel, Field, field_validator
+from hmz.flows import FlowParams
+from pydantic import Field, field_validator
 
 
 def validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
-    paths = tuple(Path(raw) for raw in value)
+    paths = tuple(PurePosixPath(raw) for raw in value)
     for path in paths:
         if (
             not path.parts
             or path.is_absolute()
-            or path == Path(".")
+            or path == PurePosixPath(".")
             or ".." in path.parts
             or ".git" in path.parts
         ):
@@ -25,13 +27,11 @@ def validate_work_paths(value: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(path.as_posix() for path in paths)
 
 
-class Config(BaseModel):
-    model_config = {"extra": "forbid"}
-
+class Config(FlowParams):
     work_paths: tuple[str, ...] = Field(
         min_length=1,
         description="required relative, non-overlapping files or directories where "
-        "agents may create or revise task work",
+        "agents may create or revise task work; `-p work_paths=src,lib`",
     )
     cleanup_turns: int = Field(
         default=3,
@@ -97,16 +97,16 @@ class Config(BaseModel):
         ),
     )
 
+    @field_validator("work_paths", mode="before")
+    @classmethod
+    def _read_work_paths(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if value.lstrip().startswith("["):
+            return json.loads(value)
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+
     @field_validator("work_paths")
     @classmethod
     def _validate_work_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return validate_work_paths(value)
-
-
-def required(config: Config | None, flow: str) -> Config:
-    if config is None:
-        raise ValueError(
-            f"{flow} needs work_paths: pass -c with a file saying e.g."
-            " `work_paths: [src]`, or set it in /flow"
-        )
-    return config

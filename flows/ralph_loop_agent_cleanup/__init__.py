@@ -2,33 +2,31 @@
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
-
-from _ralph_loop_agent_cleanup import Config, drive, required
-from hmz.flows import Agent, Allowance, Person, flow
-
-FLOW_NAME = "ralph_loop_agent_cleanup"
+from _ralph_loop_agent_cleanup import Config, Worker, Workspace, drive
+from hmz.flows import AgentCollection, EnvCollection, FlowContext, Outworlder, flow
 
 
-class Agents(NamedTuple):
-    agent: Agent
-    cleaner: Agent
-    human: Person
+class Agents(AgentCollection):
+    agent: Worker
+    cleaner: Worker
+    human: Outworlder
 
 
-@flow(budget=Allowance(tokens=10.0), resumable=True)
-def run(
-    agents: Agents,
-    task: str,
-    config: Config | None = None,
-    state: dict[str, Any] | None = None,
+class Envs(EnvCollection):
+    workspace: Workspace
+
+
+@flow(agents=Agents, envs=Envs, params=Config, description=__doc__, resumable=True)
+async def ralph_loop_agent_cleanup(
+    task: str, *, agents: Agents, envs: Envs, params: Config, ctx: FlowContext
 ) -> None:
-    drive(
-        FLOW_NAME,
-        (agents.agent,),
-        agents.cleaner,
-        agents.human,
+    await drive(
+        "ralph_loop_agent_cleanup",
+        (agents["agent"],),
+        agents["cleaner"],
+        agents["human"],
         task,
-        required(config, FLOW_NAME),
-        state if state is not None else {},
+        params,
+        ctx,
+        envs["workspace"],
     )
