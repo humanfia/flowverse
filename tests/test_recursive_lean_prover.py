@@ -338,7 +338,7 @@ def loaded(tmp_path_factory: pytest.TempPathFactory) -> Any:
         prompts=sys.modules["_recursive_lean.prompts"],
         calls=rlcr.globals["CALLS"],
     )
-    loading.forget()
+    loading.forget(flows)
 
 
 def runtime_for(
