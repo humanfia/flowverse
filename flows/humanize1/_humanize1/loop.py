@@ -1,40 +1,65 @@
 from __future__ import annotations
 
-import contextlib
-import json
-import os
+import asyncio
+import datetime
 import re
-import shutil
-import subprocess
 import time
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from hmz.flows import Verdict
+from hmz.flows import (
+    Agent,
+    AgentCollection,
+    Budget,
+    EnvCollection,
+    EnvError,
+    EnvFileNotFound,
+    FilesEnvMixin,
+    FlowParams,
+    HarnessError,
+    HarnessNotInstalled,
+    HarnessRefused,
+    HarnessUnrecoverable,
+    LocalEnv,
+    ModelUnavailable,
+    ShellEnvMixin,
+    flow,
+)
 
 from . import blocks, prompts
 from .prompts import render
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Mapping
+    from pathlib import PurePosixPath
 
-    from hmz.flows import Agent, Occasion, Profile, Session
-    from pydantic import BaseModel
+    from hmz.flows import FlowContext, FlowState
 
 __all__ = [
     "ALLOWED",
     "COMPLETE",
     "MAX_LINES",
+    "PERMANENT",
     "STOP",
+    "Here",
     "Loop",
     "State",
-    "answered",
+    "Todos",
+    "TurnTimedOut",
     "git",
     "issues",
-    "spoken",
+    "move",
+    "read",
+    "remove",
+    "timed",
+    "utc",
     "verdict",
+    "write",
 ]
+
+
+class Here(LocalEnv, ShellEnvMixin, FilesEnvMixin): ...
+
 
 COMPLETE = "COMPLETE"
 STOP = "STOP"
@@ -53,6 +78,16 @@ _REPLAN_AT = 2
 _STOP_AT = 3
 
 _GIT = 30
+
+_TRIES = 3
+_PAUSE = 5.0
+
+PERMANENT = (
+    HarnessNotInstalled,
+    HarnessRefused,
+    ModelUnavailable,
+    HarnessUnrecoverable,
+)
 
 LOOPS = ".humanize/rlcr"
 BITLESSON = ".humanize/bitlesson.md"
@@ -89,21 +124,96 @@ _LESSON_ID = re.compile(r"^Lesson ID:\s*(\S+)\s*$", re.MULTILINE)
 ALLOWED = ("complete", "cancel", "maxiter", "stop", "unexpected")
 
 
-def spoken(agent: Agent | Session, prompt: str) -> tuple[str, float]:
-    began = time.monotonic()
-    while True:
-        said = agent(prompt, suppress=True)
-        if said:
-            return said, time.monotonic() - began
-        time.sleep(5)
+async def git(env: Here, *args: str) -> tuple[int, str]:
+    try:
+        status, out, _ = await env.exec(["git", *args], timeout=_GIT)
+    except EnvError:
+        return 124, ""
+    return status, out.strip()
 
 
-def answered[T: BaseModel](agent: Agent | Session, prompt: str, schema: type[T]) -> T:
-    while True:
-        said = agent(prompt, suppress=True, schema=schema)
-        if said is not None:
-            return said
-        time.sleep(5)
+async def read(env: Here, path: PurePosixPath | str) -> str | None:
+    try:
+        held = (await env.read(str(path))).decode("utf-8", errors="replace")
+    except EnvFileNotFound:
+        return None
+    return held.replace("\r\n", "\n").replace("\r", "\n")
+
+
+async def write(env: Here, path: PurePosixPath | str, text: str) -> None:
+    await env.write(str(path), text.encode("utf-8"))
+
+
+async def remove(env: Here, path: PurePosixPath | str) -> None:
+    try:
+        await env.exec(["rm", "-f", "--", str(path)], timeout=_GIT)
+    except EnvError:
+        return
+
+
+async def move(env: Here, was: PurePosixPath | str, to: PurePosixPath | str) -> str:
+    try:
+        status, _, err = await env.exec(
+            ["mv", "-f", "--", str(was), str(to)], timeout=_GIT
+        )
+    except EnvError as why:
+        return str(why) or "mv failed"
+    return "" if status == 0 else err.strip() or f"mv exited {status}"
+
+
+class TurnTimedOut(Exception):
+    pass
+
+
+async def timed[T](turn: Callable[[Budget | None], Awaitable[T]], seconds: float) -> T:
+    budget = (
+        Budget(duration=datetime.timedelta(seconds=seconds), graceful=False)
+        if seconds > 0
+        else None
+    )
+    deadline = time.monotonic() + seconds
+    try:
+        async with asyncio.timeout(seconds or None):
+            return await turn(budget)
+    except TimeoutError as why:
+        if budget is None or time.monotonic() < deadline:
+            raise
+        raise TurnTimedOut(f"took longer than {seconds:g}s") from why
+
+
+class _Reviewing(AgentCollection):
+    reviewer: Agent
+
+
+class _Reviewed(EnvCollection):
+    workspace: Here
+
+
+class _Timed(FlowParams):
+    seconds: int = 0
+
+
+@flow(
+    agents=_Reviewing,
+    envs=_Reviewed,
+    params=_Timed,
+    name="rlcr-review",
+    hidden=True,
+)
+async def review_once(
+    task: str,
+    *,
+    agents: _Reviewing,
+    envs: _Reviewed,
+    params: _Timed,
+    ctx: FlowContext,  # noqa: ARG001
+) -> str:
+    reviewer = agents["reviewer"]
+    session = await reviewer.spawn(env=envs["workspace"])
+    return await timed(
+        lambda budget: reviewer.run(task, session=session, budget=budget),
+        params.seconds,
+    )
 
 
 def verdict(said: str) -> str:
@@ -122,20 +232,6 @@ def issues(said: str) -> str:
             found = "\n".join(tail[at:])
             return f"## Code Review Issues\n\n{found}\n"
     return ""
-
-
-def git(*args: str, at: Path) -> tuple[int, str]:
-    try:
-        done = subprocess.run(
-            ["git", "-C", str(at), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_GIT,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return 124, ""
-    return done.returncode, done.stdout.strip()
 
 
 @dataclass
@@ -170,12 +266,8 @@ class State:
         return "---\n" + "\n".join(said) + "\n---\n"
 
     @classmethod
-    def read(cls, at: Path) -> State | None:
-        try:
-            held = at.read_text(encoding="utf-8")
-        except OSError:
-            return None
-        lines = held.splitlines()
+    def read(cls, held: str | None) -> State | None:
+        lines = (held or "").splitlines()
         if not lines or lines[0].strip() != "---":
             return None
         said: dict[str, str] = {}
@@ -212,50 +304,119 @@ def _read(said: str, was: object) -> str | int | bool | None:
     return said
 
 
+class Todos:
+    def __init__(self) -> None:
+        self.tasks: dict[str, tuple[str, str, str]] = {}
+        self.made = 0
+        self.listed: list[tuple[str, str]] = []
+        self.touched = False
+        self.told: tuple[int, list[str]] = (-1, [])
+
+    def seen(self, tool: str, called: Mapping[str, Any]) -> None:
+        if tool not in ("TaskCreate", "TaskUpdate", "TodoWrite", "update_plan"):
+            return
+        self.touched = True
+        if tool == "TaskCreate":
+            self.made += 1
+            self.tasks[str(self.made)] = (
+                "pending",
+                str(called.get("subject") or ""),
+                str(called.get("description") or ""),
+            )
+        elif tool == "TaskUpdate":
+            named = str(called.get("taskId") or "")
+            if not named:
+                return
+            status, subject, about = self.tasks.get(named, ("pending", "", ""))
+            self.tasks[named] = (
+                str(called.get("status") or status),
+                str(called.get("subject") or subject),
+                str(called.get("description") or about),
+            )
+        elif tool in ("TodoWrite", "update_plan"):
+            items: Any = called.get("todos" if tool == "TodoWrite" else "plan")
+            if not isinstance(items, list):
+                return
+            self.listed = [
+                (
+                    str(one.get("status") or ""),
+                    str(one.get("content") or one.get("step") or ""),
+                )
+                for one in cast("list[Any]", items)
+                if isinstance(one, dict)
+            ]
+
+    def left(self) -> list[str]:
+        found: list[str] = []
+        for named, (status, subject, about) in self.tasks.items():
+            if status in ("completed", "deleted"):
+                continue
+            lane = _lane(subject, about)
+            if lane == "queued":
+                continue
+            said = subject or about or f"Task {named}"
+            found.append(f"  - [{status}] [{lane}] (Task #{named}) {said}")
+        for status, said in self.listed:
+            if status == "completed":
+                continue
+            lane = _lane(said)
+            if lane == "queued":
+                continue
+            found.append(f"  - [{status}] [{lane}] {said}")
+        return found
+
+
 @dataclass
 class Loop:
     reviewer: Agent
-    where: Path
-    root: Path
+    env: Here
+    where: PurePosixPath
     state: State
-    said: list[str] = field(default_factory=list[str])
+    kept: FlowState | None = None
     over: str = ""
     finalizing: bool = False
     analysing: bool = False
     exit_reason: str = ""
-    kept: dict[str, Any] | None = None
+    continuing: str | None = None
+    todos: Todos = field(default_factory=Todos)
+    failing: int = 0
     _status: str | None = None
 
+    @property
+    def root(self) -> PurePosixPath:
+        return self.env.workdir
+
     @classmethod
-    def picked_up(
+    async def picked_up(
         cls,
         reviewer: Agent,
-        where: Path,
-        root: Path,
-        kept: dict[str, Any] | None = None,
+        env: Here,
+        where: PurePosixPath,
+        kept: FlowState | None = None,
     ) -> Loop | None:
         for at, finalizing, analysing in (
             (BUILDING, False, False),
             (FINALIZING, True, False),
             (ANALYSING, False, True),
         ):
-            state = State.read(where / at)
+            state = State.read(await read(env, where / at))
             if state is None:
                 continue
+            exiting = await read(env, where / EXIT_REASON) if analysing else ""
             return cls(
                 reviewer,
+                env,
                 where,
-                root,
                 state,
                 kept=kept,
                 finalizing=finalizing,
                 analysing=analysing,
-                exit_reason=_exiting(where) if analysing else "",
+                exit_reason=(exiting or "").strip(),
             )
         return None
 
-    def __call__(self, occasion: Occasion) -> Verdict | None:
-        gates: tuple[Callable[[Occasion], Verdict | None], ...] = (
+    async def stopped(self) -> str | None:
+        gates: tuple[Callable[[], Awaitable[str | None]], ...] = (
             self._schema,
             self._branch,
             self._plan_integrity,
@@ -273,123 +434,131 @@ class Loop:
             self._finalize_done,
         )
         for gate in gates:
-            refused = gate(occasion)
+            refused = await gate()
             if self.over:
                 return None
             if refused is not None:
                 return refused
-        return self._review(occasion)
-
-    def _schema(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
-        try:
-            held = self.state_file.read_text(encoding="utf-8")
-        except OSError:
-            self._ends("unexpected")
+        said = await self._review()
+        if self.over:
+            if said:
+                print(said)
             return None
-        for name, kind in (("current_round", int), ("max_iterations", int)):
+        return said
+
+    async def _schema(self) -> str | None:
+        held = await read(self.env, self.state_file)
+        if held is None:
+            await self._ends("unexpected")
+            return None
+        for name in ("current_round", "max_iterations"):
             found = re.search(rf"^{name}:\s*(\S+)\s*$", held, re.MULTILINE)
             if found is None:
-                self._ends("unexpected")
+                await self._ends("unexpected")
                 return None
-            with contextlib.suppress(ValueError):
-                setattr(self.state, name, kind(found.group(1)))
+            if re.fullmatch(r"[+-]?\d+", found.group(1)):
+                setattr(self.state, name, int(found.group(1)))
         return None
 
-    def _branch(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
-        status, branch = git("rev-parse", "--abbrev-ref", "HEAD", at=self.root)
+    async def _branch(self) -> str | None:
+        status, branch = await git(self.env, "rev-parse", "--abbrev-ref", "HEAD")
         if status or not branch:
-            return Verdict(
-                refused=True,
-                because="Git operation failed or timed out.\n\nCannot verify branch "
-                "consistency. Please check git status manually and try again.",
+            return (
+                "Git operation failed or timed out.\n\nCannot verify branch "
+                "consistency. Please check git status manually and try again."
             )
         if self.state.start_branch and branch != self.state.start_branch:
-            return self._blocks(
+            return render(
                 blocks.BRANCH_CHANGED,
                 START_BRANCH=self.state.start_branch,
                 CURRENT_BRANCH=branch,
             )
         return None
 
-    def _plan_integrity(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _plan_integrity(self) -> str | None:
         if self.state.review_started:
             return None
         backup = self.where / "plan.md"
         plan = self.root / self.state.plan_file
-        if not backup.is_file():
-            return Verdict(
-                refused=True,
-                because="Plan file backup not found in loop directory.\n\n"
-                f"This backup is required for plan integrity verification: {backup}",
+        kept = await read(self.env, backup)
+        if kept is None:
+            return (
+                "Plan file backup not found in loop directory.\n\n"
+                f"This backup is required for plan integrity verification: {backup}"
             )
-        if not plan.is_file():
-            return self._blocks(
+        held = await read(self.env, plan)
+        if held is None:
+            return render(
                 blocks.PLAN_FILE_DELETED,
                 PLAN_FILE=self.state.plan_file,
                 BACKUP_PATH=backup,
             )
         if self.state.plan_tracked:
-            _, dirty = git("status", "--porcelain", self.state.plan_file, at=self.root)
+            _, dirty = await git(
+                self.env, "status", "--porcelain", self.state.plan_file
+            )
             if dirty:
-                return self._blocks(
+                return render(
                     blocks.PLAN_FILE_UNCOMMITTED,
                     PLAN_FILE=self.state.plan_file,
                     PLAN_GIT_STATUS=dirty,
                 )
-        if plan.read_bytes() != backup.read_bytes():
-            return self._blocks(
+        if held != kept:
+            return render(
                 blocks.PLAN_FILE_MODIFIED,
                 PLAN_FILE=self.state.plan_file,
                 BACKUP_PATH=backup,
             )
         return None
 
-    def _todos(self, occasion: Occasion) -> Verdict | None:
-        left = _open_tasks(self.reviewer, occasion)
-        if not left:
+    async def _todos(self) -> str | None:
+        todos = self.todos
+        left = todos.left()
+        told = (self.state.current_round, left)
+        if not left or (todos.told == told and not todos.touched):
             return None
-        return self._blocks(blocks.INCOMPLETE_TODOS, INCOMPLETE_LIST="\n".join(left))
+        todos.told, todos.touched = told, False
+        return render(blocks.INCOMPLETE_TODOS, INCOMPLETE_LIST="\n".join(left))
 
-    def _git_status(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _git_status(self) -> str | None:
         self._status = None
-        status, _ = git("rev-parse", "--git-dir", at=self.root)
+        status, _ = await git(self.env, "rev-parse", "--git-dir")
         if status:
             return None
-        failed, everything = git("status", "--porcelain", at=self.root)
+        failed, everything = await git(self.env, "status", "--porcelain")
         if failed:
-            return self._blocks(blocks.GIT_STATUS_FAILED, GIT_STATUS_EXIT=failed)
+            return render(blocks.GIT_STATUS_FAILED, GIT_STATUS_EXIT=failed)
         self._status = everything
         return None
 
-    def _analysis_phase(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _analysis_phase(self) -> str | None:
         if not self.analysing:
             return None
         done = self.where / "methodology-analysis-done.md"
         report = self.where / "methodology-analysis-report.md"
-        if not (_written(done) and _written(report)):
-            return Verdict(
-                refused=True,
-                because="# Methodology Analysis Incomplete\n\nPlease complete the "
+        if not (await self._written(done) and await self._written(report)):
+            return (
+                "# Methodology Analysis Incomplete\n\nPlease complete the "
                 "methodology analysis before exiting.\n\nYou need to:\n"
                 f"1. Write the analysis report to {report}\n"
-                f"2. Write a completion note to {done}",
+                f"2. Write a completion note to {done}"
             )
         if self._left():
-            return self._blocks(
+            return render(
                 blocks.GIT_NOT_CLEAN,
                 GIT_ISSUES="uncommitted changes after methodology analysis",
                 SPECIAL_NOTES="",
             )
-        self._ends(self.exit_reason or "unexpected")
+        await self._ends(self.exit_reason or "unexpected")
         self.analysing = False
         return None
 
-    def _git_clean(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _git_clean(self) -> str | None:
         if self._status is None:
             return None
-        tracked, held = git("ls-files", "--", ".humanize", at=self.root)
+        tracked, held = await git(self.env, "ls-files", "--", ".humanize")
         if not tracked and held:
-            return self._blocks(blocks.GIT_TRACKED_HUMANIZE)
+            return blocks.GIT_TRACKED_HUMANIZE
         rows = self._status.splitlines()
         left = [row for row in rows if not _OURS.match(row)]
         if not left:
@@ -400,76 +569,73 @@ class Loop:
             notes += blocks.GIT_NOT_CLEAN_HUMANIZE_LOCAL
         if any(not _OURS.match(row) for row in untracked):
             notes += blocks.GIT_NOT_CLEAN_UNTRACKED
-        return self._blocks(
+        return render(
             blocks.GIT_NOT_CLEAN, GIT_ISSUES="uncommitted changes", SPECIAL_NOTES=notes
         )
 
-    def _unpushed(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _unpushed(self) -> str | None:
         if not self.state.push_every_round:
             return None
-        _, said = git("status", "-sb", at=self.root)
+        _, said = await git(self.env, "status", "-sb")
         ahead = re.search(r"ahead (\d+)", said)
         if ahead is None:
             return None
-        _, branch = git("rev-parse", "--abbrev-ref", "HEAD", at=self.root)
-        return self._blocks(
+        _, branch = await git(self.env, "rev-parse", "--abbrev-ref", "HEAD")
+        return render(
             blocks.UNPUSHED_COMMITS,
             AHEAD_COUNT=ahead.group(1),
             CURRENT_BRANCH=branch or "unknown",
         )
 
-    def _large_files(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _large_files(self) -> str | None:
         if self._status is None:
             return None
         found: list[str] = []
         for row in self._status.splitlines():
             named = row[3:].split(" -> ")[-1]
             path = self.root / named
-            if not path.is_file():
-                continue
             kind = path.suffix.lstrip(".").lower()
             about = (
                 "code" if kind in _CODE else "documentation" if kind in _DOCS else ""
             )
             if not about:
                 continue
-            with contextlib.suppress(OSError, UnicodeDecodeError):
-                lines = len(path.read_text(encoding="utf-8").splitlines())
-                if lines > MAX_LINES:
-                    found.append(f"\n- `{path}`: {lines} lines ({about} file)")
+            try:
+                held = await read(self.env, path)
+            except EnvError:
+                continue
+            if held is None:
+                continue
+            lines = len(held.splitlines())
+            if lines > MAX_LINES:
+                found.append(f"\n- `{path}`: {lines} lines ({about} file)")
         if not found:
             return None
-        return self._blocks(
+        return render(
             blocks.LARGE_FILES, MAX_LINES=MAX_LINES, LARGE_FILES="".join(found)
         )
 
-    def _summary_written(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
-        if _written(self.summary):
+    async def _summary_written(self) -> str | None:
+        if await self._written(self.summary):
             return None
-        return self._blocks(blocks.WORK_SUMMARY_MISSING, SUMMARY_FILE=self.summary)
+        return render(blocks.WORK_SUMMARY_MISSING, SUMMARY_FILE=self.summary)
 
-    def _contract_written(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
-        if self.finalizing or self.contract.is_file():
+    async def _contract_written(self) -> str | None:
+        if self.finalizing or await read(self.env, self.contract) is not None:
             return None
-        return self._blocks(
-            blocks.ROUND_CONTRACT_MISSING, ROUND_CONTRACT_FILE=self.contract
-        )
+        return render(blocks.ROUND_CONTRACT_MISSING, ROUND_CONTRACT_FILE=self.contract)
 
-    def _bitlesson_delta(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _bitlesson_delta(self) -> str | None:
         if self.finalizing or not self.state.bitlesson_required:
             return None
-        return self._delta(self.summary.read_text(encoding="utf-8"))
+        return await self._delta(await read(self.env, self.summary) or "")
 
-    def _goal_tracker_started(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
-        tracker = self.tracker
-        if (
-            self.finalizing
-            or self.state.review_started
-            or self.state.current_round
-            or not tracker.is_file()
-        ):
+    async def _goal_tracker_started(self) -> str | None:
+        if self.finalizing or self.state.review_started or self.state.current_round:
             return None
-        held = tracker.read_text(encoding="utf-8")
+        held = await read(self.env, self.tracker)
+        if held is None:
+            return None
         missing = [
             f"\n- **{about}**: Still contains placeholder text"
             for heading, about in (
@@ -481,92 +647,114 @@ class Loop:
         ]
         if not missing:
             return None
-        return self._blocks(
+        return render(
             blocks.GOAL_TRACKER_NOT_INITIALIZED,
-            GOAL_TRACKER_FILE=tracker,
+            GOAL_TRACKER_FILE=self.tracker,
             MISSING_ITEMS="".join(missing),
         )
 
-    def _max_iterations(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _max_iterations(self) -> str | None:
         if self.finalizing or self.state.review_started:
             return None
         if self.state.current_round + 1 <= self.state.max_iterations:
             return None
-        return self._analyse(
+        return await self._analyse(
             "maxiter",
             f"Reached max iterations ({self.state.max_iterations}) without completion",
         )
 
-    def _finalize_done(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
+    async def _finalize_done(self) -> str | None:
         if not self.finalizing:
             return None
-        return self._analyse(
+        return await self._analyse(
             "complete", "All acceptance criteria met and code review passed"
         )
 
-    def _review(self, occasion: Occasion) -> Verdict | None:  # noqa: ARG002
-        if self.state.review_started and not (self.where / REVIEW_STARTED).is_file():
-            return Verdict(
-                refused=True,
-                because="Review phase state inconsistency detected.\n\nThe state file "
+    async def _review(self) -> str | None:
+        if (
+            self.state.review_started
+            and await read(self.env, self.where / REVIEW_STARTED) is None
+        ):
+            return (
+                "Review phase state inconsistency detected.\n\nThe state file "
                 "indicates review_started=true, but no review phase marker exists.\nThis "
                 "can happen if the state file was manually edited.\n\n**To fix:**\nReset "
-                "the state by stopping the flow and starting it again.",
+                "the state by stopping the flow and starting it again."
             )
         aligning = (
             self.state.current_round % self.state.full_review_round
             == self.state.full_review_round - 1
         )
-        asked = self._review_prompt(aligning=aligning)
-        self.review_prompt.write_text(asked, encoding="utf-8")
+        asked = await self._review_prompt(aligning=aligning)
+        await write(self.env, self.review_prompt, asked)
 
         said = ""
         if not self.state.review_started:
-            before = (
-                self.result.read_text(encoding="utf-8") if self.result.is_file() else ""
-            )
-            said, took = spoken(self.reviewer, asked)
-            if took > self.state.codex_timeout:
-                return self._blocks(
+            before = await read(self.env, self.result) or ""
+            said, failed = await self._reviewed(asked, "review")
+            if failed:
+                return render(
                     blocks.REVIEW_FAILED,
-                    FAILURE_REASON=f"the review took {took:.0f}s, over the "
-                    f"{self.state.codex_timeout}s it was given",
+                    FAILURE_REASON=failed,
                     ROUND_NUMBER=self.state.current_round,
                     BASE_BRANCH=self.state.base_branch,
                 )
-            written = (
-                self.result.read_text(encoding="utf-8") if self.result.is_file() else ""
-            )
+            written = await read(self.env, self.result) or ""
             if not written.strip() or written == before:
-                self.result.write_text(said, encoding="utf-8")
-            said = self.result.read_text(encoding="utf-8")
+                await write(self.env, self.result, said)
+            said = await read(self.env, self.result) or ""
             if not said.strip():
-                return self._blocks(
+                return render(
                     blocks.REVIEW_FAILED,
                     FAILURE_REASON="the review result file is empty",
                     ROUND_NUMBER=self.state.current_round,
                     BASE_BRANCH=self.state.base_branch,
                 )
-            self.said.append(said)
-            if (drifted := self._drift(said)) is not None:
+            if (drifted := await self._drift(said)) is not None:
                 return drifted
             if _last(said) == COMPLETE:
-                return self._complete()
+                return await self._complete()
         if self.state.review_started:
-            return self._code_review()
+            return await self._code_review()
         if _last(said) == STOP:
-            return self._analyse(
+            return await self._analyse(
                 "stop",
                 f"Circuit breaker triggered - stagnation detected at round "
                 f"{self.state.current_round}",
             )
-        return self._next_round(said, aligning=aligning)
+        return await self._next_round(said, aligning=aligning)
 
-    def _drift(self, said: str) -> Verdict | None:
+    async def _reviewed(self, asked: str, what: str) -> tuple[str, str]:
+        seconds = self.state.codex_timeout
+        for attempt in range(1, _TRIES + 1):
+            try:
+                said = await review_once(
+                    asked,
+                    agents={"reviewer": self.reviewer},
+                    envs={"workspace": self.env},
+                    params=_Timed(seconds=seconds),
+                )
+            except TurnTimedOut:
+                return "", f"the {what} took longer than the {seconds}s it was given"
+            except PERMANENT:
+                raise
+            except HarnessError as why:
+                if attempt < _TRIES:
+                    await asyncio.sleep(_PAUSE * attempt)
+                    continue
+                self.failing += 1
+                if self.failing >= _TRIES:
+                    raise
+                return "", f"the {what} failed: {why}"
+            self.failing = 0
+            return said, ""
+        raise AssertionError("a positive number of attempts reviewed nothing")
+
+    async def _drift(self, said: str) -> str | None:
         last = _last(said)
         found = verdict(said)
         if last != STOP and found == UNKNOWN:
-            return self._blocks(
+            return render(
                 blocks.MAINLINE_VERDICT_MISSING,
                 REVIEW_RESULT_FILE=self.result,
                 REVIEW_PROMPT_FILE=self.review_prompt,
@@ -588,37 +776,39 @@ class Loop:
             self.state.last_mainline_verdict = ADVANCED
             self.state.drift_status = NORMAL
         elif last != STOP and self.state.mainline_stall_count >= _STOP_AT:
-            self._write_state()
-            self._ends("stop")
-            return self._blocks(
+            await self._write_state()
+            await self._ends("stop")
+            return render(
                 blocks.MAINLINE_DRIFT_STOP,
                 STALL_COUNT=self.state.mainline_stall_count,
                 LAST_VERDICT=self.state.last_mainline_verdict,
                 PLAN_FILE=self.state.plan_file,
             )
-        self._write_state()
+        await self._write_state()
         return None
 
-    def _complete(self) -> Verdict | None:
+    async def _complete(self) -> str | None:
         if self.state.current_round >= self.state.max_iterations:
-            return self._analyse(
+            return await self._analyse(
                 "maxiter",
                 f"Review confirmed COMPLETE but at max iterations "
                 f"({self.state.max_iterations})",
             )
         if not self.state.base_branch:
-            return self._finalize("No base_branch configured for code review")
+            return await self._finalize("No base_branch configured for code review")
         self.state.review_started = True
         self.state.mainline_stall_count = 0
         self.state.last_mainline_verdict = ADVANCED
         self.state.drift_status = NORMAL
-        self._write_state()
-        (self.where / REVIEW_STARTED).write_text(
-            f"build_finish_round={self.state.current_round}\n", encoding="utf-8"
+        await self._write_state()
+        await write(
+            self.env,
+            self.where / REVIEW_STARTED,
+            f"build_finish_round={self.state.current_round}\n",
         )
-        return self._code_review()
+        return await self._code_review()
 
-    def _code_review(self) -> Verdict | None:
+    async def _code_review(self) -> str | None:
         at = self.state.current_round + 1
         base = self.state.base_commit or self.state.base_branch
         asked = render(
@@ -628,28 +818,26 @@ class Loop:
             BASE_COMMIT=self.state.base_commit or "N/A",
             REVIEW_BASE=base,
             REVIEW_BASE_TYPE="commit" if self.state.base_commit else "branch",
-            TIMESTAMP=_stamp(),
+            TIMESTAMP=utc(),
         )
-        (self.where / f"round-{at}-review-prompt.md").write_text(
-            asked, encoding="utf-8"
-        )
-        said, took = spoken(self.reviewer, asked)
-        if took > self.state.codex_timeout:
-            return self._blocks(
+        await write(self.env, self.where / f"round-{at}-review-prompt.md", asked)
+        said, failed = await self._reviewed(asked, "code review")
+        if not failed and not said.strip():
+            failed = "the code review answered nothing"
+        if failed:
+            return render(
                 blocks.REVIEW_FAILED,
-                FAILURE_REASON=f"the code review took {took:.0f}s, over the "
-                f"{self.state.codex_timeout}s it was given",
+                FAILURE_REASON=failed,
                 ROUND_NUMBER=at,
                 BASE_BRANCH=self.state.base_branch,
             )
         found = issues(said)
         if not found:
-            return self._finalize("")
-        (self.where / f"round-{at}-review-result.md").write_text(said, encoding="utf-8")
-        self.said.append(said)
+            return await self._finalize("")
+        await write(self.env, self.where / f"round-{at}-review-result.md", said)
         self.state.current_round = at
-        self._write_state()
-        self._scaffold(at)
+        await self._write_state()
+        await self._scaffold(at)
         asked = render(
             prompts.REVIEW_PHASE,
             REVIEW_CONTENT=found,
@@ -664,11 +852,11 @@ class Loop:
                 prompts.REVIEW_PHASE_BITLESSON, BITLESSON_FILE=self._bitlesson
             )
         asked += prompts.ROUND_ROUTING_NOTE
-        self.prompt.write_text(asked, encoding="utf-8")
-        return Verdict(refused=True, because=asked)
+        await write(self.env, self.prompt, asked)
+        return asked
 
-    def _finalize(self, skipped: str) -> Verdict:
-        self._rename(FINALIZING)
+    async def _finalize(self, skipped: str) -> str:
+        await self._rename(FINALIZING)
         self.finalizing = True
         asked = render(
             prompts.FINALIZE_SKIPPED if skipped else prompts.FINALIZE,
@@ -679,14 +867,14 @@ class Loop:
             BASE_BRANCH=self.state.base_branch,
             START_BRANCH=self.state.start_branch,
         )
-        self.prompt.write_text(asked, encoding="utf-8")
-        return Verdict(refused=True, because=asked)
+        await write(self.env, self.prompt, asked)
+        return asked
 
-    def _next_round(self, said: str, *, aligning: bool) -> Verdict:
+    async def _next_round(self, said: str, *, aligning: bool) -> str:
         at = self.state.current_round + 1
         self.state.current_round = at
-        self._write_state()
-        self._scaffold(at)
+        await self._write_state()
+        await self._scaffold(at)
         replanning = self.state.drift_status == REPLAN_REQUIRED
         asked = render(
             prompts.DRIFT_REPLAN if replanning else prompts.NEXT_ROUND,
@@ -723,12 +911,12 @@ class Loop:
             asked += (
                 "\n" + prompts.AGENT_TEAMS_CONTINUE + "\n" + prompts.AGENT_TEAMS_CORE
             )
-        self.prompt.write_text(asked, encoding="utf-8")
-        return Verdict(refused=True, because=asked)
+        await write(self.env, self.prompt, asked)
+        return asked
 
-    def _review_prompt(self, *, aligning: bool) -> str:
+    async def _review_prompt(self, *, aligning: bool) -> str:
         at = self.state.current_round
-        history = self._commits()
+        history = await self._commits()
         recent = (
             "".join(
                 f"- @{self.where}/round-{r}-summary.md\n"
@@ -747,7 +935,7 @@ class Loop:
             CURRENT_ROUND=at,
             PLAN_FILE=self.state.plan_file,
             PROMPT_FILE=self.prompt,
-            SUMMARY_CONTENT=self.summary.read_text(encoding="utf-8"),
+            SUMMARY_CONTENT=await read(self.env, self.summary) or "",
             GOAL_TRACKER_FILE=self.tracker,
             DOCS_PATH="docs",
             GOAL_TRACKER_UPDATE_SECTION=render(
@@ -761,91 +949,82 @@ class Loop:
             REVIEW_RESULT_FILE=self.result,
         )
 
-    def _commits(self) -> str:
+    async def _commits(self) -> str:
         base = self.state.base_commit
         if base:
-            status, _ = git("merge-base", "--is-ancestor", base, "HEAD", at=self.root)
+            status, _ = await git(self.env, "merge-base", "--is-ancestor", base, "HEAD")
             if status == 0:
-                _, said = git(
+                _, said = await git(
+                    self.env,
                     "log",
                     "--oneline",
                     "--no-decorate",
                     "--reverse",
                     f"{base}..HEAD",
-                    at=self.root,
                 )
                 return "\n".join(said.splitlines()[-80:]) or "(no commits yet)"
-        _, said = git(
-            "log", "--oneline", "--no-decorate", "--reverse", "-30", at=self.root
+        _, said = await git(
+            self.env, "log", "--oneline", "--no-decorate", "--reverse", "-30"
         )
         if not said:
             return "(no commits yet)"
         return f"(base commit unavailable, showing recent branch commits)\n{said}"
 
-    def _delta(self, summary: str) -> Verdict | None:
+    async def _delta(self, summary: str) -> str | None:
         found = _DELTA.search(summary)
         if found is None:
-            return self._blocks(blocks.BITLESSON_DELTA_MISSING)
+            return blocks.BITLESSON_DELTA_MISSING
         block = summary[found.end() :].split("\n## ", maxsplit=1)[0]
         action = _ACTION.search(block)
         named = action.group(1).lower() if action else ""
         if named not in ("none", "add", "update"):
-            return self._blocks(blocks.BITLESSON_DELTA_INVALID)
+            return blocks.BITLESSON_DELTA_INVALID
         lessons = _LESSONS.search(block)
         said = (lessons.group(1) if lessons else "").strip()
-        kept = self.root / self.state.bitlesson_file
-        known = (
-            _LESSON_ID.findall(kept.read_text(encoding="utf-8"))
-            if kept.is_file()
-            else []
-        )
+        kept = self._bitlesson
+        held = await read(self.env, kept)
+        known = _LESSON_ID.findall(held) if held is not None else []
         if named == "none":
             if said and said.upper() != "NONE":
-                return self._blocks(
-                    blocks.BITLESSON_DELTA_INCONSISTENT, BITLESSON_FILE=kept
-                )
+                return render(blocks.BITLESSON_DELTA_INCONSISTENT, BITLESSON_FILE=kept)
             if not known and not self.state.bitlesson_allow_empty_none:
-                return self._blocks(
-                    blocks.BITLESSON_DELTA_EMPTY_KB, BITLESSON_FILE=kept
-                )
+                return render(blocks.BITLESSON_DELTA_EMPTY_KB, BITLESSON_FILE=kept)
             return None
         if not said or said.upper() == "NONE":
-            return self._blocks(blocks.BITLESSON_DELTA_MISSING_IDS, ACTION=named)
+            return render(blocks.BITLESSON_DELTA_MISSING_IDS, ACTION=named)
         notes = _NOTES.search(block)
         wrote = (notes.group(1) if notes else "").strip()
         if not wrote or _UNWRITTEN.match(wrote):
-            return self._blocks(blocks.BITLESSON_DELTA_MISSING_NOTES, ACTION=named)
-        if not kept.is_file():
-            return self._blocks(blocks.BITLESSON_FILE_MISSING, ACTION=named)
+            return render(blocks.BITLESSON_DELTA_MISSING_NOTES, ACTION=named)
+        if held is None:
+            return render(blocks.BITLESSON_FILE_MISSING, ACTION=named)
         wanted = [one.strip() for one in said.split(",") if one.strip()]
         if any(one not in known for one in wanted):
-            return self._blocks(
-                blocks.BITLESSON_DELTA_INCONSISTENT, BITLESSON_FILE=kept
-            )
+            return render(blocks.BITLESSON_DELTA_INCONSISTENT, BITLESSON_FILE=kept)
         return None
 
     @property
-    def state_file(self) -> Path:
+    def state_file(self) -> PurePosixPath:
         if self.analysing:
             return self.where / ANALYSING
         return self.where / (FINALIZING if self.finalizing else BUILDING)
 
     @property
-    def _bitlesson(self) -> Path:
+    def _bitlesson(self) -> PurePosixPath:
         return self.root / self.state.bitlesson_file
 
     @property
-    def summary(self) -> Path:
+    def summary(self) -> PurePosixPath:
         if self.finalizing:
             return self.where / "finalize-summary.md"
         return self.where / f"round-{self.state.current_round}-summary.md"
 
     @property
-    def contract(self) -> Path:
+    def contract(self) -> PurePosixPath:
         return self.where / f"round-{self.state.current_round}-contract.md"
 
     @property
-    def prompt(self) -> Path:
+    def prompt(self) -> PurePosixPath:
         if self.analysing:
             return self.where / "methodology-analysis-prompt.md"
         if self.finalizing:
@@ -853,33 +1032,38 @@ class Loop:
         return self.where / f"round-{self.state.current_round}-prompt.md"
 
     @property
-    def review_prompt(self) -> Path:
+    def review_prompt(self) -> PurePosixPath:
         return self.where / f"round-{self.state.current_round}-review-prompt.md"
 
     @property
-    def result(self) -> Path:
+    def result(self) -> PurePosixPath:
         return self.where / f"round-{self.state.current_round}-review-result.md"
 
     @property
-    def tracker(self) -> Path:
+    def tracker(self) -> PurePosixPath:
         return self.where / "goal-tracker.md"
 
-    def _scaffold(self, at: int) -> None:
+    async def _written(self, path: PurePosixPath) -> bool:
+        return bool((await read(self.env, path) or "").strip())
+
+    async def _scaffold(self, at: int) -> None:
         summary = self.where / f"round-{at}-summary.md"
-        if not summary.exists():
-            summary.write_text(
-                render(prompts.ROUND_SUMMARY_TEMPLATE, ROUND=at), encoding="utf-8"
+        if await read(self.env, summary) is None:
+            await write(
+                self.env, summary, render(prompts.ROUND_SUMMARY_TEMPLATE, ROUND=at)
             )
 
-    def _write_state(self) -> None:
-        self.state_file.write_text(self.state.written(), encoding="utf-8")
+    async def _write_state(self) -> None:
+        await write(self.env, self.state_file, self.state.written())
         if self.kept is not None:
             self.kept["rounds"] = self.state.current_round
 
-    def _rename(self, to: str) -> None:
+    async def _rename(self, to: str) -> None:
         was = self.state_file
-        if was.exists():
-            shutil.move(str(was), str(self.where / to))
+        if await read(self.env, was) is None:
+            return
+        if failed := await move(self.env, was, self.where / to):
+            raise RuntimeError(f"could not rename {was} to {to}: {failed}")
 
     def _left(self) -> str:
         if self._status is None:
@@ -888,19 +1072,19 @@ class Loop:
             row for row in self._status.splitlines() if not _OURS.match(row)
         )
 
-    def _analyse(self, reason: str, about: str) -> Verdict | None:
+    async def _analyse(self, reason: str, about: str) -> str | None:
         done = self.where / "methodology-analysis-done.md"
         if (
             self.state.privacy_mode
-            or (self.where / ANALYSING).exists()
-            or _written(done)
+            or await read(self.env, self.where / ANALYSING) is not None
+            or await self._written(done)
         ):
-            self._ends(reason)
+            await self._ends(reason)
             return None
-        self._rename(ANALYSING)
+        await self._rename(ANALYSING)
         self.analysing, self.exit_reason = True, reason
-        (self.where / EXIT_REASON).write_text(reason, encoding="utf-8")
-        done.touch()
+        await write(self.env, self.where / EXIT_REASON, reason)
+        await write(self.env, done, "")
         asked = render(
             prompts.METHODOLOGY_ANALYSIS,
             EXIT_REASON=reason,
@@ -909,32 +1093,13 @@ class Loop:
             MAX_ITERATIONS=self.state.max_iterations,
             LOOP_DIR=self.where,
         )
-        self.prompt.write_text(asked, encoding="utf-8")
-        return Verdict(refused=True, because=asked)
+        await write(self.env, self.prompt, asked)
+        return asked
 
-    def _ends(self, reason: str) -> None:
+    async def _ends(self, reason: str) -> None:
         self.over = reason if reason in ALLOWED else "unexpected"
-        self._rename(f"{self.over}-state.md")
-        with contextlib.suppress(OSError):
-            (self.where / EXIT_REASON).unlink(missing_ok=True)
-
-    @staticmethod
-    def _blocks(template: str, **fields: object) -> Verdict:
-        return Verdict(refused=True, because=render(template, **fields))
-
-
-def _written(path: Path) -> bool:
-    try:
-        return bool(path.read_text(encoding="utf-8").strip())
-    except (OSError, UnicodeDecodeError):
-        return False
-
-
-def _exiting(where: Path) -> str:
-    try:
-        return (where / EXIT_REASON).read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):
-        return ""
+        await self._rename(f"{self.over}-state.md")
+        await remove(self.env, self.where / EXIT_REASON)
 
 
 def _last(said: str) -> str:
@@ -969,111 +1134,8 @@ def _asks_a_question(said: str) -> bool:
     )
 
 
-def _stamp() -> str:
-    import datetime
-
+def utc() -> str:
     return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _open_tasks(agent: Agent, occasion: Occasion) -> list[str]:
-    from hmz.flows import backends
-
-    profile = backends.named(agent.backend)
-    if profile is None or not occasion.session:
-        return []
-    found: list[str] = []
-    tasks = profile.directory() / "tasks" / occasion.session
-    for path in sorted(tasks.glob("*.json")) if tasks.is_dir() else []:
-        task = _json(path)
-        if not isinstance(task, dict):
-            continue
-        held = cast("dict[str, Any]", task)
-        status = str(held.get("status") or "pending")
-        if status in ("completed", "deleted"):
-            continue
-        subject = str(held.get("subject") or "")
-        about = str(held.get("description") or "")
-        lane = _lane(subject, about)
-        if lane == "queued":
-            continue
-        said = subject or about or f"Task {path.stem}"
-        found.append(f"  - [{status}] [{lane}] (Task #{path.stem}) {said}")
-    for todo in _todo_writes(profile, occasion.session):
-        status = str(todo.get("status") or "")
-        said = str(todo.get("content") or "")
-        if status == "completed":
-            continue
-        lane = _lane(said)
-        if lane == "queued":
-            continue
-        found.append(f"  - [{status}] [{lane}] {said}")
-    return found
-
-
-def _json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-
-
-def _todo_writes(profile: Profile, session: str) -> list[dict[str, Any]]:
-    latest: list[dict[str, Any]] = []
-    for pattern in profile.logs:
-        for path in sorted(profile.directory().glob(pattern.format(ident=session))):
-            try:
-                held = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            for line in held.splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    entry: Any = json.loads(line)
-                except ValueError:
-                    continue
-                for name, called in _tool_calls(entry):
-                    todos = called.get("todos")
-                    if name == "TodoWrite" and isinstance(todos, list):
-                        latest = [
-                            cast("dict[str, Any]", one)
-                            for one in cast("list[Any]", todos)
-                            if isinstance(one, dict)
-                        ]
-    return latest
-
-
-def _tool_calls(entry: Any) -> Iterator[tuple[str, dict[str, Any]]]:
-    if not isinstance(entry, dict):
-        return
-    said = cast("dict[str, Any]", entry)
-    kind = said.get("type")
-    content: Any = []
-    if kind == "assistant":
-        message = said.get("message")
-        content = (
-            cast("dict[str, Any]", message).get("content", [])
-            if isinstance(message, dict)
-            else []
-        )
-    elif kind == "message":
-        content = said.get("content", [])
-    if isinstance(content, list):
-        for raw in cast("list[Any]", content):
-            if not isinstance(raw, dict):
-                continue
-            block = cast("dict[str, Any]", raw)
-            if block.get("type") != "tool_use":
-                continue
-            named = str(block.get("name") or "")
-            with_it: Any = block.get("input") or {}
-            if named and isinstance(with_it, dict):
-                yield named, cast("dict[str, Any]", with_it)
-    if kind == "tool_use":
-        named = str(said.get("name") or said.get("tool_name") or "")
-        with_it = said.get("input") or said.get("tool_input") or {}
-        if named and isinstance(with_it, dict):
-            yield named, cast("dict[str, Any]", with_it)
 
 
 _LANE = re.compile(r"^\s*\[(mainline|blocking|queued)\](?:\s|$)", re.IGNORECASE)
@@ -1087,25 +1149,9 @@ def _lane(*parts: str) -> str:
     return "blocking"
 
 
-def directory(root: Path, stamp: str) -> Path:
-    where = root / LOOPS / stamp
-    where.mkdir(parents=True, exist_ok=True)
-    return where
+def directory(root: PurePosixPath, stamp: str) -> PurePosixPath:
+    return root / LOOPS / stamp
 
 
 def started() -> str:
-    import datetime
-
     return datetime.datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
-
-
-def sanitized(root: Path) -> str:
-    said = re.sub(r"[^a-zA-Z0-9._-]", "-", str(root))
-    return re.sub(r"-{2,}", "-", said)
-
-
-def cache(root: Path, stamp: str) -> Path:
-    base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
-    where = base / "humanize" / sanitized(root) / stamp
-    where.mkdir(parents=True, exist_ok=True)
-    return where
