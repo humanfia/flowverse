@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-import threading
 from typing import TYPE_CHECKING, Any
 
 from .models import NodeRecord, NodeStatus, ProvedTheorem
@@ -34,7 +33,6 @@ class Store:
         self.wiki = wiki
         self.task = task
         self.nodes: dict[str, NodeRecord] = {}
-        self._lock = threading.RLock()
         self.root.mkdir(parents=True, exist_ok=True)
         self.wiki.mkdir(parents=True, exist_ok=True)
         self._load()
@@ -66,132 +64,127 @@ class Store:
         lean_name: str = "",
         depends_on: list[str] | None = None,
     ) -> NodeRecord:
-        with self._lock:
-            found = self.nodes.get(node_id)
-            if found is not None:
-                return found
-            record = NodeRecord(
-                id=node_id,
-                parent=parent,
-                depth=depth,
-                title=title,
-                statement=statement,
-                lean_statement=lean_statement,
-                lean_name=lean_name,
-                depends_on=depends_on or [],
-                updated_at=now(),
-            )
-            self.nodes[node_id] = record
-            if parent and parent in self.nodes:
-                parent_record = self.nodes[parent]
-                if node_id not in parent_record.children:
-                    parent_record.children.append(node_id)
-            self.render()
-            return record
+        found = self.nodes.get(node_id)
+        if found is not None:
+            return found
+        record = NodeRecord(
+            id=node_id,
+            parent=parent,
+            depth=depth,
+            title=title,
+            statement=statement,
+            lean_statement=lean_statement,
+            lean_name=lean_name,
+            depends_on=depends_on or [],
+            updated_at=now(),
+        )
+        self.nodes[node_id] = record
+        if parent and parent in self.nodes:
+            parent_record = self.nodes[parent]
+            if node_id not in parent_record.children:
+                parent_record.children.append(node_id)
+        self.render()
+        return record
 
     def update(
         self, node_id: str, status: NodeStatus, message: str = "", **fields: Any
     ) -> None:
-        with self._lock:
-            record = self.nodes[node_id]
-            if record.status == "proved" and status != "proved":
-                print(
-                    f"[DAG] {node_id}: proved — ignored regressive transition to {status}"
-                )
-                return
-            if (
-                record.status == "integrating"
-                and record.candidate_commit
-                and status not in {"integrating", "proved"}
-            ):
-                print(
-                    f"[DAG] {node_id}: integrating — retained accepted candidate; "
-                    f"ignored regressive transition to {status}"
-                )
-                return
-            record.status = status
-            record.message = message
-            record.updated_at = now()
-            for name, value in fields.items():
-                setattr(record, name, value)
-            self.render()
-            print(f"[DAG] {node_id}: {status}" + (f" — {message}" if message else ""))
+        record = self.nodes[node_id]
+        if record.status == "proved" and status != "proved":
+            print(
+                f"[DAG] {node_id}: proved — ignored regressive transition to {status}"
+            )
+            return
+        if (
+            record.status == "integrating"
+            and record.candidate_commit
+            and status not in {"integrating", "proved"}
+        ):
+            print(
+                f"[DAG] {node_id}: integrating — retained accepted candidate; "
+                f"ignored regressive transition to {status}"
+            )
+            return
+        record.status = status
+        record.message = message
+        record.updated_at = now()
+        for name, value in fields.items():
+            setattr(record, name, value)
+        self.render()
+        print(f"[DAG] {node_id}: {status}" + (f" — {message}" if message else ""))
 
     def render(self) -> None:
-        with self._lock:
-            ordered = sorted(self.nodes.values(), key=lambda one: (one.depth, one.id))
-            payload = {
-                "updated_at": now(),
-                "task": self.task,
-                "nodes": [one.model_dump(mode="json") for one in ordered],
-            }
-            atomic_text(
-                self.root / "dag.json",
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        ordered = sorted(self.nodes.values(), key=lambda one: (one.depth, one.id))
+        payload = {
+            "updated_at": now(),
+            "task": self.task,
+            "nodes": [one.model_dump(mode="json") for one in ordered],
+        }
+        atomic_text(
+            self.root / "dag.json",
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        )
+        mermaid = [
+            "flowchart TD",
+            (
+                '  legend["Every solid arrow A --&gt; B means A depends on B<br/>'
+                'B must be proved before A can finish"]'
+            ),
+        ]
+        for record in ordered:
+            label = self._label(record, self._scheduling(record))
+            mermaid.append(f'  {self._mermaid_id(record.id)}["{label}"]')
+        edges: set[tuple[str, str]] = set()
+        for record in ordered:
+            edges.update(
+                (record.id, child) for child in record.children if child in self.nodes
             )
-            mermaid = [
-                "flowchart TD",
+            if (
+                record.parent
+                and record.parent in self.nodes
+                and record.id not in self.nodes[record.parent].children
+            ):
+                edges.add((record.parent, record.id))
+            edges.update(
+                (record.id, dependency)
+                for dependency in record.depends_on
+                if dependency in self.nodes
+            )
+        mermaid.extend(
+            f"  {self._mermaid_id(dependent)} --> {self._mermaid_id(dependency)}"
+            for dependent, dependency in sorted(edges)
+        )
+        diagram = "\n".join(mermaid) + "\n"
+        atomic_text(self.root / "dag.mmd", diagram)
+        rows = [
+            "# Recursive Lean proof DAG",
+            "",
+            f"Updated: {payload['updated_at']}",
+            "",
+            "```mermaid",
+            diagram.rstrip(),
+            "```",
+            "",
+            "| Node | Depth | Status | Scheduling | Theorem | Message |",
+            "| --- | ---: | --- | --- | --- | --- |",
+        ]
+        rows.extend(
+            (
                 (
-                    '  legend["Every solid arrow A --&gt; B means A depends on B<br/>'
-                    'B must be proved before A can finish"]'
-                ),
-            ]
-            for record in ordered:
-                label = self._label(record, self._scheduling(record))
-                mermaid.append(f'  {self._mermaid_id(record.id)}["{label}"]')
-            edges: set[tuple[str, str]] = set()
-            for record in ordered:
-                edges.update(
-                    (record.id, child)
-                    for child in record.children
-                    if child in self.nodes
+                    "| {node} | {depth} | {status} | {scheduling} | "
+                    "{theorem} | {message} |"
+                ).format(
+                    node=self._cell(record.id),
+                    depth=record.depth,
+                    status=record.status,
+                    scheduling=self._cell(self._scheduling(record)),
+                    theorem=self._cell(record.lean_name or "—"),
+                    message=self._cell(record.message or "—"),
                 )
-                if (
-                    record.parent
-                    and record.parent in self.nodes
-                    and record.id not in self.nodes[record.parent].children
-                ):
-                    edges.add((record.parent, record.id))
-                edges.update(
-                    (record.id, dependency)
-                    for dependency in record.depends_on
-                    if dependency in self.nodes
-                )
-            mermaid.extend(
-                f"  {self._mermaid_id(dependent)} --> {self._mermaid_id(dependency)}"
-                for dependent, dependency in sorted(edges)
             )
-            diagram = "\n".join(mermaid) + "\n"
-            atomic_text(self.root / "dag.mmd", diagram)
-            rows = [
-                "# Recursive Lean proof DAG",
-                "",
-                f"Updated: {payload['updated_at']}",
-                "",
-                "```mermaid",
-                diagram.rstrip(),
-                "```",
-                "",
-                "| Node | Depth | Status | Scheduling | Theorem | Message |",
-                "| --- | ---: | --- | --- | --- | --- |",
-            ]
-            rows.extend(
-                (
-                    (
-                        "| {node} | {depth} | {status} | {scheduling} | "
-                        "{theorem} | {message} |"
-                    ).format(
-                        node=self._cell(record.id),
-                        depth=record.depth,
-                        status=record.status,
-                        scheduling=self._cell(self._scheduling(record)),
-                        theorem=self._cell(record.lean_name or "—"),
-                        message=self._cell(record.message or "—"),
-                    )
-                )
-                for record in ordered
-            )
-            atomic_text(self.root / "DAG.md", "\n".join(rows) + "\n")
+            for record in ordered
+        )
+        atomic_text(self.root / "DAG.md", "\n".join(rows) + "\n")
 
     def publish(
         self,

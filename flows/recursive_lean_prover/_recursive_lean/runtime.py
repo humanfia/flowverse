@@ -1,20 +1,35 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import functools
 import hashlib
-import json
 import os
 import shlex
 import shutil
-import subprocess
-import tempfile
-import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import traceback
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hmz.flows import Stopped, load
+import pydantic
+from hmz.flows import (
+    BudgetExceeded,
+    EnvError,
+    FlowRuntimeError,
+    HarnessContended,
+    HarnessDropped,
+    HarnessKilled,
+    HarnessMissing,
+    HarnessThrottled,
+    OutputSchemaError,
+    OutworlderAway,
+    SessionError,
+    load,
+)
 
+from . import models
 from .models import (
     Decomposition,
     DecompositionAudit,
@@ -40,12 +55,24 @@ from .prompts import (
 from .store import Store, atomic_text, now, slug
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Mapping
+
+    from hmz.flows import FlowContext
 
 
-GEN_PLAN = "official/humanize1:gen-plan"
-RLCR = "official/humanize1:rlcr"
-WORKTREE_RLCR = f"{Path(__file__).resolve().parent.parent}:worktree-rlcr"
+GEN_PLAN = "humanize1:gen-plan"
+SKILL = (
+    Path(__file__).resolve().parents[1] / "skills" / "recursive-lean-proof" / "SKILL.md"
+)
+WORKTREE_RLCR = ":worktree-rlcr"
+TURN = ":turn"
+#: Seconds a failed turn waits before its step goes round again.
+FAILED_PAUSE = 10.0
+#: The scratch directory the runtime keeps for the problem repository, which node and
+#: integration worktrees are checked out under.
+WORKTREES = "recursive-lean-worktrees"
+SHORT_PATH = 180
+ROOT_TYPE = "Root declarations are fixed by Challenge.lean and the official comparator."
 INTEGRATION_GIT = (
     "git",
     "-c",
@@ -53,89 +80,130 @@ INTEGRATION_GIT = (
     "-c",
     "user.email=humanize-recursive@example.invalid",
 )
+STATE = ("version", "task_digest", "run_dir", "last_failure")
+#: How a turn can fail that another try may not: answered with nothing, as a suppressed turn
+#: always was. A refused credential, a model not served or an unrecoverable turn still raise.
+FAILED_TURN = (
+    HarnessContended,
+    HarnessDropped,
+    HarnessKilled,
+    HarnessMissing,
+    HarnessThrottled,
+    OutputSchemaError,
+    SessionError,
+)
+UNION = """set -u
+tmp=$(mktemp -d) || exit 9
+trap 'rm -rf "$tmp"' EXIT
+git show ":2:$1" > "$tmp/ours" || exit 2
+git show ":1:$1" > "$tmp/base" || exit 1
+git show ":3:$1" > "$tmp/theirs" || exit 3
+git merge-file --union -p "$tmp/ours" "$tmp/base" "$tmp/theirs" > "$tmp/merged"
+[ $? -lt 128 ] || exit 5
+cat "$tmp/merged" > "$1" || exit 6
+git add -- "$1" || exit 7
+"""
 
 
-class _WorkspaceAgent:
-    def __init__(self, agent: Any, cwd: Path) -> None:
-        self._agent = agent
-        self._cwd = cwd
+def _fatal(error: BaseException) -> bool:
+    """Whether an error stops the whole run rather than the step it arose in.
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._agent, name)
+    The runtime's own errors do -- a spent budget, a stopped run, a flow called with what it
+    does not accept -- except an outworlder nobody is there to answer for; and so does a
+    flow's params refusing what this one builds, which no other try would change.
+    """
+    return isinstance(error, pydantic.ValidationError) or (
+        isinstance(error, FlowRuntimeError) and not isinstance(error, OutworlderAway)
+    )
 
-    @property
-    def epic(self) -> Any:
-        return self._agent.epic
 
-    @epic.setter
-    def epic(self, value: Any) -> None:
-        self._agent.epic = value
+def _raised(group: BaseExceptionGroup[BaseException]) -> BaseException:
+    """What a frontier raises when one of its nodes stopped the run.
 
-    @property
-    def effort(self) -> str:
-        return self._agent.effort
+    A cancel from outside stays a cancel; otherwise the first node's own error, unwrapped.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        return asyncio.CancelledError()
+    first = group.exceptions[0]
+    while isinstance(first, BaseExceptionGroup):
+        first = first.exceptions[0]
+    return first
 
-    @effort.setter
-    def effort(self, value: str) -> None:
-        self._agent.effort = value
 
-    def __call__(
-        self,
-        prompt: str,
-        *,
-        suppress: bool = False,
-        schema: Any = None,
-        cwd: str | os.PathLike[str] | None = None,
-    ) -> Any:
-        del cwd
-        session = self.new()
+async def _finished(work: Awaitable[Any]) -> Any:
+    """Awaits a change to the problem's Git repository, which a stopped run lets finish.
+
+    Stopping a run kills the command it is waiting on; one half way through updating the
+    problem checkout, its branches or its worktrees would leave a lock or a half-written
+    tree behind. The stop still stops the run, once the change is made.
+    """
+    running = asyncio.ensure_future(work)
+    stopped = False
+    while not running.done():
+        try:
+            # `wait` leaves what it waits on running when the waiter is cancelled.
+            await asyncio.wait([running])
+        except asyncio.CancelledError:
+            stopped = True
+    if stopped:
+        if not running.cancelled():
+            running.exception()
+        raise asyncio.CancelledError
+    return running.result()
+
+
+async def take_turn(agent: Any, prompt: str, schema_name: str, env: Any) -> Any:
+    """One turn in a fresh session: the answer, or nothing where the turn failed.
+
+    Nothing is None for an answer asked for as a model of `models`, and "" for text. A turn
+    that failed waits a little before the step it belongs to tries again.
+    """
+    schema = getattr(models, schema_name) if schema_name else None
+    session = await agent.spawn(env=env)
+    try:
         if schema is None:
-            return session(prompt, suppress=suppress)
-        return session(prompt, suppress=suppress, schema=schema)
+            return await agent.run(prompt, session=session)
+        return await agent.run(prompt, session=session, output_schema=schema)
+    except FAILED_TURN as error:
+        print(f"[turn] {agent.role} answered nothing: {error}")
+        if not isinstance(error, OutputSchemaError):
+            await asyncio.sleep(FAILED_PAUSE)
+        return None if schema is not None else ""
 
-    def new(self, cwd: str | os.PathLike[str] | None = None) -> Any:
-        del cwd
-        return self._agent.new(self._cwd)
 
-    def clone(
-        self,
-        *,
-        config: Any = None,
-        name: str | None = None,
-        skills: Any = None,
-    ) -> _WorkspaceAgent:
-        arguments: dict[str, Any] = {}
-        if config is not None:
-            arguments["config"] = config
-        if name is not None:
-            arguments["name"] = name
-        if skills is not None:
-            arguments["skills"] = skills
-        return _WorkspaceAgent(self._agent.clone(**arguments), self._cwd)
+@functools.cache
+def _discipline() -> str:
+    """This flow's skill, for the humanize1 flows it hands plans to, which do not carry it."""
+    text = SKILL.read_text(encoding="utf-8")
+    if text.startswith("---"):
+        text = text.split("---", 2)[2]
+    return f"\n## Recursive Lean proof discipline\n\n{text.strip()}\n"
 
 
 class Runtime:
     def __init__(
         self,
-        agents: Any,
+        agents: Mapping[str, Any],
+        envs: Mapping[str, Any],
         task: str,
         config: Any,
-        state: dict[str, Any] | None,
+        state: Any,
+        ctx: FlowContext | None = None,
     ) -> None:
-        self.agents = agents
+        self.worker: Any = agents.get("worker")
+        self.reviewer: Any = agents.get("reviewer")
+        self.workspace = envs["workspace"]
         self.task = task.strip()
         self.config = config
         self.state = state if state is not None else {}
-        self.project = Path.cwd().resolve()
-        self._graph_lock = threading.RLock()
-        self._integration_lock = threading.Lock()
-        self._revision_lock = threading.Lock()
-        self._integration_futures_lock = threading.RLock()
-        self._integration_executor = ThreadPoolExecutor(
-            max_workers=max(1, getattr(self.config, "max_parallel_children", 4)),
-            thread_name_prefix="accepted-integration",
-        )
-        self._integration_futures: dict[str, Any] = {}
+        self.ctx = ctx
+        self._since = time.monotonic()
+        self.project = Path(str(self.workspace.workdir)).resolve()
+        self._worktrees: Any = None
+        self._worktree_lock = asyncio.Lock()
+        self._integration_lock = asyncio.Lock()
+        self._integrations: dict[str, asyncio.Task[SolveResult]] = {}
         self.run_root = self._run_root()
         self.store = Store(
             self.run_root,
@@ -143,18 +211,15 @@ class Runtime:
             self.task,
         )
 
-    def execute(self) -> None:
+    async def execute(self) -> None:
         if not self.task:
             raise ValueError("recursive_lean_prover needs a mathematical problem")
-        self._require_git()
+        await self._require_git()
         self._require_comparator()
+        await self._worktree_root()
         latest = self.project / self.config.artifact_dir / "LATEST"
         atomic_text(latest, str(self.run_root.relative_to(self.project)) + "\n")
-        self.state.update(
-            version=1,
-            task_digest=self._task_digest(),
-            run_dir=str(self.run_root.relative_to(self.project)),
-        )
+        self._remember()
         root = self.store.ensure(
             "root",
             parent=None,
@@ -169,26 +234,95 @@ class Runtime:
             )
         print(f"Live DAG: {self.run_root / 'DAG.md'}")
         print(f"Theorem wiki: {self.project / self.config.wiki_dir / 'README.md'}")
-        result = (
-            self._resume_existing_dag(root)
-            if root.children and root.plan and root.natural_proof
-            else self._solve(root)
-        )
+        try:
+            result = await (
+                self._resume_existing_dag(root)
+                if root.children and root.plan and root.natural_proof
+                else self._solve(root)
+            )
+        except BaseException:
+            # Accepted candidates stay `integrating`, and a resumed run integrates them.
+            for pending in self._integrations.values():
+                pending.cancel()
+            await asyncio.gather(*self._integrations.values(), return_exceptions=True)
+            raise
         if result.ok:
+            await self._wait_for_integrations()
             print(
                 f"Proved root theorem; {len(result.theorems)} theorem record(s) at root."
             )
-            self.state.clear()
+            self._forget()
             return
-        self.state.update(
-            version=1,
-            task_digest=self._task_digest(),
-            run_dir=str(self.run_root.relative_to(self.project)),
-            last_failure=result.feedback,
-        )
+        self._remember(last_failure=result.feedback)
         print(f"Root theorem not accepted: {result.feedback}")
+        # What was accepted on the way still integrates before the run ends.
+        integrated = await asyncio.gather(
+            *self._integrations.values(), return_exceptions=True
+        )
+        for node_id, outcome in zip(self._integrations, integrated, strict=True):
+            if isinstance(outcome, BaseException):
+                print(f"Integration of {node_id} failed: {outcome!r}")
 
-    def _solve(self, node: NodeRecord) -> SolveResult:
+    def _remember(self, **extra: str) -> None:
+        self.state["version"] = 1
+        self.state["task_digest"] = self._task_digest()
+        self.state["run_dir"] = str(self.run_root.relative_to(self.project))
+        for key, value in extra.items():
+            self.state[key] = value
+
+    def _recalled(self, key: str) -> Any:
+        return self.state[key] if key in self.state else None
+
+    def _forget(self) -> None:
+        for key in STATE:
+            if key in self.state:
+                del self.state[key]
+
+    def _spent(self) -> bool:
+        """Whether this run's own budget is spent, rather than one a flow it called set."""
+        if self.ctx is None:
+            return True
+        budget, usage = self.ctx.budget, self.ctx.usage
+        return (
+            (budget.cost is not None and usage.cost >= budget.cost)
+            or (
+                budget.output_tokens is not None
+                and usage.output_tokens >= budget.output_tokens
+            )
+            or (
+                budget.duration is not None
+                and time.monotonic() - self._since >= budget.duration.total_seconds()
+            )
+        )
+
+    async def _ask(
+        self,
+        agent: Any,
+        prompt: str,
+        schema: type[pydantic.BaseModel] | None = None,
+        env: Any = None,
+    ) -> Any:
+        """One turn in a fresh session: an instance of `schema`, or text where it is None.
+
+        Taken as a `turn` call of its own, so that the session -- and, for some harnesses,
+        the CLI process serving it -- is closed as soon as the turn is over rather than when
+        the whole run is. A turn that failed answers None, or "" for text.
+        """
+        turn = load(TURN)
+        taking: Any = {agent.role: agent}
+        return await turn(
+            prompt,
+            agents=taking,
+            envs={"workspace": env or self.workspace},
+            params=turn.expected_params.model_validate(
+                {
+                    "role": agent.role,
+                    "schema_name": "" if schema is None else schema.__name__,
+                }
+            ),
+        )
+
+    async def _solve(self, node: NodeRecord) -> SolveResult:
         if node.status == "proved":
             return SolveResult(
                 ok=True,
@@ -196,7 +330,7 @@ class Runtime:
                 theorems=self._checkpoint_theorems(node),
             )
         if node.status == "integrating" and node.candidate_commit:
-            return self._resume_accepted_candidate(node)
+            return await self._resume_accepted_candidate(node)
         feedback = node.message if node.status == "failed" else "None."
         plan = self._recorded_plan(node)
         if plan is None:
@@ -211,12 +345,11 @@ class Runtime:
         plan_attempted = plan is not None
         while True:
             node.attempts += 1
-            attempt = node.attempts
             if plan is None:
                 if plan_attempted:
                     break
                 plan_attempted = True
-                plan = self._accepted_plan(node, feedback)
+                plan = await self._accepted_plan(node, feedback)
                 if plan is not None:
                     feedback = node.message
             if plan is None:
@@ -224,24 +357,24 @@ class Runtime:
                     "One-time direct plan generation produced no usable scaffold."
                 )
                 break
-            natural = self._accepted_natural_proof(node, plan, feedback)
+            natural = await self._accepted_natural_proof(node, plan, feedback)
             if natural is None:
                 feedback = "No complete natural-language proof survived review."
                 continue
-            decomposition = self._decompose(node, natural)
+            decomposition = await self._decompose(node, natural)
             if decomposition is None:
                 feedback = node.message or (
                     "The proposed subproblem graph was invalid or cyclic."
                 )
                 continue
-            children = self._solve_children(node, decomposition, attempt)
+            children = await self._solve_children(node, decomposition)
             failed = [one for one in children if not one.ok]
             if failed and self.config.stop_on_child_failure:
                 feedback = "Required child failure(s): " + "; ".join(
                     f"{one.node_id}: {one.feedback}" for one in failed
                 )
                 continue
-            result = self._formalize(node, plan, natural, children)
+            result = await self._formalize(node, plan, natural, children)
             if result.ok:
                 return result
             feedback = result.feedback
@@ -250,7 +383,7 @@ class Runtime:
         self.store.update(node.id, "failed", feedback)
         return SolveResult(ok=False, node_id=node.id, feedback=feedback)
 
-    def _accepted_plan(self, node: NodeRecord, feedback: str) -> Path | None:
+    async def _accepted_plan(self, node: NodeRecord, feedback: str) -> Path | None:
         preserved = self._preserved_plan(node) if node.status == "interrupted" else None
         if preserved is not None:
             self.store.update(
@@ -260,38 +393,36 @@ class Runtime:
                 plan=str(preserved.relative_to(self.project)),
             )
             return preserved
-        for _ in range(1):
-            version = self._next_version(node, "plan")
-            node_dir = self._node_dir(node)
-            draft = node_dir / f"plan-draft-v{version}.md"
-            output = node_dir / f"plan-v{version}.md"
-            body = PLAN_DRAFT.format(
-                statement=node.statement,
-                node_id=node.id,
-                lean_name=node.lean_name or "to be chosen",
-                depth=node.depth,
-                parent=node.parent or "none",
-                lean_target=self.config.lean_target
-                or "the repository's appropriate Lean file",
-                comparator_command=self._render_command(node, []),
-                comparator_success=self.config.comparator_success,
-                feedback=feedback or "None.",
-            )
-            atomic_text(draft, body)
-            self.store.update(
-                node.id,
-                "planning",
-                f"direct one-time plan generation {version}",
-                attempts=node.attempts,
-            )
-            try:
-                planning_agents = (
-                    self.agents.worker.clone(),
-                    self.agents.reviewer.clone(),
-                )
-                load(GEN_PLAN, inherit_skills=True)(
-                    planning_agents,
-                    f"Plan a correct natural and Lean proof for DAG node {node.id}",
+        version = self._next_version(node, "plan")
+        node_dir = self._node_dir(node)
+        draft = node_dir / f"plan-draft-v{version}.md"
+        output = node_dir / f"plan-v{version}.md"
+        body = PLAN_DRAFT.format(
+            statement=node.statement,
+            node_id=node.id,
+            lean_name=node.lean_name or "to be chosen",
+            depth=node.depth,
+            parent=node.parent or "none",
+            lean_target=self.config.lean_target
+            or "the repository's appropriate Lean file",
+            comparator_command=self._render_command(node, []),
+            comparator_success=self.config.comparator_success,
+            feedback=feedback or "None.",
+        )
+        atomic_text(draft, body + _discipline())
+        self.store.update(
+            node.id,
+            "planning",
+            f"direct one-time plan generation {version}",
+            attempts=node.attempts,
+        )
+        try:
+            gen_plan = load(GEN_PLAN)
+            await gen_plan(
+                f"Plan a correct natural and Lean proof for DAG node {node.id}",
+                agents={"planner": self.worker, "analyst": self.reviewer},
+                envs={"workspace": self.workspace},
+                params=gen_plan.expected_params.model_validate(
                     {
                         "input": str(draft.relative_to(self.project)),
                         "output": str(output.relative_to(self.project)),
@@ -300,45 +431,47 @@ class Runtime:
                         "turn_timeout": self.config.plan_turn_timeout,
                         "total_timeout": self.config.plan_total_timeout,
                         "turn_retries": 1,
-                    },
-                )
-            except Stopped as error:
-                feedback = f"humanize1:gen-plan stopped: {error}"
-                self.store.update(
-                    node.id,
-                    "natural-proof",
-                    f"direct plan stopped; scaffold draft {version} frozen for NL proof",
-                    plan=str(draft.relative_to(self.project)),
-                )
-                return draft
-            except Exception as error:  # noqa: BLE001
-                feedback = f"humanize1:gen-plan failed: {error}"
-                self.store.update(
-                    node.id,
-                    "natural-proof",
-                    f"direct plan unavailable; scaffold draft {version} frozen for NL proof",
-                    plan=str(draft.relative_to(self.project)),
-                )
-                return draft
-            if not output.is_file() or not output.read_text(encoding="utf-8").strip():
-                feedback = "humanize1:gen-plan did not produce a plan file"
-                self.store.update(
-                    node.id,
-                    "natural-proof",
-                    f"direct plan had no output; scaffold draft {version} frozen for NL proof",
-                    plan=str(draft.relative_to(self.project)),
-                )
-                return draft
+                    }
+                ),
+            )
+        except BudgetExceeded:
+            # gen-plan's own timeouts stop planning; this run's spent budget stops the run.
+            if self._spent():
+                raise
             self.store.update(
                 node.id,
                 "natural-proof",
-                f"one-time scaffold plan {version} generated and frozen",
-                plan=str(output.relative_to(self.project)),
+                f"direct plan stopped; scaffold draft {version} frozen for NL proof",
+                plan=str(draft.relative_to(self.project)),
             )
-            return output
-        return None
+            return draft
+        except Exception as error:
+            if _fatal(error):
+                raise
+            self.store.update(
+                node.id,
+                "natural-proof",
+                f"direct plan unavailable; scaffold draft {version} frozen for NL proof",
+                plan=str(draft.relative_to(self.project)),
+            )
+            return draft
+        if not output.is_file() or not output.read_text(encoding="utf-8").strip():
+            self.store.update(
+                node.id,
+                "natural-proof",
+                f"direct plan had no output; scaffold draft {version} frozen for NL proof",
+                plan=str(draft.relative_to(self.project)),
+            )
+            return draft
+        self.store.update(
+            node.id,
+            "natural-proof",
+            f"one-time scaffold plan {version} generated and frozen",
+            plan=str(output.relative_to(self.project)),
+        )
+        return output
 
-    def _accepted_natural_proof(
+    async def _accepted_natural_proof(
         self, node: NodeRecord, plan_path: Path, outer_feedback: str = ""
     ) -> NaturalProof | None:
         plan = plan_path.read_text(encoding="utf-8")
@@ -348,6 +481,7 @@ class Runtime:
             "No complete natural-language proof survived review.",
         }:
             feedback = outer_feedback
+        version = 0
         while True:
             for _ in range(self.config.natural_proof_attempts):
                 version = self._next_json_version(node, "natural-proof-draft")
@@ -356,15 +490,15 @@ class Runtime:
                     "natural-proof",
                     f"natural-language RLCR author revision {version}",
                 )
-                proof = self.agents.worker.clone().new()(
+                proof = await self._ask(
+                    self.worker,
                     NATURAL_PROOF.format(
                         statement=node.statement,
                         plan=plan,
                         feedback=feedback,
                         prior_proof=prior_proof,
                     ),
-                    suppress=True,
-                    schema=NaturalProof,
+                    NaturalProof,
                 )
                 if proof is None:
                     feedback = "The worker returned no structured proof."
@@ -398,10 +532,10 @@ class Runtime:
                     "natural-review",
                     f"natural-language RLCR reviewer round {version}",
                 )
-                audit = self.agents.reviewer.clone()(
+                audit = await self._ask(
+                    self.reviewer,
                     NATURAL_AUDIT.format(statement=node.statement, proof=proof.proof),
-                    suppress=True,
-                    schema=NaturalAudit,
+                    NaturalAudit,
                 )
                 if audit is not None:
                     atomic_text(
@@ -441,7 +575,9 @@ class Runtime:
                 ),
             )
 
-    def _decompose(self, node: NodeRecord, proof: NaturalProof) -> Decomposition | None:
+    async def _decompose(
+        self, node: NodeRecord, proof: NaturalProof
+    ) -> Decomposition | None:
         if node.depth >= self.config.max_depth:
             return Decomposition(
                 should_split=False,
@@ -456,7 +592,8 @@ class Runtime:
                 f"subproblem decomposition attempt {attempt}",
             )
             try:
-                made = self.agents.worker.clone()(
+                made = await self._ask(
+                    self.worker,
                     DECOMPOSE.format(
                         max_children=self.config.max_children,
                         depth=node.depth,
@@ -465,14 +602,11 @@ class Runtime:
                         proof=proof.proof,
                         feedback=feedback,
                     ),
-                    suppress=True,
-                    schema=Decomposition,
+                    Decomposition,
                 )
-            except Stopped as error:
-                feedback = f"decomposition worker stopped: {error}"
-                self.store.update(node.id, "decomposing", feedback)
-                continue
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
+                if _fatal(error):
+                    raise
                 feedback = f"decomposition worker failed: {error}"
                 self.store.update(node.id, "decomposing", feedback)
                 continue
@@ -496,20 +630,18 @@ class Runtime:
                 self.store.update(node.id, "decomposing", feedback)
                 continue
             try:
-                audit = self.agents.reviewer.clone()(
+                audit = await self._ask(
+                    self.reviewer,
                     DECOMPOSITION_AUDIT.format(
                         statement=node.statement,
                         proof=proof.proof,
                         decomposition=made.model_dump_json(indent=2),
                     ),
-                    suppress=True,
-                    schema=DecompositionAudit,
+                    DecompositionAudit,
                 )
-            except Stopped as error:
-                feedback = f"decomposition reviewer stopped: {error}"
-                self.store.update(node.id, "decomposing", feedback)
-                continue
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
+                if _fatal(error):
+                    raise
                 feedback = f"decomposition reviewer failed: {error}"
                 self.store.update(node.id, "decomposing", feedback)
                 continue
@@ -546,74 +678,93 @@ class Runtime:
         self.store.update(node.id, "decomposing", feedback)
         return None
 
-    def _solve_children(
+    async def _bounded(
+        self,
+        gate: asyncio.Semaphore,
+        work: Callable[[NodeRecord], Awaitable[SolveResult]],
+        node: NodeRecord,
+        label: str,
+        *,
+        record: bool = False,
+    ) -> SolveResult:
+        async with gate:
+            try:
+                return await work(node)
+            except Exception as error:
+                if _fatal(error):
+                    raise
+                result = SolveResult(
+                    ok=False, node_id=node.id, feedback=f"{label}: {error}"
+                )
+                if record:
+                    self.store.update(node.id, "failed", result.feedback)
+                return result
+
+    async def _solve_children(
         self,
         parent: NodeRecord,
         decomposition: Decomposition,
-        parent_attempt: int,
     ) -> list[SolveResult]:
-        del parent_attempt
         if not decomposition.should_split:
             return []
-        with self._graph_lock:
-            existing_by_name: dict[str, NodeRecord] = {}
-            candidates = sorted(
-                (
-                    one
-                    for one in self.store.nodes.values()
-                    if one.lean_name
-                    and (one.parent == parent.id or self._accepted_checkpoint(one))
-                ),
-                key=lambda one: (
-                    0
-                    if one.status == "proved"
-                    else 1
-                    if one.status == "integrating" and one.candidate_commit
-                    else 2,
-                    one.id,
-                ),
+        existing_by_name: dict[str, NodeRecord] = {}
+        candidates = sorted(
+            (
+                one
+                for one in self.store.nodes.values()
+                if one.lean_name
+                and (one.parent == parent.id or self._accepted_checkpoint(one))
+            ),
+            key=lambda one: (
+                0
+                if one.status == "proved"
+                else 1
+                if one.status == "integrating" and one.candidate_commit
+                else 2,
+                one.id,
+            ),
+        )
+        for candidate in candidates:
+            existing_by_name.setdefault(candidate.lean_name, candidate)
+        ids = {
+            one.key: (
+                existing_by_name[one.lean_name].id
+                if one.lean_name in existing_by_name
+                else f"{parent.id}.{one.key}-a1"
             )
-            for candidate in candidates:
-                existing_by_name.setdefault(candidate.lean_name, candidate)
-            ids = {
-                one.key: (
-                    existing_by_name[one.lean_name].id
-                    if one.lean_name in existing_by_name
-                    else f"{parent.id}.{one.key}-a1"
+            for one in decomposition.subproblems
+        }
+        new_ids = {
+            node_id for node_id in ids.values() if node_id not in self.store.nodes
+        }
+        remaining = self.config.max_nodes - len(self.store.nodes)
+        if remaining < len(new_ids):
+            return [
+                SolveResult(
+                    ok=False,
+                    node_id=parent.id,
+                    feedback=(
+                        f"node bound {self.config.max_nodes} leaves room for {remaining}, "
+                        f"but decomposition needs {len(new_ids)} new node(s)"
+                    ),
                 )
-                for one in decomposition.subproblems
-            }
-            new_ids = {
-                node_id for node_id in ids.values() if node_id not in self.store.nodes
-            }
-            remaining = self.config.max_nodes - len(self.store.nodes)
-            if remaining < len(new_ids):
-                return [
-                    SolveResult(
-                        ok=False,
-                        node_id=parent.id,
-                        feedback=(
-                            f"node bound {self.config.max_nodes} leaves room for {remaining}, "
-                            f"but decomposition needs {len(new_ids)} new node(s)"
-                        ),
-                    )
-                ]
-            made: dict[str, NodeRecord] = {}
-            for one in decomposition.subproblems:
-                made[one.key] = self.store.ensure(
-                    ids[one.key],
-                    parent=parent.id,
-                    depth=parent.depth + 1,
-                    title=one.title,
-                    statement=one.statement,
-                    lean_statement=one.lean_statement,
-                    lean_name=one.lean_name,
-                    depends_on=[ids[key] for key in one.depends_on],
-                )
-            retained_children = list(dict.fromkeys(ids.values()))
-            if parent.children != retained_children:
-                parent.children = retained_children
-                self.store.render()
+            ]
+        made: dict[str, NodeRecord] = {}
+        for one in decomposition.subproblems:
+            made[one.key] = self.store.ensure(
+                ids[one.key],
+                parent=parent.id,
+                depth=parent.depth + 1,
+                title=one.title,
+                statement=one.statement,
+                lean_statement=one.lean_statement,
+                lean_name=one.lean_name,
+                depends_on=[ids[key] for key in one.depends_on],
+            )
+        retained_children = list(dict.fromkeys(ids.values()))
+        if parent.children != retained_children:
+            parent.children = retained_children
+            self.store.render()
         self.store.update(
             parent.id,
             "waiting-children",
@@ -622,96 +773,105 @@ class Runtime:
         results: dict[str, SolveResult] = {}
         by_key = {one.key: one for one in decomposition.subproblems}
         pending = set(by_key)
-        workers = min(self.config.max_parallel_children, max(1, len(pending)))
-        with ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix=f"recursive-{slug(parent.id)}",
-        ) as executor:
-            futures: dict[Any, str] = {}
-            while pending or futures:
-                progressed = False
-                for key in sorted(pending):
-                    child = by_key[key]
-                    dependency_failure = next(
-                        (
-                            results[dependency]
-                            for dependency in child.depends_on
-                            if dependency in results and not results[dependency].ok
-                        ),
-                        None,
-                    )
-                    if dependency_failure is not None:
-                        result = SolveResult(
-                            ok=False,
-                            node_id=made[key].id,
-                            feedback=f"dependency {dependency_failure.node_id} failed",
+        gate = asyncio.Semaphore(
+            min(self.config.max_parallel_children, max(1, len(pending)))
+        )
+        try:
+            async with asyncio.TaskGroup() as group:
+                running: dict[asyncio.Task[SolveResult], str] = {}
+                while pending or running:
+                    progressed = False
+                    for key in sorted(pending):
+                        child = by_key[key]
+                        dependency_failure = next(
+                            (
+                                results[dependency]
+                                for dependency in child.depends_on
+                                if dependency in results and not results[dependency].ok
+                            ),
+                            None,
                         )
-                        self.store.update(made[key].id, "failed", result.feedback)
-                        results[key] = result
-                        pending.remove(key)
-                        progressed = True
-                        continue
-                    if all(dependency in results for dependency in child.depends_on):
-                        pending.remove(key)
-                        checkpoint = made[key]
-                        if checkpoint.status == "proved":
-                            results[key] = SolveResult(
-                                ok=True,
-                                node_id=checkpoint.id,
-                                theorems=self._checkpoint_theorems(checkpoint),
-                            )
-                        elif (
-                            checkpoint.status == "integrating"
-                            and checkpoint.candidate_commit
-                        ):
-                            theorems = self._checkpoint_theorems(checkpoint)
-                            if not theorems:
-                                result = SolveResult(
-                                    ok=False,
-                                    node_id=checkpoint.id,
-                                    feedback=(
-                                        "accepted checkpoint lacks durable reviewer metadata"
-                                    ),
-                                )
-                                results[key] = result
-                            else:
-                                self._submit_resumed_integration(checkpoint)
-                                results[key] = SolveResult(
-                                    ok=True,
-                                    node_id=checkpoint.id,
-                                    theorems=theorems,
-                                )
-                        else:
-                            futures[executor.submit(self._solve, checkpoint)] = key
-                        progressed = True
-                if not futures:
-                    if pending and not progressed:
-                        for key in sorted(pending):
+                        if dependency_failure is not None:
                             result = SolveResult(
                                 ok=False,
                                 node_id=made[key].id,
-                                feedback="no dependency-ready node in child DAG",
+                                feedback=(
+                                    f"dependency {dependency_failure.node_id} failed"
+                                ),
                             )
                             self.store.update(made[key].id, "failed", result.feedback)
                             results[key] = result
-                        pending.clear()
-                    continue
-                done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
-                for future in done:
-                    key = futures.pop(future)
-                    try:
-                        results[key] = future.result()
-                    except Exception as error:  # noqa: BLE001
-                        result = SolveResult(
-                            ok=False,
-                            node_id=made[key].id,
-                            feedback=f"parallel child worker failed: {error}",
-                        )
-                        self.store.update(made[key].id, "failed", result.feedback)
-                        results[key] = result
+                            pending.remove(key)
+                            progressed = True
+                            continue
+                        if all(
+                            dependency in results for dependency in child.depends_on
+                        ):
+                            pending.remove(key)
+                            checkpoint = made[key]
+                            if checkpoint.status == "proved":
+                                results[key] = SolveResult(
+                                    ok=True,
+                                    node_id=checkpoint.id,
+                                    theorems=self._checkpoint_theorems(checkpoint),
+                                )
+                            elif (
+                                checkpoint.status == "integrating"
+                                and checkpoint.candidate_commit
+                            ):
+                                theorems = self._checkpoint_theorems(checkpoint)
+                                if not theorems:
+                                    results[key] = SolveResult(
+                                        ok=False,
+                                        node_id=checkpoint.id,
+                                        feedback=(
+                                            "accepted checkpoint lacks durable "
+                                            "reviewer metadata"
+                                        ),
+                                    )
+                                else:
+                                    self._integrate_later(checkpoint)
+                                    results[key] = SolveResult(
+                                        ok=True,
+                                        node_id=checkpoint.id,
+                                        theorems=theorems,
+                                    )
+                            else:
+                                task = group.create_task(
+                                    self._bounded(
+                                        gate,
+                                        self._solve,
+                                        checkpoint,
+                                        "parallel child worker failed",
+                                        record=True,
+                                    )
+                                )
+                                running[task] = key
+                            progressed = True
+                    if not running:
+                        if pending and not progressed:
+                            for key in sorted(pending):
+                                result = SolveResult(
+                                    ok=False,
+                                    node_id=made[key].id,
+                                    feedback="no dependency-ready node in child DAG",
+                                )
+                                self.store.update(
+                                    made[key].id, "failed", result.feedback
+                                )
+                                results[key] = result
+                            pending.clear()
+                        continue
+                    done, _ = await asyncio.wait(
+                        running, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done:
+                        results[running.pop(task)] = task.result()
+        except BaseExceptionGroup as failed:
+            raise _raised(failed) from None
         return [results[one.key] for one in decomposition.subproblems]
 
-    def _resume_existing_dag(self, root: NodeRecord) -> SolveResult:
+    async def _resume_existing_dag(self, root: NodeRecord) -> SolveResult:
         managed = {root.id}
         frontier = [root.id]
         while frontier:
@@ -721,16 +881,15 @@ class Runtime:
                     managed.add(related)
                     frontier.append(related)
         scheduled: set[str] = set()
-        running: dict[Any, str] = {}
         workers = min(self.config.max_parallel_children, max(1, len(managed)))
 
         if root.status == "integrating" and root.candidate_commit:
             for node_id in sorted(managed - {root.id}):
                 node = self.store.nodes[node_id]
                 if node.status == "integrating" and node.candidate_commit:
-                    self._submit_resumed_integration(node)
-            self._wait_for_integrations()
-            return self._resume_accepted_candidate(root)
+                    self._integrate_later(node)
+            await self._wait_for_integrations()
+            return await self._resume_accepted_candidate(root)
 
         def ready_nodes() -> list[NodeRecord]:
             ready: list[NodeRecord] = []
@@ -742,7 +901,7 @@ class Runtime:
                     scheduled.add(node_id)
                     continue
                 if node.status == "integrating" and node.candidate_commit:
-                    self._submit_resumed_integration(node)
+                    self._integrate_later(node)
                     scheduled.add(node_id)
                     continue
                 if any(
@@ -758,52 +917,53 @@ class Runtime:
                 ready.append(node)
             return ready
 
-        with ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix=f"frontier-{slug(root.id)}",
-        ) as executor:
-            while self.store.nodes[root.id].status != "proved":
-                for node in ready_nodes():
-                    scheduled.add(node.id)
-                    self.store.update(
-                        node.id,
-                        "queued",
-                        "dependency-ready; launched in global DAG frontier",
-                    )
-                    future = executor.submit(
-                        self._formalize_checkpoint_parent
-                        if node.children
-                        else self._solve,
-                        node,
-                    )
-                    running[future] = node.id
-                if not running:
-                    blocked = [
-                        self.store.nodes[node_id]
-                        for node_id in sorted(managed)
-                        if self.store.nodes[node_id].status != "proved"
-                    ]
-                    reason = "no dependency-ready node in existing DAG frontier"
-                    if blocked:
-                        reason += ": " + ", ".join(one.id for one in blocked)
-                    return SolveResult(ok=False, node_id=root.id, feedback=reason)
-                done, _ = wait(tuple(running), return_when=FIRST_COMPLETED)
-                for future in done:
-                    node_id = running.pop(future)
-                    try:
-                        result = future.result()
-                    except Exception as error:  # noqa: BLE001
-                        result = SolveResult(
-                            ok=False,
-                            node_id=node_id,
-                            feedback=f"global frontier worker failed: {error}",
+        gate = asyncio.Semaphore(workers)
+        try:
+            async with asyncio.TaskGroup() as group:
+                running: dict[asyncio.Task[SolveResult], str] = {}
+                while self.store.nodes[root.id].status != "proved":
+                    for node in ready_nodes():
+                        scheduled.add(node.id)
+                        self.store.update(
+                            node.id,
+                            "queued",
+                            "dependency-ready; launched in global DAG frontier",
                         )
-                    if not result.ok:
-                        return SolveResult(
-                            ok=False,
-                            node_id=root.id,
-                            feedback=f"{node_id}: {result.feedback}",
+                        task = group.create_task(
+                            self._bounded(
+                                gate,
+                                self._formalize_checkpoint_parent
+                                if node.children
+                                else self._solve,
+                                node,
+                                "global frontier worker failed",
+                            )
                         )
+                        running[task] = node.id
+                    if not running:
+                        blocked = [
+                            self.store.nodes[node_id]
+                            for node_id in sorted(managed)
+                            if self.store.nodes[node_id].status != "proved"
+                        ]
+                        reason = "no dependency-ready node in existing DAG frontier"
+                        if blocked:
+                            reason += ": " + ", ".join(one.id for one in blocked)
+                        return SolveResult(ok=False, node_id=root.id, feedback=reason)
+                    done, _ = await asyncio.wait(
+                        running, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done:
+                        node_id = running.pop(task)
+                        result = task.result()
+                        if not result.ok:
+                            return SolveResult(
+                                ok=False,
+                                node_id=root.id,
+                                feedback=f"{node_id}: {result.feedback}",
+                            )
+        except BaseExceptionGroup as failed:
+            raise _raised(failed) from None
         root_record = self.store.nodes[root.id]
         return SolveResult(
             ok=True,
@@ -811,7 +971,7 @@ class Runtime:
             theorems=self._checkpoint_theorems(root_record),
         )
 
-    def _formalize_checkpoint_parent(self, node: NodeRecord) -> SolveResult:
+    async def _formalize_checkpoint_parent(self, node: NodeRecord) -> SolveResult:
         plan = self._recorded_plan(node) or self._preserved_plan(node)
         if plan is None or not node.natural_proof:
             return SolveResult(
@@ -838,10 +998,10 @@ class Runtime:
             for child in (self.store.nodes[child_id] for child_id in node.children)
         ]
         while True:
-            result = self._formalize(node, plan, natural, children)
+            result = await self._formalize(node, plan, natural, children)
             if result.ok:
                 return result
-            natural = self._accepted_natural_proof(node, plan, result.feedback)
+            natural = await self._accepted_natural_proof(node, plan, result.feedback)
             if natural is None:
                 return result
 
@@ -852,7 +1012,7 @@ class Runtime:
         lean_file = (
             node.lean_files[0]
             if node.lean_files
-            else getattr(self.config, "lean_target", "") or "Submission.lean"
+            else self.config.lean_target or "Submission.lean"
         )
         statement = node.lean_statement or node.statement
         return [
@@ -890,7 +1050,7 @@ class Runtime:
                 return audit
         return None
 
-    def _resume_accepted_candidate(self, node: NodeRecord) -> SolveResult:
+    async def _resume_accepted_candidate(self, node: NodeRecord) -> SolveResult:
         theorems = self._checkpoint_theorems(node)
         if not theorems:
             return SolveResult(
@@ -898,92 +1058,58 @@ class Runtime:
                 node_id=node.id,
                 feedback="accepted checkpoint has no durable reviewer theorem record",
             )
-        worktree = Path(node.worktree)
-        if not worktree.is_dir():
-            return SolveResult(
-                ok=False,
-                node_id=node.id,
-                feedback=f"accepted proof worktree is unavailable: {worktree}",
-            )
         if not node.proof_base_commit or not node.candidate_commit:
             return SolveResult(
                 ok=False,
                 node_id=node.id,
                 feedback="accepted checkpoint lacks its Git base or candidate commit",
             )
-        return self._complete_accepted_integration(
+        return await self._complete_accepted_integration(
             node,
-            worktree,
             node.proof_base_commit,
             node.candidate_commit,
             theorems,
         )
 
-    def _submit_resumed_integration(self, node: NodeRecord) -> Any:
-        theorems = self._checkpoint_theorems(node)
-        worktree = Path(node.worktree)
-        with self._integration_futures_lock:
-            existing = self._integration_futures.get(node.id)
-            if existing is not None:
-                return existing
-            future = self._integration_executor.submit(
-                self._complete_accepted_integration,
-                node,
-                worktree,
-                node.proof_base_commit,
-                node.candidate_commit,
-                theorems,
-            )
-            self._integration_futures[node.id] = future
-            return future
-
-    def _submit_accepted_integration(
+    def _integrate_later(
         self,
         node: NodeRecord,
-        worktree: Path,
-        before: str,
-        after: str,
-        theorems: list[ProvedTheorem],
-        comparator_log: str,
-    ) -> Any:
-        with self._integration_futures_lock:
-            existing = self._integration_futures.get(node.id)
-            if existing is not None:
-                return existing
-            future = self._integration_executor.submit(
-                self._complete_accepted_integration,
+        before: str = "",
+        after: str = "",
+        theorems: list[ProvedTheorem] | None = None,
+        comparator_log: str = "",
+    ) -> None:
+        if node.id in self._integrations:
+            return
+        self._integrations[node.id] = asyncio.create_task(
+            self._complete_accepted_integration(
                 node,
-                worktree,
-                before,
-                after,
-                theorems,
+                before or node.proof_base_commit,
+                after or node.candidate_commit,
+                self._checkpoint_theorems(node) if theorems is None else theorems,
                 comparator_log,
             )
-            self._integration_futures[node.id] = future
-            return future
+        )
 
-    def _wait_for_integrations(self) -> None:
+    async def _wait_for_integrations(self) -> None:
         while True:
-            with self._integration_futures_lock:
-                futures = list(self._integration_futures.values())
-            unfinished = [future for future in futures if not future.done()]
+            tasks = list(self._integrations.values())
+            unfinished = [task for task in tasks if not task.done()]
             if not unfinished:
-                for future in futures:
-                    future.result()
+                for task in tasks:
+                    task.result()
                 return
-            wait(tuple(unfinished), return_when=FIRST_COMPLETED)
+            await asyncio.wait(unfinished, return_when=asyncio.FIRST_COMPLETED)
 
-    def _complete_accepted_integration(
+    async def _complete_accepted_integration(
         self,
         node: NodeRecord,
-        worktree: Path,
         before: str,
         after: str,
         theorems: list[ProvedTheorem],
         comparator_log: str = "",
     ) -> SolveResult:
-        integrated, feedback = self._integrate_reviewed_candidate(
-            worktree,
+        integrated, feedback = await self._integrate_reviewed_candidate(
             before,
             after,
             node=node,
@@ -991,7 +1117,7 @@ class Runtime:
         )
         if not integrated:  # pragma: no cover - integration retries until success
             return SolveResult(ok=False, node_id=node.id, feedback=feedback)
-        integrated_head = self._git_head(self.project)
+        integrated_head = await self._git_head()
         self.store.update(
             node.id,
             "integrating",
@@ -1054,56 +1180,48 @@ class Runtime:
                 comparator_log=comparator_log or "Comparator passed.",
             )
 
-    def _overlay_accepted_children(
-        self, node: NodeRecord, worktree: Path
+    async def _overlay_accepted_children(
+        self, node: NodeRecord, worktree: Any
     ) -> tuple[bool, str]:
         commits: list[str] = []
         seen: set[str] = set()
         prerequisite_ids = list(dict.fromkeys([*node.children, *node.depends_on]))
-        current = self._git_head(worktree)
+        current = await self._git_head(worktree)
         for child_id in prerequisite_ids:
             child = self.store.nodes.get(child_id)
             if child is None or not self._accepted_checkpoint(child):
                 continue
             if not child.candidate_commit or not child.proof_base_commit:
                 continue
-            listed = subprocess.run(
+            listed, history, _ = await self.workspace.exec(
                 [
                     "git",
                     "rev-list",
                     "--reverse",
                     f"{child.proof_base_commit}..{child.candidate_commit}",
-                ],
-                cwd=self.project,
-                capture_output=True,
-                text=True,
-                check=False,
+                ]
             )
-            if listed.returncode:
+            if listed:
                 return (
                     False,
                     f"could not enumerate accepted child history for {child.id}",
                 )
-            for commit in listed.stdout.splitlines():
+            for commit in history.splitlines():
                 if not commit or commit in seen:
                     continue
-                already_present = (
-                    subprocess.run(
-                        ["git", "merge-base", "--is-ancestor", commit, current],
-                        cwd=worktree,
-                        capture_output=True,
-                        check=False,
-                    ).returncode
-                    == 0
+                present, _, _ = await worktree.exec(
+                    ["git", "merge-base", "--is-ancestor", commit, current]
                 )
-                if not already_present:
+                if present != 0:
                     commits.append(commit)
                     seen.add(commit)
         if not commits:
             return True, "all accepted child checkpoints already present"
-        if not self._git_clean(worktree):
+        if not await self._git_clean(worktree):
             return False, "parent worktree is dirty before accepted-child overlay"
-        applied, unioned, detail = self._apply_candidate_commits(worktree, commits)
+        applied, unioned, detail = await self._apply_candidate_commits(
+            worktree, commits
+        )
         if not applied:
             return (
                 False,
@@ -1115,7 +1233,7 @@ class Runtime:
         method = "Lean-unioned" if unioned else "cherry-picked"
         return True, f"{method} {len(commits)} accepted child commit(s)"
 
-    def _formalize(
+    async def _formalize(
         self,
         node: NodeRecord,
         plan_path: Path,
@@ -1141,23 +1259,26 @@ class Runtime:
             children=child_text,
         )
         try:
-            worktree = self._node_worktree(node)
-        except RuntimeError as error:
+            worktree = await self._node_worktree(node)
+        except (EnvError, RuntimeError) as error:
             return SolveResult(ok=False, node_id=node.id, feedback=str(error))
-        before = node.proof_base_commit or self._git_head(worktree)
-        overlaid, overlay_feedback = self._overlay_accepted_children(node, worktree)
+        where = node.worktree
+        before = node.proof_base_commit or await self._git_head(worktree)
+        overlaid, overlay_feedback = await self._overlay_accepted_children(
+            node, worktree
+        )
         if not overlaid:
             return SolveResult(
                 ok=False,
                 node_id=node.id,
                 feedback=overlay_feedback,
             )
-        review_base = self._git_head(worktree)
+        review_base = await self._git_head(worktree)
         self.store.update(
             node.id,
             "rlcr-lean",
-            f"isolated humanize1:rlcr formalization in {worktree}",
-            worktree=str(worktree),
+            f"isolated humanize1:rlcr formalization in {where}",
+            worktree=where,
             proof_branch=self._node_branch(node),
             proof_base_commit=before,
         )
@@ -1166,8 +1287,7 @@ class Runtime:
             plan_path=plan_path,
             natural_path=natural_path,
             statement=node.statement,
-            lean_statement=node.lean_statement
-            or "Root declarations are fixed by Challenge.lean and the official comparator.",
+            lean_statement=node.lean_statement or ROOT_TYPE,
             lean_name=node.lean_name or "choose a descriptive theorem name",
             proof_base_commit=before,
             lean_target=self.config.lean_target
@@ -1176,30 +1296,23 @@ class Runtime:
             comparator_command=self._review_command(node, []),
             comparator_success=self.config.comparator_success,
         )
-        try:
-            rlcr_ok, rlcr_log = self._run_rlcr_process(
-                node, worktree, plan_path, task, review_base
-            )
-        except OSError as error:
-            return SolveResult(
-                ok=False,
-                node_id=node.id,
-                feedback=f"could not launch isolated humanize1:rlcr: {error}",
-            )
+        rlcr_ok, rlcr_log = await self._run_rlcr(
+            node, worktree, plan_path, task, review_base
+        )
         if not rlcr_ok:
             return SolveResult(
                 ok=False,
                 node_id=node.id,
                 feedback=f"isolated humanize1:rlcr failed; see {rlcr_log}",
             )
-        after = self._git_head(worktree)
-        if not self._git_clean(worktree):
+        after = await self._git_head(worktree)
+        if not await self._git_clean(worktree):
             return SolveResult(
                 ok=False,
                 node_id=node.id,
-                feedback=f"RLCR left uncommitted participant changes in {worktree}",
+                feedback=f"RLCR left uncommitted participant changes in {where}",
             )
-        lean_files = self._lean_files(before, after, worktree)
+        lean_files = await self._lean_files(before, after, worktree)
         if not lean_files:
             return SolveResult(
                 ok=False,
@@ -1209,10 +1322,10 @@ class Runtime:
         self.store.update(
             node.id,
             "comparing",
-            f"running independent machine comparator in {worktree}",
+            f"running independent machine comparator in {where}",
             lean_files=lean_files,
         )
-        passed, log_path, log = self._compare(node, lean_files, worktree)
+        passed, log_path, log = await self._compare(node, lean_files, worktree)
         if not passed:
             self.store.update(
                 node.id,
@@ -1227,22 +1340,22 @@ class Runtime:
         self.store.update(
             node.id,
             "lean-review",
-            f"fresh reviewer reruns comparator in {worktree}",
+            f"fresh reviewer reruns comparator in {where}",
         )
-        audit = _WorkspaceAgent(self.agents.reviewer.clone(), worktree)(
+        audit = await self._ask(
+            self.reviewer,
             LEAN_AUDIT.format(
                 node_id=node.id,
                 statement=node.statement,
-                lean_statement=node.lean_statement
-                or "Root declarations are fixed by Challenge.lean and the official comparator.",
+                lean_statement=node.lean_statement or ROOT_TYPE,
                 proof_base_commit=before,
                 lean_files="\n".join(f"- {one}" for one in lean_files),
                 comparator_command=self._review_command(node, lean_files),
                 comparator_success=self.config.comparator_success,
                 comparator_log=log[-12000:],
             ),
-            suppress=True,
-            schema=LeanAudit,
+            LeanAudit,
+            worktree,
         )
         if audit is not None:
             audit_version = self._next_json_version(node, "lean-audit")
@@ -1265,19 +1378,11 @@ class Runtime:
         )
         self._publish_checkpoint(node, audit.theorems, comparator_log=log)
         if node.parent is not None:
-            self._submit_accepted_integration(
-                node,
-                worktree,
-                before,
-                after,
-                audit.theorems,
-                log,
-            )
+            self._integrate_later(node, before, after, audit.theorems, log)
             return SolveResult(ok=True, node_id=node.id, theorems=audit.theorems)
-        self._wait_for_integrations()
-        return self._complete_accepted_integration(
+        await self._wait_for_integrations()
+        return await self._complete_accepted_integration(
             node,
-            worktree,
             before,
             after,
             audit.theorems,
@@ -1287,52 +1392,44 @@ class Runtime:
     def _revise_parent(self, child: NodeRecord, failure: str) -> None:
         if child.parent is None:
             return
-        with self._revision_lock:
-            parent = self.store.nodes[child.parent]
-            self.store.update(
-                parent.id,
-                "waiting-children",
-                f"revise latest natural proof after {child.id} failed: {failure}",
-            )
+        parent = self.store.nodes[child.parent]
+        self.store.update(
+            parent.id,
+            "waiting-children",
+            f"revise latest natural proof after {child.id} failed: {failure}",
+        )
 
-    def _compare(
+    async def _compare(
         self,
         node: NodeRecord,
         lean_files: list[str],
-        cwd: Path | None = None,
+        env: Any = None,
         *,
         label: str = "",
     ) -> tuple[bool, Path, str]:
         rendered = self._render_command(node, lean_files)
-        argv = shlex.split(rendered)
-        environment = os.environ.copy()
-        environment.update(
-            HUMANIZE_NODE_ID=node.id,
-            HUMANIZE_NODE_STATEMENT=node.statement,
-            HUMANIZE_LEAN_FILES=os.pathsep.join(lean_files),
-            HUMANIZE_RUN_DIR=str(self.run_root),
-            HUMANIZE_WIKI_DIR=str(self.store.wiki),
-        )
+        variables = {
+            "HUMANIZE_NODE_ID": node.id,
+            "HUMANIZE_NODE_STATEMENT": node.statement,
+            "HUMANIZE_LEAN_FILES": os.pathsep.join(lean_files),
+            "HUMANIZE_RUN_DIR": str(self.run_root),
+            "HUMANIZE_WIKI_DIR": str(self.store.wiki),
+        }
+        argv = [
+            "env",
+            *(f"{name}={value}" for name, value in variables.items()),
+            *shlex.split(rendered),
+        ]
         try:
-            completed = subprocess.run(
-                argv,
-                cwd=cwd or self.project,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=self.config.comparator_timeout,
-                check=False,
+            code, out, err = await (env or self.workspace).exec(
+                argv, timeout=self.config.comparator_timeout
             )
             log = (
-                f"command: {rendered}\nexit: {completed.returncode}\n\n"
-                f"stdout:\n{completed.stdout}\n\nstderr:\n{completed.stderr}\n"
+                f"command: {rendered}\nexit: {code}\n\n"
+                f"stdout:\n{out}\n\nstderr:\n{err}\n"
             )
-            passed = (
-                completed.returncode == 0
-                and self.config.comparator_success
-                in completed.stdout + completed.stderr
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
+            passed = code == 0 and self.config.comparator_success in out + err
+        except EnvError as error:
             log = f"command: {rendered}\ncomparator execution failed: {error}\n"
             passed = False
         suffix = f"-{slug(label)}" if label else ""
@@ -1340,24 +1437,19 @@ class Runtime:
         atomic_text(path, log)
         return passed, path, log
 
-    def _lean_files(
-        self, before: str, after: str, cwd: Path | None = None
-    ) -> list[str]:
-        workspace = cwd or self.project
+    async def _lean_files(self, before: str, after: str, env: Any = None) -> list[str]:
+        env = env or self.workspace
         found: set[str] = set()
         if before and after:
-            completed = subprocess.run(
-                ["git", "diff", "--name-only", f"{before}..{after}", "--", "*.lean"],
-                cwd=workspace,
-                capture_output=True,
-                text=True,
-                check=False,
+            code, out, _ = await env.exec(
+                ["git", "diff", "--name-only", f"{before}..{after}", "--", "*.lean"]
             )
-            if completed.returncode == 0:
-                found.update(
-                    one.strip() for one in completed.stdout.splitlines() if one.strip()
-                )
-        if self.config.lean_target and (workspace / self.config.lean_target).is_file():
+            if code == 0:
+                found.update(one.strip() for one in out.splitlines() if one.strip())
+        if (
+            self.config.lean_target
+            and (Path(str(env.workdir)) / self.config.lean_target).is_file()
+        ):
             found.add(self.config.lean_target)
         return sorted(found)
 
@@ -1368,182 +1460,160 @@ class Runtime:
         )
         return f"env {environment} {self._render_command(node, lean_files)}"
 
-    def _run_rlcr_process(
+    async def _run_rlcr(
         self,
         node: NodeRecord,
-        worktree: Path,
+        worktree: Any,
         plan_path: Path,
         task: str,
         review_base: str,
     ) -> tuple[bool, Path]:
         node_dir = self._node_dir(node)
-        config_path = node_dir / f"rlcr-config-v{node.attempts}.json"
-        atomic_text(
-            config_path,
-            json.dumps(
+        log_path = node_dir / f"rlcr-process-v{node.attempts}.log"
+        try:
+            nested = load(WORKTREE_RLCR)
+            config = nested.expected_params.model_validate(
                 {
                     "plan_file": str(plan_path),
                     "max": self.config.rlcr_rounds,
                     "base_branch": review_base,
-                    "track_plan_file": False,
-                    "push_every_round": False,
-                    "skip_impl": False,
-                    "skip_quiz": True,
-                    "privacy": True,
-                    "agent_teams": False,
-                    "claude_answer_codex": True,
-                },
-                indent=2,
+                }
             )
-            + "\n",
+            atomic_text(
+                node_dir / f"rlcr-config-v{node.attempts}.json",
+                config.model_dump_json(indent=2) + "\n",
+            )
+            reason = await nested(
+                task,
+                agents={"worker": self.worker, "reviewer": self.reviewer},
+                envs={"workspace": worktree},
+                params=config,
+            )
+        except Exception as error:
+            # RLCR failing, or running out of a budget of its own, fails this attempt only.
+            if _fatal(error) and (
+                not isinstance(error, BudgetExceeded) or self._spent()
+            ):
+                raise
+            atomic_text(
+                log_path,
+                f"humanize1:rlcr in {worktree.workdir} failed:\n\n"
+                + "".join(traceback.format_exception(error)),
+            )
+            return False, log_path
+        # How the loop ended is RLCR's to say; whether the node is proved is the gates'.
+        atomic_text(
+            log_path, f"humanize1:rlcr in {worktree.workdir} returned {reason!r}\n"
         )
-        executable = shutil.which("hmz")
-        if executable is None:
-            raise OSError("hmz executable not found")
-        command = [
-            executable,
-            "exec",
-            "-f",
-            WORKTREE_RLCR,
-            "-c",
-            str(config_path),
-            "-a",
-            self._agent_spec(self.agents.worker),
-            "-a",
-            self._agent_spec(self.agents.reviewer),
-            task,
-        ]
-        log_path = node_dir / f"rlcr-process-v{node.attempts}.log"
-        with log_path.open("w", encoding="utf-8") as output:
-            completed = subprocess.run(
-                command,
-                cwd=worktree,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-            )
-        return completed.returncode == 0, log_path
+        return True, log_path
 
-    @staticmethod
-    def _agent_spec(agent: Any) -> str:
-        config = agent.config
-        account = f"@{config.provider}" if config.provider else ""
-        return f"{agent.backend}{account}/{config.model}:{config.effort}"
+    async def _worktree_root(self) -> Any:
+        if self._worktrees is None:
+            self._worktrees = await self.workspace.derive_scratch(WORKTREES)
+        return self._worktrees
 
-    def _node_worktree(self, node: NodeRecord) -> Path:
+    async def _node_worktree(self, node: NodeRecord) -> Any:
+        scratch = await self._worktree_root()
+        root = Path(str(scratch.workdir))
+        branch = self._node_branch(node)
         recorded = Path(node.worktree) if node.worktree else None
-        recorded_valid = (
-            recorded is not None and self._git_toplevel(recorded) == recorded
-        )
-        if recorded_valid and len(str(recorded)) <= 180:
-            self._prepare_lake_workspace(recorded)
-            return recorded
-        path = self._node_worktree_path(node)
-        if recorded_valid:
-            if self._git_toplevel(path) == path:
-                node.worktree = str(path)
-                self._prepare_lake_workspace(path)
-                return path
+        if (
+            recorded is not None
+            and await self._git_toplevel(recorded) == recorded.resolve()
+        ):
+            if recorded.is_relative_to(root):
+                return await self._attached(scratch, root, recorded, branch)
+            # A checkout this run can no longer reach: let go of its branch, which the
+            # new worktree checks out, and leave the rest of it where it is.
+            await _finished(
+                self.workspace.exec(
+                    ["git", "-C", str(recorded), "checkout", "--quiet", "--detach"]
+                )
+            )
+        path = self._node_worktree_path(node, root)
+        if await self._git_toplevel(path) != path.resolve():
             if path.exists() and any(path.iterdir()):
                 raise RuntimeError(
-                    f"short node worktree path exists but is not a Git worktree: {path}"
+                    f"node worktree path exists but is not a Git worktree: {path}"
                 )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with self._integration_lock:
-                moved = subprocess.run(
-                    ["git", "worktree", "move", str(recorded), str(path)],
-                    cwd=self.project,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            if moved.returncode:
-                detail = (moved.stderr or moved.stdout).strip()
-                raise RuntimeError(f"could not shorten node worktree path: {detail}")
-            node.worktree = str(path)
-            self._prepare_lake_workspace(path)
-            return path
-        if self._git_toplevel(path) == path:
-            node.worktree = str(path)
-            self._prepare_lake_workspace(path)
-            return path
-        if path.exists() and any(path.iterdir()):
-            raise RuntimeError(
-                f"node worktree path exists but is not a Git worktree: {path}"
-            )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        branch = self._node_branch(node)
-        detail = "unknown Git error"
-        for retry in range(6):
-            with self._integration_lock:
-                if self._git_toplevel(path) == path:
-                    break
-                subprocess.run(
-                    ["git", "worktree", "prune"],
-                    cwd=self.project,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                exists = (
-                    subprocess.run(
-                        [
-                            "git",
-                            "show-ref",
-                            "--verify",
-                            "--quiet",
-                            f"refs/heads/{branch}",
-                        ],
-                        cwd=self.project,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    ).returncode
-                    == 0
-                )
-                arguments = (
-                    ["git", "worktree", "add", str(path), branch]
-                    if exists
-                    else [
-                        "git",
-                        "worktree",
-                        "add",
-                        "-b",
-                        branch,
-                        str(path),
-                        "HEAD",
-                    ]
-                )
-                completed = subprocess.run(
-                    arguments,
-                    cwd=self.project,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            if completed.returncode == 0:
-                break
-            detail = (completed.stderr or completed.stdout).strip()
-            time.sleep(0.2 * (retry + 1))
-        if self._git_toplevel(path) != path:
-            raise RuntimeError(f"could not create isolated node worktree: {detail}")
+            detail = "unknown Git error"
+            for retry in range(6):
+                async with self._worktree_lock:
+                    if await self._git_toplevel(path) == path.resolve():
+                        break
+                    await _finished(self.workspace.exec(["git", "worktree", "prune"]))
+                    try:
+                        await self._branch_at_head(branch)
+                        await _finished(
+                            self.workspace.derive_worktree(ref=branch, dir=str(path))
+                        )
+                        break
+                    except (EnvError, RuntimeError) as error:
+                        detail = str(error)
+                await asyncio.sleep(0.2 * (retry + 1))
+            if await self._git_toplevel(path) != path.resolve():
+                raise RuntimeError(f"could not create isolated node worktree: {detail}")
+        worktree = await self._attached(scratch, root, path, branch)
         node.worktree = str(path)
         node.proof_branch = branch
-        node.proof_base_commit = self._git_head(path)
-        self._prepare_lake_workspace(path)
-        return path
+        if not node.proof_base_commit:
+            node.proof_base_commit = await self._git_head(worktree)
+        return worktree
 
-    def _node_worktree_path(self, node: NodeRecord) -> Path:
+    async def _branch_at_head(self, branch: str) -> None:
+        exists, _, _ = await self.workspace.exec(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]
+        )
+        if exists == 0:
+            return
+        made, out, err = await _finished(
+            self.workspace.exec(["git", "branch", branch, "HEAD"])
+        )
+        if made:
+            raise RuntimeError(
+                f"could not create node branch {branch}: {(err or out).strip()}"
+            )
+
+    async def _attached(self, scratch: Any, root: Path, path: Path, branch: str) -> Any:
+        """The node worktree at `path`, on its branch and ready for Lake.
+
+        A run stopped between two steps may have left a cherry-pick under way in it, or left
+        it detached where it was just made; either is put right first.
+        """
+        worktree = await scratch.derive_subdir(subdir=str(path.relative_to(root)))
+        picking, _, _ = await worktree.exec(
+            ["git", "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"]
+        )
+        if picking == 0:
+            await _finished(worktree.exec(["git", "cherry-pick", "--abort"]))
+        named, current, _ = await worktree.exec(
+            ["git", "symbolic-ref", "-q", "--short", "HEAD"]
+        )
+        if named or current.strip() != branch:
+            known, tip, _ = await worktree.exec(
+                ["git", "rev-parse", "-q", "--verify", f"refs/heads/{branch}"]
+            )
+            if known == 0 and tip.strip() == await self._git_head(worktree):
+                checked, out, err = await _finished(
+                    worktree.exec(["git", "checkout", "--quiet", branch])
+                )
+                if checked:
+                    raise RuntimeError(
+                        f"could not check out node branch {branch}: "
+                        f"{(err or out).strip()}"
+                    )
+        await self._prepare_lake_workspace(worktree)
+        return worktree
+
+    def _node_worktree_path(self, node: NodeRecord, root: Path) -> Path:
         descriptive = (
-            self.project.parent
-            / ".recursive-lean-node-worktrees"
+            root
             / self.run_root.name
             / slug(node.id)
             / f"attempt-{max(node.attempts, 1)}"
             / self.project.name
         )
-        if len(str(descriptive)) <= 180:
+        if len(str(descriptive)) <= SHORT_PATH:
             return descriptive
         identity = "\0".join(
             (
@@ -1553,53 +1623,33 @@ class Runtime:
                 str(max(node.attempts, 1)),
             )
         )
-        digest = hashlib.sha256(identity.encode()).hexdigest()[:20]
-        return (
-            Path(tempfile.gettempdir())
-            / "humanize-lean-worktrees"
-            / digest
-            / self.project.name
-        )
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
+        return root / digest / self.project.name
 
-    def _prepare_lake_workspace(self, path: Path) -> None:
+    async def _prepare_lake_workspace(self, env: Any) -> None:
+        path = Path(str(env.workdir))
         packages = self.project / ".lake" / "packages"
         linked = path / ".lake" / "packages"
-        packages_ignored = subprocess.run(
-            ["git", "check-ignore", "--quiet", ".lake/packages"],
-            cwd=path,
-            capture_output=True,
-            text=True,
-            check=False,
+        packages_ignored, _, _ = await env.exec(
+            ["git", "check-ignore", "--quiet", ".lake/packages"]
         )
-        if (
-            packages.is_dir()
-            and not linked.exists()
-            and packages_ignored.returncode == 0
-        ):
+        if packages.is_dir() and not linked.exists() and packages_ignored == 0:
             linked.parent.mkdir(parents=True, exist_ok=True)
             linked.symlink_to(packages, target_is_directory=True)
 
         manifest = path / "lake-manifest.json"
-        manifest_ignored = subprocess.run(
-            ["git", "check-ignore", "--quiet", "lake-manifest.json"],
-            cwd=path,
-            capture_output=True,
-            text=True,
-            check=False,
+        manifest_ignored, _, _ = await env.exec(
+            ["git", "check-ignore", "--quiet", "lake-manifest.json"]
         )
-        if manifest.exists() or manifest_ignored.returncode != 0:
+        if manifest.exists() or manifest_ignored != 0:
             return
 
         sources = [self.project / "lake-manifest.json"]
-        common = subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            cwd=self.project,
-            capture_output=True,
-            text=True,
-            check=False,
+        common, found, _ = await self.workspace.exec(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]
         )
-        if common.returncode == 0 and common.stdout.strip():
-            sources.append(Path(common.stdout.strip()).parent / "lake-manifest.json")
+        if common == 0 and found.strip():
+            sources.append(Path(found.strip()).parent / "lake-manifest.json")
         for source in sources:
             if source.is_file() and source.resolve() != manifest.resolve():
                 shutil.copy2(source, manifest)
@@ -1614,9 +1664,8 @@ class Runtime:
             f"{slug(node.id)}-a{max(node.attempts, 1)}"
         )
 
-    def _integrate_reviewed_candidate(
+    async def _integrate_reviewed_candidate(
         self,
-        worktree: Path,
         before: str,
         after: str,
         *,
@@ -1625,8 +1674,7 @@ class Runtime:
     ) -> tuple[bool, str]:
         retry = 0
         while True:
-            integrated, feedback = self._integrate_candidate(
-                worktree,
+            integrated, feedback = await self._integrate_candidate(
                 before,
                 after,
                 node=node,
@@ -1644,11 +1692,10 @@ class Runtime:
                 ),
                 candidate_commit=after,
             )
-            time.sleep(min(60.0, float(retry)))
+            await asyncio.sleep(min(60.0, float(retry)))
 
-    def _integrate_candidate(
+    async def _integrate_candidate(
         self,
-        worktree: Path,
         before: str,
         after: str,
         *,
@@ -1656,32 +1703,27 @@ class Runtime:
         lean_files: list[str] | None = None,
     ) -> tuple[bool, str]:
         if not after:
-            return False, f"isolated worktree has no Git HEAD: {worktree}"
+            return False, "the reviewed candidate has no Git commit"
         if before == after:
             return True, "the reviewed theorem was already present at the worktree base"
-        listed = subprocess.run(
-            ["git", "rev-list", "--reverse", f"{before}..{after}"],
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            check=False,
+        listed, history, _ = await self.workspace.exec(
+            ["git", "rev-list", "--reverse", f"{before}..{after}"]
         )
-        commits = [one for one in listed.stdout.splitlines() if one]
-        if listed.returncode or not commits:
+        commits = [one for one in history.splitlines() if one]
+        if listed or not commits:
             return False, f"could not enumerate reviewed commits {before}..{after}"
-        with self._integration_lock:
-            if not self._git_clean(self.project):
+        async with self._integration_lock:
+            if not await self._git_clean(self.workspace):
                 return False, "problem integration worktree is not clean"
-            canonical = self._git_head(self.project)
+            canonical = await self._git_head()
             commits = [
                 commit
                 for commit in commits
-                if subprocess.run(
-                    ["git", "merge-base", "--is-ancestor", commit, canonical],
-                    cwd=self.project,
-                    capture_output=True,
-                    check=False,
-                ).returncode
+                if (
+                    await self.workspace.exec(
+                        ["git", "merge-base", "--is-ancestor", commit, canonical]
+                    )
+                )[0]
                 != 0
             ]
             if not commits:
@@ -1690,54 +1732,40 @@ class Runtime:
                     "all reviewed commits were already present in the problem branch",
                 )
             if canonical == before:
-                merged = subprocess.run(
-                    ["git", "merge", "--ff-only", after],
-                    cwd=self.project,
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                merged, out, err = await _finished(
+                    self.workspace.exec(["git", "merge", "--ff-only", after])
                 )
-                if merged.returncode:
-                    detail = (merged.stderr or merged.stdout).strip()
+                if merged:
+                    detail = (err or out).strip()
                     return (
                         False,
                         f"could not fast-forward reviewed node history: {detail}",
                     )
                 return True, f"fast-forwarded {len(commits)} reviewed commit(s)"
 
-            scratch_parent = (
-                self.project.parent / ".recursive-lean-integration-worktrees"
+            scratch = await self._worktree_root()
+            temporary = (
+                Path(str(scratch.workdir))
+                / "integration"
+                / f"{slug(node.id) if node else 'node'}-{uuid.uuid4().hex[:8]}"
             )
-            scratch_parent.mkdir(parents=True, exist_ok=True)
-            temporary = Path(
-                tempfile.mkdtemp(
-                    prefix=f"{slug(node.id) if node else 'node'}-",
-                    dir=scratch_parent,
-                )
-            )
-            integration = temporary / self.project.name
-            added = subprocess.run(
-                ["git", "worktree", "add", "--detach", str(integration), canonical],
-                cwd=self.project,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if added.returncode:
-                detail = (added.stderr or added.stdout).strip()
-                try:
-                    temporary.rmdir()
-                except OSError:
-                    pass
-                return False, f"could not create integration recheck worktree: {detail}"
+            path = temporary / self.project.name
             try:
-                self._prepare_lake_workspace(integration)
-                applied, unioned, detail = self._apply_candidate_commits(
+                integration = await _finished(
+                    self.workspace.derive_worktree(ref=canonical, dir=str(path))
+                )
+            except EnvError as error:
+                with contextlib.suppress(OSError):
+                    temporary.rmdir()
+                return False, f"could not create integration recheck worktree: {error}"
+            try:
+                await self._prepare_lake_workspace(integration)
+                applied, unioned, detail = await self._apply_candidate_commits(
                     integration, commits
                 )
                 agent_repaired = False
                 if not applied:
-                    repaired, detail = self._repair_integration(
+                    repaired, detail = await self._repair_integration(
                         integration,
                         canonical=canonical,
                         commits=commits,
@@ -1749,38 +1777,35 @@ class Runtime:
                         return False, detail
                     agent_repaired = True
                 if node is not None and not agent_repaired:
-                    passed, log_path, log = self._compare(
+                    passed, log_path, log = await self._compare(
                         node,
                         lean_files or [],
                         integration,
                         label="integration",
                     )
                     if not passed:
-                        repaired, detail = self._repair_integration(
+                        repaired, detail = await self._repair_integration(
                             integration,
                             canonical=canonical,
                             commits=commits,
                             node=node,
                             lean_files=lean_files or [],
                             failure=(
-                                "combined parallel history failed its integration comparator; "
-                                f"see {log_path.relative_to(self.project)}\n\n"
+                                "combined parallel history failed its integration "
+                                "comparator; see "
+                                f"{log_path.relative_to(self.project)}\n\n"
                                 f"{log[-12000:]}"
                             ),
                         )
                         if not repaired:
                             return False, detail
                         agent_repaired = True
-                integration_head = self._git_head(integration)
-                merged = subprocess.run(
-                    ["git", "merge", "--ff-only", integration_head],
-                    cwd=self.project,
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                integration_head = await self._git_head(integration)
+                merged, out, err = await _finished(
+                    self.workspace.exec(["git", "merge", "--ff-only", integration_head])
                 )
-                if merged.returncode:
-                    detail = (merged.stderr or merged.stdout).strip()
+                if merged:
+                    detail = (err or out).strip()
                     return (
                         False,
                         f"could not fast-forward reconciled node history: {detail}",
@@ -1797,21 +1822,17 @@ class Runtime:
                     f"{method} and integrated {len(commits)} reviewed commit(s)",
                 )
             finally:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(integration)],
-                    cwd=self.project,
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                await _finished(
+                    self.workspace.exec(
+                        ["git", "worktree", "remove", "--force", str(path)]
+                    )
                 )
-                try:
+                with contextlib.suppress(OSError):
                     temporary.rmdir()
-                except OSError:
-                    pass
 
-    def _repair_integration(
+    async def _repair_integration(
         self,
-        integration: Path,
+        integration: Any,
         *,
         canonical: str,
         commits: list[str],
@@ -1819,7 +1840,7 @@ class Runtime:
         lean_files: list[str],
         failure: str,
     ) -> tuple[bool, str]:
-        if node is None or self.agents is None:
+        if node is None or self.worker is None:
             return False, failure
         feedback = failure
         round_number = 0
@@ -1836,33 +1857,25 @@ class Runtime:
             prompt = INTEGRATION_REPAIR.format(
                 node_id=node.id,
                 statement=node.statement,
-                lean_statement=node.lean_statement
-                or "Root declarations are fixed by Challenge.lean and the official comparator.",
+                lean_statement=node.lean_statement or ROOT_TYPE,
                 candidate_commits="\n".join(f"- `{one}`" for one in commits),
                 failure=feedback[-16000:],
                 comparator_command=self._review_command(node, lean_files),
                 comparator_success=self.config.comparator_success,
             )
-            try:
-                _WorkspaceAgent(self.agents.worker.clone(), integration)(
-                    prompt,
-                    suppress=True,
-                )
-            except Exception as error:  # noqa: BLE001
-                feedback = f"integration repair worker failed: {error}"
-                continue
-            if not self._git_clean(integration):
+            await self._ask(self.worker, prompt, None, integration)
+            if not await self._git_clean(integration):
                 feedback = (
                     "integration repair left uncommitted changes; preserve them, finish the "
                     "repair, and commit a clean candidate"
                 )
                 continue
-            integration_head = self._git_head(integration)
+            integration_head = await self._git_head(integration)
             combined_files = sorted(
                 set(lean_files)
-                | set(self._lean_files(canonical, integration_head, integration))
+                | set(await self._lean_files(canonical, integration_head, integration))
             )
-            passed, log_path, log = self._compare(
+            passed, log_path, log = await self._compare(
                 node,
                 combined_files,
                 integration,
@@ -1874,22 +1887,19 @@ class Runtime:
                     f"{log_path.relative_to(self.project)}\n\n{log[-12000:]}"
                 )
                 continue
-            audit = _WorkspaceAgent(self.agents.reviewer.clone(), integration)(
+            audit = await self._ask(
+                self.reviewer,
                 INTEGRATION_AUDIT.format(
                     node_id=node.id,
                     statement=node.statement,
-                    lean_statement=node.lean_statement
-                    or (
-                        "Root declarations are fixed by Challenge.lean and the official "
-                        "comparator."
-                    ),
+                    lean_statement=node.lean_statement or ROOT_TYPE,
                     lean_files="\n".join(f"- {one}" for one in combined_files),
                     comparator_command=self._review_command(node, combined_files),
                     comparator_success=self.config.comparator_success,
                     comparator_log=log[-12000:],
                 ),
-                suppress=True,
-                schema=LeanAudit,
+                LeanAudit,
+                integration,
             )
             if audit is not None:
                 audit_version = self._next_json_version(node, "integration-lean-audit")
@@ -1901,10 +1911,10 @@ class Runtime:
             if audit is None or not audit.passed:
                 feedback = self._lean_feedback(audit)
                 continue
-            if not self._git_clean(integration):
+            if not await self._git_clean(integration):
                 feedback = "integration reviewer modified the reviewed worktree"
                 continue
-            if self._git_head(integration) != integration_head:
+            if await self._git_head(integration) != integration_head:
                 feedback = "integration reviewer changed the reviewed Git history"
                 continue
             return (
@@ -1915,46 +1925,25 @@ class Runtime:
                 ),
             )
 
-    def _apply_candidate_commits(
-        self, integration: Path, commits: list[str]
+    async def _apply_candidate_commits(
+        self, integration: Any, commits: list[str]
     ) -> tuple[bool, bool, str]:
         unioned = False
         for commit in commits:
-            picked = subprocess.run(
-                [*INTEGRATION_GIT, "cherry-pick", commit],
-                cwd=integration,
-                capture_output=True,
-                text=True,
-                check=False,
+            picked, _, _ = await _finished(
+                integration.exec([*INTEGRATION_GIT, "cherry-pick", commit])
             )
-            if picked.returncode == 0:
+            if picked == 0:
                 continue
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=integration,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if status.returncode == 0 and not status.stdout.strip():
-                skipped = subprocess.run(
-                    ["git", "cherry-pick", "--skip"],
-                    cwd=integration,
-                    capture_output=True,
-                    text=True,
-                    check=False,
+            if await self._git_clean(integration):
+                skipped, _, _ = await _finished(
+                    integration.exec(["git", "cherry-pick", "--skip"])
                 )
-                if skipped.returncode == 0:
+                if skipped == 0:
                     continue
-            resolved, detail = self._union_lean_conflicts(integration)
+            resolved, detail = await self._union_lean_conflicts(integration)
             if not resolved:
-                subprocess.run(
-                    ["git", "cherry-pick", "--abort"],
-                    cwd=integration,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                await _finished(integration.exec(["git", "cherry-pick", "--abort"]))
                 return (
                     False,
                     unioned,
@@ -1963,45 +1952,26 @@ class Runtime:
                     ),
                 )
             unioned = True
-            continued = subprocess.run(
-                [
-                    *INTEGRATION_GIT,
-                    "-c",
-                    "core.editor=true",
-                    "cherry-pick",
-                    "--continue",
-                ],
-                cwd=integration,
-                capture_output=True,
-                text=True,
-                check=False,
+            continued, out, err = await _finished(
+                integration.exec(
+                    [
+                        *INTEGRATION_GIT,
+                        "-c",
+                        "core.editor=true",
+                        "cherry-pick",
+                        "--continue",
+                    ]
+                )
             )
-            if continued.returncode:
-                detail = (continued.stderr or continued.stdout).strip()
-                status = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=integration,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if status.returncode == 0 and not status.stdout.strip():
-                    skipped = subprocess.run(
-                        ["git", "cherry-pick", "--skip"],
-                        cwd=integration,
-                        capture_output=True,
-                        text=True,
-                        check=False,
+            if continued:
+                detail = (err or out).strip()
+                if await self._git_clean(integration):
+                    skipped, _, _ = await _finished(
+                        integration.exec(["git", "cherry-pick", "--skip"])
                     )
-                    if skipped.returncode == 0:
+                    if skipped == 0:
                         continue
-                subprocess.run(
-                    ["git", "cherry-pick", "--abort"],
-                    cwd=integration,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                await _finished(integration.exec(["git", "cherry-pick", "--abort"]))
                 return (
                     False,
                     unioned,
@@ -2010,91 +1980,47 @@ class Runtime:
         return True, unioned, "candidate commits applied"
 
     @staticmethod
-    def _union_lean_conflicts(integration: Path) -> tuple[bool, str]:
-        unmerged = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
-            cwd=integration,
-            capture_output=True,
-            check=False,
+    async def _union_lean_conflicts(integration: Any) -> tuple[bool, str]:
+        unmerged, listed, _ = await integration.exec(
+            ["git", "diff", "--name-only", "--diff-filter=U", "-z"]
         )
-        paths = [one.decode("utf-8") for one in unmerged.stdout.split(b"\0") if one]
-        if unmerged.returncode or not paths:
+        paths = [one for one in listed.split("\0") if one]
+        if unmerged or not paths:
             return False, "Git reported no resolvable unmerged paths"
         if any(not path.endswith(".lean") for path in paths):
             return False, f"non-Lean conflict requires a new proof attempt: {paths}"
+        root = Path(str(integration.workdir)).resolve()
         for relative in paths:
-            stages: list[bytes] = []
-            for stage in (2, 1, 3):
-                shown = subprocess.run(
-                    ["git", "show", f":{stage}:{relative}"],
-                    cwd=integration,
-                    capture_output=True,
-                    check=False,
-                )
-                if shown.returncode:
-                    return False, f"cannot read merge stage {stage} for {relative}"
-                stages.append(shown.stdout)
-            with tempfile.TemporaryDirectory(prefix="humanize-lean-union-") as held:
-                files = [Path(held) / name for name in ("ours", "base", "theirs")]
-                for path, content in zip(files, stages, strict=True):
-                    path.write_bytes(content)
-                merged = subprocess.run(
-                    [
-                        "git",
-                        "merge-file",
-                        "--union",
-                        "-p",
-                        str(files[0]),
-                        str(files[1]),
-                        str(files[2]),
-                    ],
-                    capture_output=True,
-                    check=False,
-                )
-            if merged.returncode < 0 or merged.returncode > 127:
-                return False, f"text union failed for {relative}"
-            target = (integration / relative).resolve()
-            if not target.is_relative_to(integration.resolve()):
+            if not (root / relative).resolve().is_relative_to(root):
                 return False, f"unsafe conflicted path: {relative}"
-            target.write_bytes(merged.stdout)
-            staged = subprocess.run(
-                ["git", "add", "--", relative],
-                cwd=integration,
-                capture_output=True,
-                text=True,
-                check=False,
+            # In the shell, so the sources' bytes go from Git to the file untouched.
+            code, _, _ = await _finished(
+                integration.exec(f"set -- {shlex.quote(relative)}\n{UNION}")
             )
-            if staged.returncode:
+            if code in {1, 2, 3}:
+                return False, f"cannot read merge stage {code} for {relative}"
+            if code == 7:
                 return False, f"could not stage reconciled Lean source {relative}"
+            if code:
+                return False, f"text union failed for {relative}"
         return True, f"unioned {len(paths)} Lean source conflict(s)"
 
-    @staticmethod
-    def _git_toplevel(cwd: Path) -> Path | None:
-        if not cwd.is_dir():
+    async def _git_toplevel(self, path: Path) -> Path | None:
+        if not path.is_dir():
             return None
-        completed = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
+        code, out, _ = await self.workspace.exec(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"]
         )
-        return (
-            Path(completed.stdout.strip()).resolve()
-            if not completed.returncode
-            else None
-        )
+        return Path(out.strip()).resolve() if not code else None
 
     @staticmethod
-    def _git_clean(cwd: Path) -> bool:
-        completed = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return completed.returncode == 0 and not completed.stdout.strip()
+    async def _git_clean(env: Any) -> bool:
+        code, out, _ = await env.exec(["git", "status", "--porcelain"])
+        return code == 0 and not out.strip()
+
+    async def _git_head(self, env: Any = None) -> str:
+        code, out, _ = await (env or self.workspace).exec(["git", "rev-parse", "HEAD"])
+        return out.strip() if code == 0 else ""
 
     def _render_command(self, node: NodeRecord, lean_files: list[str]) -> str:
         values = {
@@ -2112,18 +2038,11 @@ class Runtime:
                 f"unknown comparator command placeholder: {error.args[0]}"
             ) from error
 
-    def _require_git(self) -> None:
-        completed = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=self.project,
-            capture_output=True,
-            text=True,
-            check=False,
+    async def _require_git(self) -> None:
+        code, out, _ = await self.workspace.exec(
+            ["git", "rev-parse", "--show-toplevel"]
         )
-        if (
-            completed.returncode
-            or Path(completed.stdout.strip()).resolve() != self.project
-        ):
+        if code or Path(out.strip()).resolve() != self.project:
             raise ValueError("run this flow at the root of a clean Lean git repository")
 
     def _require_comparator(self) -> None:
@@ -2147,10 +2066,10 @@ class Runtime:
 
     def _run_root(self) -> Path:
         digest = self._task_digest()
-        previous = self.state.get("run_dir")
+        previous = self._recalled("run_dir")
         if (
-            self.state.get("version") == 1
-            and self.state.get("task_digest") == digest
+            self._recalled("version") == 1
+            and self._recalled("task_digest") == digest
             and isinstance(previous, str)
             and (self.project / previous).is_dir()
         ):
@@ -2221,7 +2140,7 @@ The fresh reviewer comparator rerun, theorem-wiki publication, and DAG `proved` 
 outer-controller tasks. They cannot run until this nested RLCR invocation returns, and they are
 not blockers for completion of this implementation-only plan.
 """
-        atomic_text(path, content)
+        atomic_text(path, content + _discipline())
         return path
 
     def _task_digest(self) -> str:
@@ -2231,16 +2150,6 @@ not blockers for completion of this implementation-only plan.
         if self.config.lean_target:
             return Path(self.config.lean_target).stem
         return "main_theorem"
-
-    def _git_head(self, cwd: Path | None = None) -> str:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=cwd or self.project,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return completed.stdout.strip() if completed.returncode == 0 else ""
 
     def _next_version(self, node: NodeRecord, prefix: str) -> int:
         existing = self._node_dir(node).glob(f"{prefix}-v*.md")

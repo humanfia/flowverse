@@ -83,8 +83,8 @@ pool. Refill the pool as soon as any completion unlocks another node; do not wai
 slow branch. Fresh decompositions launch every zero-indegree sibling in the first topological
 wave. Planning, natural-proof review, decomposition, Lean formalization, comparator runs, and Lean
 review may proceed concurrently. Give every formalizing node its own named Git branch and
-worktree, and invoke nested RLCR in a separate process whose real working directory is that
-worktree, so Humanize state, source edits, and comparator scratch files are isolated. Serialize
+worktree, and invoke nested RLCR with that worktree as the environment every one of its commands
+and sessions works in, so Humanize state, source edits, and comparator scratch files are isolated. Serialize
 integration of fully comparator- and reviewer-approved histories into the problem branch. When
 parallel histories touch the same Lean file, preserve both in an integration worktree and rerun
 the comparator before advancing the problem branch. If the combined history fails, use a Codex

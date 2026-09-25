@@ -5,11 +5,10 @@ A native Humanize flow for recursively solving large mathematical problems in Le
 requires the repository comparator before and during every Lean review, displays a live DAG,
 and publishes every accepted theorem to a Markdown wiki.
 
-This repository runs natively on the Humanize 2 `hmz` runtime and flow API. The component names
-`official/humanize1:gen-plan` and `official/humanize1:rlcr` are the names under which Humanize 2's
-official flowverse currently exposes the ported Humanize 1 algorithms; they do not mean that this
-flow runs on the old Humanize 1 runtime. There are currently no `official/humanize2:gen-plan` or
-`official/humanize2:rlcr` aliases.
+This flow runs natively on the Humanize 2 `hmz` runtime and flow API. It calls `humanize1:gen-plan`
+and `humanize1:rlcr` as flows of its own flowverse -- the names under which the official flowverse
+exposes the ported Humanize 1 algorithms -- in the same process, handing them its own agents and
+environments; this does not mean that it runs on the old Humanize 1 runtime.
 
 Exactly one scaffold plan is generated in `humanize1:gen-plan` direct mode, with no subsequent
 plan-review or plan-revision stage, and retained unchanged. Mathematical defects are
@@ -33,16 +32,20 @@ unblocked branch does not wait for an unrelated slow worker. Fresh decomposition
 launch every zero-indegree sibling in the first topological wave. Planning, natural-proof,
 review, decomposition, Lean RLCR, comparator runs, and Lean review all run concurrently up to
 `max_parallel_children`. Every formalizing node receives its own named Git branch and worktree,
-and its official RLCR invocation runs in a separate process whose real working directory is that
-worktree. Source edits, Humanize state, and comparator scratch files therefore cannot collide.
+and its official RLCR invocation runs through the hidden `worktree-rlcr` subflow with that worktree
+as its workspace environment: every command, agent session and comparator run of it works there.
+Source edits, Humanize state, and comparator scratch files therefore cannot collide.
 Only integration of fully reviewed histories is serialized. If parallel histories edited the
 same Lean file, the controller preserves both changes in an integration worktree and requires
 another comparator pass before advancing the problem branch. If that combined check fails, an
 integration-only Codex repair loop preserves the accepted candidate, reconciles the histories,
 and must pass both a machine comparator and a fresh reviewer comparator. It never returns the node
-to planning, natural-language proof, decomposition, or theorem proving. Deep repository paths are
-mapped to a stable short checkout path under `/tmp/humanize-lean-worktrees`; the named Git branch
-retains the durable proof history even if that disposable checkout is later removed.
+to planning, natural-language proof, decomposition, or theorem proving. Node and integration
+worktrees are checked out under a scratch directory the runtime keeps for the repository
+(`recursive-lean-worktrees`), one `<run>/<node>/attempt-<n>/<repository name>` apiece; a path
+longer than 180 characters becomes `<hash>/<repository name>` under it instead. A resumable run
+keeps that directory, so a resumed run finds each node's worktree as it left it. The named Git branch retains the durable
+proof history even if that disposable checkout is later removed.
 Each isolated checkout also receives its own ignored copy of the repository's pinned
 `lake-manifest.json` and a link to the immutable `.lake/packages` checkout. This keeps Lean builds
 offline-reproducible and prevents Lake from trying to update shared read-only Git metadata.
@@ -85,14 +88,17 @@ offline-reproducible and prevents Lake from trying to update shared read-only Gi
 
 ## Requirements
 
-- Humanize with the `hmz` command and the official `humanize1` flowverse installed.
+- Humanize with the new flow API (`hmz exec -a/-e/-p/-b`).
+- The flow lives in a flowverse beside `humanize1`, whose `gen-plan` and `rlcr` it calls by those
+  names -- as the official flowverse holds both.
 - Lean projects should pin `leanprover/lean4:v4.33.0` in `lean-toolchain` when reproducing the
   current Lean-Eval experiment.
-- Run at the root of a clean Lean git repository.
+- Run at the root of a clean Lean git repository that ignores `.humanize/`.
 - Provide a comparator wrapper such as `tools/check-with-comparator.sh`.
 - The comparator must exit zero and print the configured success marker.
-- Use Codex for both declared roles. The two roles are separate agents and therefore keep
-  worker and reviewer context independent.
+- Use Codex for both roles, `worker` and `reviewer`. They are separate agents, and every turn
+  opens a fresh session, so worker and reviewer context stay independent. Each turn is a call
+  of the hidden `turn` subflow, so its session, and the CLI serving it, closes as it ends.
 
 The comparator is called once by the flow before review, then the reviewer is required to run
 it again. It receives `HUMANIZE_NODE_ID`, `HUMANIZE_NODE_STATEMENT`,
@@ -101,27 +107,17 @@ different comparator target for each generated lemma should use these values in 
 
 ## Install
 
-Install the flow directly into the user-flow directory:
-
-```sh
-git clone git@github.com:humanfia/math-lean-flow.git \
-  ~/.humanize/flows/recursive_lean_prover
-hmz check user/recursive_lean_prover
-```
-
-For an existing clone, update the installed flow with:
-
-```sh
-git -C ~/.humanize/flows/recursive_lean_prover pull --ff-only
-hmz check user/recursive_lean_prover
-```
+The flow ships in the official flowverse, [humanfia/flowverse](https://github.com/humanfia/flowverse),
+next to `humanize1`, so it is `official/recursive_lean_prover` wherever Humanize is installed. To
+run a checkout of your own, keep `recursive_lean_prover` and `humanize1` side by side in one
+directory of flows and name the flow by its path.
 
 ## Run
 
 First create a task file such as `PROBLEM.md`. It should state the exact theorem(s), the Lean file
 that may be edited, any files that must not be inspected or changed, and any project-specific
-acceptance rules. Both roles may read the internet, which is what a place that declares nothing
-else runs at, but a task may impose a narrower source policy.
+acceptance rules. Both roles may read the internet in this flow's own turns, but a task may impose
+a narrower source policy.
 
 Provide a project-specific comparator wrapper. It must return a nonzero status on rejection and
 print the configured marker only after every required check succeeds. Adapt this outline to the
@@ -139,45 +135,67 @@ The wrapper can use `HUMANIZE_NODE_ID`, `HUMANIZE_NODE_STATEMENT`,
 `HUMANIZE_LEAN_FILES`, `HUMANIZE_RUN_DIR`, and `HUMANIZE_WIKI_DIR`. Never print the success marker
 before the real evaluator succeeds.
 
-Copy and edit the example config, especially `lean_target` and `comparator_command`:
+Then run both roles on Codex, with the params the problem needs and a budget, which `hmz exec`
+requires:
 
 ```sh
-cp ~/.humanize/flows/recursive_lean_prover/config.example.yaml ./recursive-proof.yaml
-```
-
-The settings most often changed are:
-
-- `max_depth`: deepest recursive decomposition level; the root is depth 0.
-- `max_children` and `max_nodes`: fan-out and total DAG bounds.
-- `max_parallel_children`: number of dependency-ready nodes allowed to work concurrently.
-- `natural_proof_attempts`: revisions per saved batch, not a total proof-attempt limit.
-- `rlcr_rounds`: rounds in one official Lean RLCR invocation.
-- `comparator_timeout: 21600`: six hours for each comparator execution.
-- `lean_target`: project-relative candidate `.lean` file.
-- `comparator_command`: argv-style command; it is not evaluated by a shell.
-
-Then run both worker and reviewer on Codex:
-
-```sh
-hmz exec -f user/recursive_lean_prover -c recursive-proof.yaml \
-  -a cli=codex,model=gpt-5.6-sol,effort=max \
-  -a cli=codex,model=gpt-5.6-sol,effort=max \
+hmz exec -f official/recursive_lean_prover \
+  -a worker=codex/gpt-5.6-sol:max \
+  -a reviewer=codex/gpt-5.6-sol:max \
+  -p lean_target=Submission.lean \
+  -p 'comparator_command=bash tools/check-with-comparator.sh' \
+  -b duration=72h \
   "$(cat PROBLEM.md)"
 ```
 
-The line says which CLI, model and effort each role runs; it does not say what either role is
-allowed to do. That is the flow's, written as an `AgentDefaults(permission="auto")` beside each
-place it declares, and settled onto whichever agent fills the place before its first turn --
-including the isolated node process, which is the same two places again. Both roles are `auto`
-because RLCR's plan-integrity guards operate on permission requests, so a worker nothing asks
-about is a worker they never see, and because a Lean comparator may need to write build
-artifacts. The reviewer prompt forbids edits and the reviewer remains a separate Codex agent
+The repository is the flow's `workspace`, which is always the directory the run starts in; it
+takes no `-e`. Every param has a default and is set with `-p <name>=<value>`:
+
+| Param | Default | Meaning |
+| --- | --- | --- |
+| `max_depth` | `2` | Deepest recursive decomposition level, 0 to 6; the root is depth 0. |
+| `max_children` | `4` | Most direct subproblems one theorem may activate, 2 to 12. |
+| `max_parallel_children` | `24` | Dependency-ready nodes of one frontier working at once. |
+| `max_nodes` | `24` | Hard bound on all nodes of the DAG; at least 3 when `max_depth` is not 0. |
+| `node_attempts` | `2` | Kept for compatibility; a frozen scaffold iterates only the NL proof. |
+| `plan_attempts` | `1` | Exactly one immutable scaffold plan per node. |
+| `natural_proof_attempts` | `3` | Revisions per saved batch, not a total proof-attempt limit. |
+| `decomposition_attempts` | `2` | Attempts at a valid acyclic decomposition. |
+| `rlcr_rounds` | `20` | Rounds in one official Lean RLCR invocation. |
+| `plan_turn_timeout` | `3600` | Seconds for one planning turn; 0 disables it. |
+| `plan_total_timeout` | `14400` | Seconds for one whole planning phase; 0 disables it. |
+| `comparator_timeout` | `21600` | Seconds for each comparator execution: six hours. |
+| `lean_target` | blank | Project-relative candidate `.lean` file; blank lets the worker infer it. |
+| `comparator_command` | `bash tools/check-with-comparator.sh` | The comparator, split like argv and run with no shell. |
+| `comparator_success` | `Your solution is okay!` | Text successful comparator output must contain. |
+| `artifact_dir` | `.humanize/recursive-lean-prover` | Plans, proofs, DAGs, logs and run state; under `.humanize/`. |
+| `wiki_dir` | `.humanize/math-wiki` | The theorem wiki; under `.humanize/`. |
+| `stop_on_child_failure` | `true` | Block a parent when a required subproblem fails. |
+
+`comparator_command` may use the placeholders `{node_id}`, `{node_dir}`, `{run_dir}`,
+`{wiki_dir}`, `{lean_target}` and `{lean_files}`.
+
+The `-a` line says which CLI, model and effort each role runs; it does not say what either role
+is allowed to do. That is the flow's: both roles declare a `Permission` of everything in the
+repository and the rest of the home directory, reading the rest of the machine, and the network.
+The flow's own turns rerun the comparator, whose Lean builds write through the linked
+`.lake/packages`, and commit integration repairs in linked worktrees, whose Git metadata is the
+primary checkout's. The worker is also declared able to have its permission requests hooked,
+because RLCR's plan-integrity guards operate on them: a worker nothing asks about is a worker they
+never see. Both roles carry this flow's `recursive-lean-proof` skill. The `humanize1` flows they
+are handed to run them under what those flows declare, and carry no skill of this flow's, so the
+skill's rules are appended to every plan draft `gen-plan` reads and every implementation plan
+`rlcr` builds. The reviewer prompt forbids edits and the reviewer remains a separate Codex agent
 with independent sessions.
 
+A turn that fails in a way another try may not -- throttled, dropped, killed, or answered in the
+wrong shape -- is answered with nothing, and the step it was part of goes round again. A refused
+credential, a model that is not served, and a spent budget stop the run.
+
 Use `Ctrl-C` to stop only this foreground supervisor. To resume, run the same `hmz exec` command
-with the same task text, config, and repository. The flow reuses the durable run, accepted proof
-nodes, Git branches, wiki pages, and the latest rejected natural-language draft. Do not use a broad
-`pkill` when other experiments share the machine.
+with `--resume`, in the same repository. The flow reuses the durable run, accepted proof nodes,
+node worktrees, Git branches, wiki pages, and the latest rejected natural-language draft. Do not use
+a broad `pkill` when other experiments share the machine.
 
 ## Observe
 
@@ -252,5 +270,7 @@ descendant integration future before final acceptance.
 The official RLCR loop commits Lean changes as it works and runs coding agents with Humanize's
 permission prompting disabled. Plans, DAG state, comparator logs, and the wiki stay below
 `.humanize/` so they do not enter RLCR's git-clean gate. A stopped run is resumable: running the
-same task again in the same repository reuses its durable run directory, already approved wiki
-pages, and nested RLCR state.
+same task again with `--resume` in the same repository reuses its durable run directory, node
+worktrees, already approved wiki pages, and nested RLCR state. Integrations of accepted
+candidates under way when a run stops are stopped too, never half way through changing the
+repository, and a resumed run integrates them.
