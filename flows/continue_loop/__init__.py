@@ -1,24 +1,61 @@
-"""Continue loop (flowbench: continue_loop) -- send the task once, then keep nudging "continue"."""
+"""Continue loop (flowbench: continue_loop) -- send the task once, then keep nudging "continue".
 
-import time
-from typing import Any
+    hmz exec -f continue_loop -a agent=claude/claude-opus-5:high -b cost=5 "the task"
 
-from hmz.flows import Agent, Allowance, flow
+One session for the whole run. A turn that answered moves the prompt on to "continue"; one
+that answered nothing, or failed, is sent again. The budget ends it: the turn that finds it
+spent raises the budget's `BudgetExceeded`, which is how the run ends, and `--resume` carries
+on counting rounds under a fresh one. Three failed turns in a row end it with the last
+failure.
+"""
+
+import asyncio
+
+from hmz.flows import (
+    Agent,
+    AgentCollection,
+    EnvCollection,
+    FlowContext,
+    FlowParams,
+    HarnessError,
+    LocalEnv,
+    flow,
+)
+
+FAILED = 3
+PAUSE = 5.0
 
 
-@flow(budget=Allowance(tokens=10.0), resumable=True)
-def run(
-    agents: tuple[Agent],
-    task: str,
-    state: dict[str, Any] | None = None,
+class Agents(AgentCollection):
+    agent: Agent
+
+
+class Envs(EnvCollection):
+    workspace: LocalEnv
+
+
+@flow(agents=Agents, envs=Envs, params=FlowParams, resumable=True)
+async def continue_loop(
+    task: str, *, agents: Agents, envs: Envs, params: FlowParams, ctx: FlowContext
 ) -> None:
-    (agent,) = agents
-    kept = state if state is not None else {}
-    session = agent.new()
+    """Send the task once, then keep nudging "continue" until the budget is spent."""
+    state = ctx.state
+    assert state is not None
+    agent = agents["agent"]
+    session = await agent.spawn(env=envs["workspace"])
     prompt = task
+    failed = 0
     while True:
-        kept["rounds"] = kept.get("rounds", 0) + 1
-        answered = session(prompt, suppress=True)
+        state["rounds"] = (state["rounds"] if "rounds" in state else 0) + 1
+        try:
+            answered = await agent.run(prompt, session=session)
+        except HarnessError:
+            failed += 1
+            if failed >= FAILED:
+                raise
+            answered = ""
+        else:
+            failed = 0
         if answered:
             prompt = "continue"
-        time.sleep(5)
+        await asyncio.sleep(PAUSE)
