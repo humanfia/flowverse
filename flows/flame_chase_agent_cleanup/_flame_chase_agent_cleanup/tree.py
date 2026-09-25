@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import os
-import shutil
-import signal
-import stat
-import subprocess
-import tempfile
-from pathlib import Path
-from typing import NamedTuple
+import asyncio
+import contextlib
+import shlex
+from collections.abc import AsyncIterator
+from pathlib import PurePosixPath
+from typing import Any, NamedTuple
+
+from hmz.flows import EnvCommandTimeout, EnvError, EnvFileNotFound
 
 NOTES = "NEXT.md"
 IGNORES = ".gitignore"
@@ -41,6 +41,124 @@ GIT_SECONDS = 3600
 CHECK_LOG_BYTES = 1024**2
 MIB = 1024**2
 
+_LIB = r"""set -o pipefail
+unset $(compgen -e GIT_)
+
+listed() (
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/cleanup-listing.XXXXXX") || exit 1
+  trap 'rm -rf "$scratch"' EXIT
+  git init --quiet --bare "$scratch/index.git" || exit 1
+  {
+    git --git-dir="$scratch/index.git" --work-tree=. ls-files --others --exclude-standard -z || exit 1
+    if [ -e .git ] || [ -L .git ]; then
+      GIT_CEILING_DIRECTORIES=${PWD%/*} git ls-files -z 2>/dev/null |
+        while IFS= read -r -d '' rel; do
+          if [ -e "$rel" ] || [ -L "$rel" ]; then printf '%s\0' "$rel"; fi
+        done
+    fi
+    :
+  } | while IFS= read -r -d '' rel; do printf '%s\0' "${rel%/}"; done | LC_ALL=C sort -z -u
+)
+
+remove() {
+  { [ -e "$1" ] || [ -L "$1" ]; } || return 0
+  rm -rf -- "$1" 2>/dev/null && return 0
+  case $1 in */*) chmod u+rwx -- "${1%/*}" 2>/dev/null ;; esac
+  if [ -d "$1" ] && [ ! -L "$1" ]; then chmod -R u+rwx -- "$1" 2>/dev/null; fi
+  rm -rf -- "$1"
+}
+
+snapshot() {
+  local at
+  at=$(mktemp "${TMPDIR:-/tmp}/cleanup-listing.XXXXXX") || return 1
+  if listed > "$at"; then printf %s "$at"; return 0; fi
+  rm -f "$at"
+  return 1
+}
+
+freeze() {
+  local listing
+  listing=$(snapshot) || return 1
+  while IFS= read -r -d '' rel; do
+    case /$rel in */.gitignore) ;; *) continue ;; esac
+    if [ -L "$1/$rel" ] || [ ! -f "$1/$rel" ]; then
+      remove "./$rel"
+      printf '%s\0' "$rel"
+    fi
+  done < "$listing"
+  rm -f "$listing"
+  (cd "$1" && find . -name .git -prune -o -name .gitignore -type f -print0) |
+    while IFS= read -r -d '' rel; do
+      rel=${rel#./}
+      if [ -f "./$rel" ] && [ ! -L "./$rel" ] && cmp -s "$1/$rel" "./$rel"; then continue; fi
+      remove "./$rel"
+      case $rel in */*) mkdir -p -- "./${rel%/*}" ;; esac
+      if cp -p -- "$1/$rel" "./$rel"; then printf '%s\0' "$rel"; fi
+    done
+}
+
+save() {
+  for aside in "$1/revert.partial" "$1/revert.dropping"; do
+    if [ -L "$aside" ]; then
+      echo "revert storage was replaced by a symlink: $aside" >&2
+      return 2
+    fi
+    remove "$aside" || return 1
+  done
+  if [ -L "$1/revert" ]; then
+    echo "revert point was replaced by a symlink: $1/revert" >&2
+    return 2
+  fi
+  if [ -d "$1/revert" ]; then echo inflight; return 0; fi
+  mkdir -- "$1/revert.partial" || return 1
+  local listing failed=
+  listing=$(snapshot) || return 1
+  while IFS= read -r -d '' rel; do
+    case $rel in */*) mkdir -p -- "$1/revert.partial/${rel%/*}" || { failed=1; break; } ;; esac
+    cp -PRp -- "./$rel" "$1/revert.partial/$rel" || { failed=1; break; }
+  done < "$listing"
+  rm -f "$listing"
+  [ -z "$failed" ] || return 1
+  if [ -e .git ] || [ -L .git ]; then cp -PRp -- .git "$1/revert.partial/.git" || return 1; fi
+  mv -- "$1/revert.partial" "$1/revert"
+}
+
+restore() {
+  (cd "$1" && find . -mindepth 1 -name .git -prune -o -print0) |
+    while IFS= read -r -d '' rel; do
+      if [ -L "$1/$rel" ] || [ ! -d "$1/$rel" ]; then
+        if [ -d "$rel" ] && [ ! -L "$rel" ]; then remove "$rel"; fi
+      elif [ -L "$rel" ] || { [ -e "$rel" ] && [ ! -d "$rel" ]; }; then
+        remove "$rel"
+      fi
+    done || return 1
+  freeze "$1" > /dev/null || return 1
+  local listing parents failed=
+  listing=$(snapshot) || return 1
+  if ! parents=$(mktemp "${TMPDIR:-/tmp}/cleanup-parents.XXXXXX"); then
+    rm -f "$listing"
+    return 1
+  fi
+  while IFS= read -r -d '' rel; do
+    remove "./$rel" || { failed=1; break; }
+    case $rel in */*) printf '%s\0' "${rel%/*}" >> "$parents" ;; esac
+  done < "$listing"
+  rm -f "$listing"
+  [ -n "$failed" ] || remove ./.git || failed=1
+  LC_ALL=C sort -z -r -u "$parents" | xargs -0 -r rmdir -p -- 2>/dev/null
+  rm -f "$parents"
+  [ -z "$failed" ] || return 1
+  cp -PRp -- "$1/." .
+}
+
+drop() {
+  { [ -e "$1" ] || [ -L "$1" ]; } || return 0
+  remove "$1.dropping" || return 1
+  mv -f -- "$1" "$1.dropping" || return 1
+  remove "$1.dropping" || return 3
+}
+"""
+
 
 class Measure(NamedTuple):
     strays: list[str]
@@ -53,95 +171,102 @@ class Footprint(NamedTuple):
     bytes: int
 
 
-def _git(
-    *args: str,
-    cwd: Path | None = None,
-    index: Path | None = None,
-    stdin: str | None = None,
-) -> subprocess.CompletedProcess[str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+def quoted(path: Any) -> str:
+    return shlex.quote(str(path))
+
+
+async def sh(env: Any, script: str, *, timeout: float = 0) -> tuple[int, str, str]:
+    try:
+        return await env.exec(_LIB + script, timeout=timeout)
+    except EnvCommandTimeout as error:
+        return -1, "", str(error)
+
+
+async def git(
+    env: Any, *args: str, index: str | None = None, cwd: Any = None
+) -> tuple[int, str, str]:
+    command = " ".join(quoted(arg) for arg in ("git", *args))
     if index is not None:
-        env["GIT_INDEX_FILE"] = str(index)
+        command = f"GIT_INDEX_FILE={quoted(index)} {command}"
+    if cwd is not None:
+        command = f"cd {quoted(cwd)} && {command}"
+    return await sh(env, command, timeout=GIT_SECONDS)
+
+
+async def kind(env: Any, path: Any) -> str:
+    _, out, _ = await sh(
+        env,
+        f"p={quoted(path)}\n"
+        'if [ -L "$p" ]; then echo l; elif [ -d "$p" ]; then echo d;'
+        ' elif [ -f "$p" ]; then echo f; elif [ -e "$p" ]; then echo o; else echo -; fi',
+    )
+    return out.strip() or "-"
+
+
+@contextlib.asynccontextmanager
+async def scratch(env: Any) -> AsyncIterator[PurePosixPath]:
+    done, out, err = await sh(env, 'mktemp -d "${TMPDIR:-/tmp}/cleanup.XXXXXX"')
+    if done:
+        raise RuntimeError(f"could not make a scratch directory: {err.strip()}")
+    where = PurePosixPath(out.strip())
     try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            env=env,
-            input=stdin,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=GIT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        return subprocess.CompletedProcess(["git", *args], -1, "", str(error))
+        yield where
+    finally:
+        await sh(env, f"rm -rf -- {quoted(where)}")
 
 
-def listed(root: Path) -> list[str]:
-    with tempfile.TemporaryDirectory(prefix="cleanup-listing-") as scratch:
-        index = Path(scratch) / "index.git"
-        made = _git("init", "--quiet", "--bare", str(index))
-        if made.returncode:
-            raise RuntimeError(f"git could not list the tree: {made.stderr.strip()}")
-        done = _git(
-            f"--git-dir={index}",
-            f"--work-tree={root}",
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        )
-    if done.returncode:
-        raise RuntimeError(f"git could not list the tree: {done.stderr.strip()}")
-    entries = {entry.rstrip("/") for entry in done.stdout.split("\0") if entry}
-    if os.path.lexists(root / ".git"):
-        tracked = _git("ls-files", "-z", cwd=root)
-        if not tracked.returncode:
-            entries.update(
-                rel
-                for rel in tracked.stdout.split("\0")
-                if rel and os.path.lexists(root / rel)
-            )
-    return sorted(entries)
+async def listed(env: Any, at: Any = None) -> dict[str, str]:
+    script = (
+        "listed | while IFS= read -r -d '' rel; do\n"
+        '  if [ -L "$rel" ]; then k=l; elif [ -d "$rel" ]; then k=d;'
+        ' elif [ -f "$rel" ]; then k=f; else k=o; fi\n'
+        '  printf \'%s%s\\0\' "$k" "$rel"\n'
+        "done"
+    )
+    if at is not None:
+        script = f"cd {quoted(at)} || exit 1\n{script}"
+    done, out, err = await sh(env, script)
+    if done:
+        raise RuntimeError(f"git could not list the tree: {err.strip()}")
+    found = {item[1:]: item[0] for item in out.split("\0") if item}
+    return {rel: found[rel] for rel in sorted(found)}
 
 
-def footprint(root: Path) -> Footprint:
-    files = size = 0
-    for rel in listed(root):
-        path = root / rel
-        if path.is_dir() and not path.is_symlink():
-            for directory, _dirs, names in os.walk(path):
-                files += len(names)
-                size += sum(_size(Path(directory) / name) for name in names)
-        else:
-            files += 1
-            size += _size(path)
-    git = root / ".git"
-    if git.is_dir() and not git.is_symlink():
-        for directory, _dirs, names in os.walk(git):
-            files += len(names)
-            size += sum(_size(Path(directory) / name) for name in names)
-    return Footprint(files, size)
-
-
-def _size(path: Path) -> int:
+async def footprint(env: Any) -> Footprint:
+    done, out, err = await sh(
+        env,
+        'listing=$(mktemp "${TMPDIR:-/tmp}/cleanup-footprint.XXXXXX") || exit 3\n'
+        "trap 'rm -f \"$listing\"' EXIT\n"
+        'listed > "$listing" || exit 3\n'
+        "{ while IFS= read -r -d '' rel; do printf './%s\\0' \"$rel\"; done"
+        ' < "$listing"\n'
+        "  if [ -e .git ] || [ -L .git ]; then printf './.git\\0'; fi; } |\n"
+        "  xargs -0 -r sh -c 'exec find -P \"$@\" ! -type d -exec ls -ldn {} +' sh"
+        " 2>/dev/null |\n"
+        "  awk '{ files++; bytes += $5 } END { printf \"%.0f %.0f\\n\", files, bytes }'",
+    )
     try:
-        return path.lstat().st_size
-    except OSError:
-        return 0
+        if done == 3:
+            raise ValueError(done)
+        files, size = out.split()
+        return Footprint(int(files), int(size))
+    except ValueError:
+        raise RuntimeError(f"could not measure the workspace: {err.strip()}") from None
 
 
-def manifest_path(store: Path) -> Path:
+def manifest_path(store: PurePosixPath) -> PurePosixPath:
     return store / "manifest.txt"
 
 
-def ensure_manifest(root: Path, store: Path) -> set[str]:
+async def ensure_manifest(env: Any, store: PurePosixPath) -> set[str]:
     path = manifest_path(store)
-    if path.is_symlink():
+    found = await kind(env, path)
+    if found == "l":
         raise RuntimeError(f"manifest was replaced by a symlink: {path}")
-    if not path.exists():
-        path.write_text("\n".join(listed(root)) + "\n", encoding="utf-8")
-    kept = path.read_text(encoding="utf-8").splitlines()
+    if found == "-":
+        entries = await listed(env)
+        await env.write(str(path), ("\n".join(entries) + "\n").encode())
+    kept = (await env.read(str(path))).decode().splitlines()
     return {line.strip() for line in kept if line.strip()}
 
 
@@ -241,17 +366,19 @@ def _c_comment_lines(text: str) -> int:
     return count
 
 
-def _comment_lines(path: Path) -> int:
-    suffix = path.suffix.lower()
-    if path.is_symlink() or not path.is_file():
-        return 0
-    if suffix != ".py" and suffix not in C_SUFFIXES:
-        return 0
+def _commented(relative: str) -> bool:
+    suffix = PurePosixPath(relative).suffix.lower()
+    return suffix == ".py" or suffix in C_SUFFIXES
+
+
+async def _comment_lines(env: Any, relative: str) -> int:
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        text = (await env.read(relative)).decode("utf-8", errors="replace")
+    except EnvError:
         return 0
-    return _py_comment_lines(text) if suffix == ".py" else _c_comment_lines(text)
+    if PurePosixPath(relative).suffix.lower() == ".py":
+        return _py_comment_lines(text)
+    return _c_comment_lines(text)
 
 
 def under_work_path(relative: str, work_paths: tuple[str, ...]) -> bool:
@@ -260,193 +387,95 @@ def under_work_path(relative: str, work_paths: tuple[str, ...]) -> bool:
     )
 
 
-def measure(root: Path, manifest: set[str], work_paths: tuple[str, ...]) -> Measure:
-    entries = listed(root)
-    notes = root / NOTES
+async def measure(env: Any, manifest: set[str], work_paths: tuple[str, ...]) -> Measure:
+    entries = await listed(env)
     strays = [
         rel
-        for rel in entries
+        for rel, found in entries.items()
         if rel not in manifest
-        and not (rel == NOTES and not notes.is_symlink())
-        and Path(rel).name != IGNORES
+        and not (rel == NOTES and found != "l")
+        and PurePosixPath(rel).name != IGNORES
         and not under_work_path(rel, work_paths)
     ]
-    comments = sum(
-        _comment_lines(root / rel)
-        for rel in entries
-        if under_work_path(rel, work_paths)
+    counted = await asyncio.gather(
+        *(
+            _comment_lines(env, rel)
+            for rel, found in entries.items()
+            if found == "f" and under_work_path(rel, work_paths) and _commented(rel)
+        )
     )
-    return Measure(strays, _notes_lines(root), comments)
+    return Measure(strays, await _notes_lines(env), sum(counted))
 
 
-def _notes_lines(root: Path) -> int:
-    path = root / NOTES
-    if path.is_symlink() or not path.is_file():
+async def _notes_lines(env: Any) -> int:
+    if await kind(env, NOTES) != "f":
         return 0
     try:
-        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
-    except OSError:
+        return len(
+            (await env.read(NOTES)).decode("utf-8", errors="replace").splitlines()
+        )
+    except EnvError:
         return 0
 
 
-def truncate_notes(root: Path, limit: int) -> None:
-    path = root / NOTES
-    if path.is_symlink() or not path.is_file():
+async def truncate_notes(env: Any, limit: int) -> None:
+    if await kind(env, NOTES) != "f":
         return
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = (await env.read(NOTES)).decode("utf-8", errors="replace").splitlines()
         if len(lines) > limit:
-            path.write_text("\n".join(lines[:limit]) + "\n", encoding="utf-8")
-    except OSError:
+            await env.write(NOTES, ("\n".join(lines[:limit]) + "\n").encode())
+    except EnvError:
         print(f"could not truncate {NOTES}")
 
 
-def delete_strays(root: Path, strays: list[str]) -> None:
-    for rel in strays:
-        path = root / rel
-        try:
-            if path.is_dir() and not path.is_symlink():
-                continue
-            path.unlink(missing_ok=True)
-        except OSError:
-            print(f"could not delete stray {rel}")
+async def delete_strays(env: Any, strays: list[str]) -> None:
+    if not strays:
+        return
+    async with scratch(env) as where:
+        await env.write(
+            str(where / "strays"), "".join(f"./{rel}\0" for rel in strays).encode()
+        )
+        _, out, _ = await sh(
+            env,
+            "while IFS= read -r -d '' rel; do\n"
+            '  if [ -d "$rel" ] && [ ! -L "$rel" ]; then continue; fi\n'
+            '  rm -f -- "$rel" 2>/dev/null || printf \'could not delete stray %s\\n\' "${rel#./}"\n'
+            f"done < {quoted(where / 'strays')}",
+        )
+    if out:
+        print(out, end="")
 
 
-def _writable(path: str | Path) -> None:
-    try:
-        mode = os.lstat(path).st_mode
-        if stat.S_ISDIR(mode):
-            os.chmod(path, mode | stat.S_IRWXU)
-    except OSError:
-        pass
-
-
-def _removed(path: Path) -> None:
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    elif os.path.lexists(path):
-        path.unlink()
-
-
-def _remove(path: Path) -> None:
-    try:
-        _removed(path)
-    except PermissionError:
-        _writable(path.parent)
-        if path.is_dir() and not path.is_symlink():
-            _writable(path)
-            for directory, dirs, _files in os.walk(path):
-                for name in dirs:
-                    _writable(Path(directory) / name)
-        _removed(path)
-
-
-def _copy(source: Path, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if source.is_dir() and not source.is_symlink():
-        shutil.copytree(source, target, symlinks=True)
-    else:
-        shutil.copy2(source, target, follow_symlinks=False)
-
-
-def save_tree(root: Path, store: Path) -> Path:
+async def save_tree(env: Any, store: PurePosixPath) -> PurePosixPath:
     saved = store / "revert"
-    for aside in (store / "revert.partial", store / "revert.dropping"):
-        if aside.is_symlink():
-            raise RuntimeError(f"revert storage was replaced by a symlink: {aside}")
-        _remove(aside)
-    if saved.is_symlink():
-        raise RuntimeError(f"revert point was replaced by a symlink: {saved}")
-    if saved.is_dir():
-        restore_tree(root, saved)
-        return saved
-    partial = store / "revert.partial"
-    partial.mkdir()
-    for rel in listed(root):
-        _copy(root / rel, partial / rel)
-    if os.path.lexists(root / ".git"):
-        _copy(root / ".git", partial / ".git")
-    partial.rename(saved)
+    done, out, err = await sh(env, f"save {quoted(store)}")
+    if done:
+        raise RuntimeError(err.strip() or f"could not save the tree aside in {saved}")
+    if out.strip() == "inflight":
+        await restore_tree(env, saved)
     return saved
 
 
-def _saved_ignores(saved: Path) -> dict[str, Path]:
-    found = {}
-    for directory, dirs, files in os.walk(saved):
-        dirs[:] = [name for name in dirs if name != ".git"]
-        source = Path(directory) / IGNORES
-        if IGNORES in files and not source.is_symlink():
-            found[source.relative_to(saved).as_posix()] = source
-    return found
+async def freeze_ignores(env: Any, saved: PurePosixPath) -> list[str]:
+    done, out, err = await sh(env, f"freeze {quoted(saved)}")
+    if done:
+        raise RuntimeError(f"could not hold the .gitignore files: {err.strip()}")
+    return sorted({rel for rel in out.split("\0") if rel})
 
 
-def freeze_ignores(root: Path, saved: Path) -> list[str]:
-    kept = _saved_ignores(saved)
-    touched = []
-    for rel in listed(root):
-        if Path(rel).name == IGNORES and rel not in kept:
-            _remove(root / rel)
-            touched.append(rel)
-    for rel, source in kept.items():
-        target = root / rel
-        same = target.is_file() and not target.is_symlink()
-        if same and target.read_bytes() == source.read_bytes():
-            continue
-        try:
-            _remove(target)
-            _copy(source, target)
-        except OSError:
-            continue
-        touched.append(rel)
-    return sorted(touched)
+async def restore_tree(env: Any, saved: PurePosixPath) -> None:
+    done, _, err = await sh(env, f"restore {quoted(saved)}")
+    if done:
+        raise RuntimeError(f"could not put the tree back from {saved}: {err.strip()}")
 
 
-def _clear_changed_types(root: Path, saved: Path) -> None:
-    for directory, dirs, files in os.walk(saved):
-        base = Path(directory)
-        here = root / base.relative_to(saved)
-        for name in dirs:
-            source, target = base / name, here / name
-            if source.is_symlink():
-                if target.is_dir() and not target.is_symlink():
-                    _remove(target)
-            elif os.path.lexists(target) and (
-                target.is_symlink() or not target.is_dir()
-            ):
-                _remove(target)
-        for name in files:
-            target = here / name
-            if target.is_dir() and not target.is_symlink():
-                _remove(target)
-
-
-def restore_tree(root: Path, saved: Path) -> None:
-    _clear_changed_types(root, saved)
-    freeze_ignores(root, saved)
-    emptied: set[Path] = set()
-    for rel in listed(root):
-        _remove(root / rel)
-        emptied.update((root / rel).parents)
-    _remove(root / ".git")
-    for directory in sorted(emptied, key=lambda path: len(path.parts), reverse=True):
-        if directory.is_relative_to(root) and directory != root:
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-    shutil.copytree(saved, root, symlinks=True, dirs_exist_ok=True)
-
-
-def drop_saved(saved: Path) -> None:
-    if not os.path.lexists(saved):
-        return
-    dropping = saved.with_name(saved.name + ".dropping")
-    _remove(dropping)
-    os.replace(saved, dropping)
-    try:
-        _remove(dropping)
-    except OSError as error:
-        print(f"could not delete {dropping}: {error}")
+async def drop_saved(env: Any, saved: PurePosixPath) -> None:
+    done, _, err = await sh(env, f"drop {quoted(saved)}")
+    if done == 3:
+        print(f"could not delete {saved}.dropping: {err.strip()}")
+    elif done:
+        raise RuntimeError(f"could not drop the revert point {saved}: {err.strip()}")
 
 
 _HOOK = """#!/bin/sh
@@ -466,17 +495,43 @@ exit $status' sh
 NOTED = 20
 
 
-def left_out(root: Path, entries: list[str], limit: int) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for rel in entries:
-        path = root / rel
-        if path.is_symlink():
-            continue
-        if path.is_dir():
-            out[rel] = "a nested repository"
-        elif (size := _size(path)) > limit:
-            out[rel] = f"{size / MIB:,.1f} MB"
-    return out
+async def left_out(
+    env: Any, entries: dict[str, str], limit: int, at: Any = "."
+) -> dict[str, str]:
+    files = [rel for rel, what in entries.items() if what == "f"]
+    big: dict[str, int] = {}
+    if files:
+        async with scratch(env) as where:
+            listing = where / "files"
+            await env.write(
+                str(listing), "".join(f"./{rel}\0" for rel in files).encode()
+            )
+            done, out, err = await sh(
+                env,
+                f"cd {quoted(at)} || exit 1\n"
+                "xargs -0 -r sh -c"
+                f" 'exec find -P \"$@\" -prune -type f -size +{limit}c -print0' sh"
+                f" < {quoted(listing)} |\n"
+                "  while IFS= read -r -d '' rel; do\n"
+                '    size=$(wc -c < "$rel") || exit 1\n'
+                '    printf \'%s\\0%s\\0\' "${size//[[:space:]]/}" "${rel#./}"\n'
+                "  done",
+            )
+        if done:
+            raise RuntimeError(f"could not size the files under {at}: {err.strip()}")
+        fields = out.split("\0")
+        big = {
+            rel: int(size)
+            for size, rel in zip(fields[::2], fields[1::2], strict=False)
+            if size
+        }
+    found: dict[str, str] = {}
+    for rel, what in entries.items():
+        if what == "d":
+            found[rel] = "a nested repository"
+        elif rel in big:
+            found[rel] = f"{big[rel] / MIB:,.1f} MB"
+    return found
 
 
 def _noted(out: dict[str, str], limit: int) -> str:
@@ -498,88 +553,96 @@ def _pattern(rel: str) -> str:
     return "/" + escaped
 
 
-def _remove_git_entry(root: Path) -> bool:
-    try:
-        _remove(root / ".git")
-    except OSError:
-        return False
-    return not os.path.lexists(root / ".git")
-
-
-def history_repo(store: Path) -> Path:
+def history_repo(store: PurePosixPath) -> PurePosixPath:
     return store.parent / "history.git"
 
 
-def epoch_ref(store: Path, epoch: int) -> str:
+def epoch_ref(store: PurePosixPath, epoch: int) -> str:
     return f"refs/runs/{store.name}/epoch-{epoch:03d}"
 
 
-def _open_history(store: Path) -> Path:
+async def _open_history(env: Any, store: PurePosixPath) -> PurePosixPath:
     history = history_repo(store)
-    if history.is_symlink():
+    done, _, err = await sh(
+        env,
+        f"h={quoted(history)}\n"
+        'if [ -L "$h" ]; then exit 3; fi\n'
+        '[ -e "$h/HEAD" ] || git init --quiet --bare "$h"',
+    )
+    if done == 3:
         raise RuntimeError(f"history repository is a symlink: {history}")
-    if not (history / "HEAD").exists():
-        made = _git("init", "--quiet", "--bare", str(history))
-        if made.returncode:
-            raise RuntimeError(f"could not create {history}: {made.stderr.strip()}")
+    if done:
+        raise RuntimeError(f"could not create {history}: {err.strip()}")
     return history
 
 
-def _commit_tree(
-    history: Path, work_tree: Path, entries: list[str], message: str, parent: str = ""
+async def _commit_tree(
+    env: Any,
+    history: PurePosixPath,
+    work_tree: Any,
+    entries: list[str],
+    message: str,
+    parent: str = "",
 ) -> str:
     at = f"--git-dir={history}"
-    with tempfile.TemporaryDirectory(prefix="cleanup-index-") as scratch:
-        index = Path(scratch) / "index"
+    async with scratch(env) as where:
+        index = str(where / "index")
         if entries:
-            added = _git(
+            paths = where / "paths"
+            await env.write(str(paths), "\0".join(entries).encode())
+            added = await git(
+                env,
                 "--literal-pathspecs",
                 at,
-                f"--work-tree={work_tree}",
+                "--work-tree=.",
                 "add",
                 "--force",
-                "--pathspec-from-file=-",
+                f"--pathspec-from-file={paths}",
                 "--pathspec-file-nul",
                 index=index,
-                stdin="\0".join(entries),
+                cwd=work_tree,
             )
-            if added.returncode:
+            if added[0]:
                 return ""
-        tree = _git(at, "write-tree", index=index)
-    if tree.returncode:
+        tree = await git(env, at, "write-tree", index=index)
+    if tree[0]:
         return ""
     parents = ("-p", parent) if parent else ()
-    made = _git(
-        at, *_COMMITTING, "commit-tree", tree.stdout.strip(), *parents, "-m", message
+    made = await git(
+        env, at, *_COMMITTING, "commit-tree", tree[1].strip(), *parents, "-m", message
     )
-    return "" if made.returncode else made.stdout.strip()
+    return "" if made[0] else made[1].strip()
 
 
-def erase_history(
-    root: Path, store: Path, epoch: int, limit: int, title: str = ""
+async def erase_history(
+    env: Any, store: PurePosixPath, epoch: int, limit: int, title: str = ""
 ) -> bool:
-    history = _open_history(store)
-    entries = listed(root)
-    out = left_out(root, entries, limit)
-    if not _remove_git_entry(root):
+    history = await _open_history(env, store)
+    entries = await listed(env)
+    out = await left_out(env, entries, limit)
+    if (await sh(env, "remove ./.git && [ ! -e .git ] && [ ! -L .git ]"))[0]:
         print("the .git entry could not be removed; git was not run")
         return False
-    if _git("-c", "init.defaultBranch=main", "init", "-q", cwd=root).returncode:
+    if (await git(env, "-c", "init.defaultBranch=main", "init", "-q"))[0]:
         return False
-    git = root / ".git"
     try:
-        (git / "info").mkdir(exist_ok=True)
-        with (git / "info" / "exclude").open("a", encoding="utf-8") as exclude:
-            exclude.writelines(_pattern(rel) + "\n" for rel in out if "\n" not in rel)
-        (git / "hooks").mkdir(exist_ok=True)
-        hook = git / "hooks" / "pre-commit"
-        hook.write_text(_HOOK.format(limit=limit, mb=limit / MIB), encoding="utf-8")
-        hook.chmod(0o755)
-    except OSError:
+        try:
+            exclude = await env.read(".git/info/exclude")
+        except EnvFileNotFound:
+            exclude = b""
+        added = "".join(_pattern(rel) + "\n" for rel in out if "\n" not in rel)
+        await env.write(".git/info/exclude", exclude + added.encode())
+        await env.write(
+            ".git/hooks/pre-commit",
+            _HOOK.format(limit=limit, mb=limit / MIB).encode(),
+        )
+    except EnvError:
+        return False
+    if (await sh(env, "chmod 755 .git/hooks/pre-commit"))[0]:
         return False
     message = (title or f"epoch {epoch}: distilled tree") + _noted(out, limit)
-    commit = _commit_tree(
-        history, root, [rel for rel in entries if rel not in out], message
+    commit = await _commit_tree(
+        env, history, ".", [rel for rel in entries if rel not in out], message
     )
     if not commit:
         return False
@@ -598,11 +661,7 @@ def erase_history(
         ("reset", "-q"),
     )
     for step in steps:
-        try:
-            done = _git(*step, cwd=root)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        if done.returncode:
+        if (await git(env, *step))[0]:
             return False
     if out:
         print(
@@ -611,94 +670,104 @@ def erase_history(
     return True
 
 
-def archive_history(saved: Path, store: Path, epoch: int, limit: int) -> str | None:
-    history = _open_history(store)
+async def archive_history(
+    env: Any, saved: PurePosixPath, store: PurePosixPath, epoch: int, limit: int
+) -> str | None:
+    history = await _open_history(env, store)
     at = f"--git-dir={history}"
     ref = epoch_ref(store, epoch)
     parent = ""
-    if os.path.lexists(saved / ".git"):
-        refs = _git(at, "fetch", "-q", "--no-tags", str(saved), f"+refs/*:{ref}.refs/*")
-        head = _git(at, "fetch", "-q", "--no-tags", str(saved), f"+HEAD:{ref}.head")
-        if not head.returncode:
-            parent = _git(at, "rev-parse", f"{ref}.head").stdout.strip()
-        elif refs.returncode:
+    if await kind(env, saved / ".git") != "-":
+        refs = await git(
+            env, at, "fetch", "-q", "--no-tags", str(saved), f"+refs/*:{ref}.refs/*"
+        )
+        head = await git(
+            env, at, "fetch", "-q", "--no-tags", str(saved), f"+HEAD:{ref}.head"
+        )
+        if not head[0]:
+            parent = (await git(env, at, "rev-parse", f"{ref}.head"))[1].strip()
+        elif refs[0]:
             kept = history.parent / f"unreadable-{store.name}-epoch-{epoch:03d}.git"
-            _remove(kept)
-            _copy(saved / ".git", kept)
+            copied = await sh(
+                env,
+                f"remove {quoted(kept)} && cp -PRp -- {quoted(saved / '.git')} {quoted(kept)}",
+            )
+            if copied[0]:
+                print(
+                    f"epoch {epoch}: git could not read the replaced history, and it"
+                    f" could not be kept at {kept}: {copied[2].strip()}"
+                )
+                return None
             print(
                 f"epoch {epoch}: git could not read the replaced history; kept at {kept}"
             )
-    entries = listed(saved)
-    out = left_out(saved, entries, limit)
+    entries = await listed(env, saved)
+    out = await left_out(env, entries, limit, saved)
     message = f"epoch {epoch}: the tree before cleaning" + _noted(out, limit)
-    commit = _commit_tree(
-        history, saved, [rel for rel in entries if rel not in out], message, parent
+    commit = await _commit_tree(
+        env, history, saved, [rel for rel in entries if rel not in out], message, parent
     )
-    if not commit or _git(at, "update-ref", ref, commit).returncode:
+    if not commit or (await git(env, at, "update-ref", ref, commit))[0]:
         print(f"epoch {epoch}: the tree before cleaning could not be archived")
         return None
     return ref
 
 
-def link_history(store: Path, epoch: int) -> None:
-    history = history_repo(store)
-    at = f"--git-dir={history}"
+async def link_history(env: Any, store: PurePosixPath, epoch: int) -> None:
+    at = f"--git-dir={history_repo(store)}"
     ref = epoch_ref(store, epoch)
-    grafted = _git(at, "replace", "-f", "--graft", f"{ref}.distilled", ref)
-    if grafted.returncode:
+    grafted = await git(env, at, "replace", "-f", "--graft", f"{ref}.distilled", ref)
+    if grafted[0]:
         print(f"epoch {epoch}: the distilled commit could not be chained to {ref}")
-    _git(at, "repack", "-d", "-q")
-    _git(at, "gc", "--auto", "--quiet")
+    await git(env, at, "repack", "-d", "-q")
+    await git(env, at, "gc", "--auto", "--quiet")
 
 
-def run_check(root: Path, command: str, log: Path) -> bool:
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("wb") as out:
-        try:
-            proc = subprocess.Popen(
-                command,
-                shell=True,
-                cwd=root,
-                start_new_session=True,
-                stdout=out,
-                stderr=subprocess.STDOUT,
-            )
-        except OSError as error:
-            out.write(f"the check could not start: {error}\n".encode())
-            return False
-        try:
-            ok = proc.wait(timeout=CHECK_SECONDS) == 0
-        except subprocess.TimeoutExpired:
-            out.write(f"\nthe check ran past {CHECK_SECONDS} seconds\n".encode())
-            ok = False
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=60)
-        except (OSError, subprocess.SubprocessError):
-            pass
-    _cap(log)
+async def run_check(env: Any, command: str, log: PurePosixPath) -> bool:
+    status = PurePosixPath(f"{log}.status")
+    script = (
+        f"mkdir -p -- {quoted(log.parent)} || exit 125\n"
+        f"rm -f -- {quoted(status)}\n"
+        f"sh -c {quoted(command)} > {quoted(log)} 2>&1 < /dev/null\n"
+        f'printf %s "$?" > {quoted(status)}\n'
+        "kill -KILL -- -$$ 2>/dev/null"
+    )
+    said = ""
+    try:
+        await env.exec(script, timeout=CHECK_SECONDS)
+    except EnvCommandTimeout:
+        said = f"\nthe check ran past {CHECK_SECONDS} seconds\n"
+    except EnvError as error:
+        said = f"\nthe check could not start: {error}\n"
+    try:
+        ok = not said and (await env.read(str(status))).strip() == b"0"
+    except EnvError:
+        ok = False
+    if said:
+        await sh(
+            env,
+            f"mkdir -p -- {quoted(log.parent)} && printf %s {quoted(said)} >> {quoted(log)}",
+        )
+    await sh(env, f"rm -f -- {quoted(status)}")
+    await _cap(env, log)
     return ok
 
 
-def _cap(log: Path) -> None:
-    try:
-        size = log.stat().st_size
-        if size <= CHECK_LOG_BYTES:
-            return
-        with log.open("rb") as held:
-            held.seek(size - CHECK_LOG_BYTES)
-            end = held.read()
-        log.write_bytes(b"[earlier output cut]\n" + end)
-    except OSError:
-        pass
+async def _cap(env: Any, log: PurePosixPath) -> None:
+    await sh(
+        env,
+        f"f={quoted(log)}\n"
+        "size=$(wc -c < \"$f\" | tr -d ' ') || exit 0\n"
+        f'if [ "$size" -gt {CHECK_LOG_BYTES} ]; then\n'
+        f"  {{ printf '[earlier output cut]\\n'; tail -c {CHECK_LOG_BYTES} \"$f\"; }}"
+        ' > "$f.cut" && mv -f -- "$f.cut" "$f"\n'
+        "fi",
+    )
 
 
-def tail(log: Path, lines: int = 20) -> str:
+async def tail(env: Any, log: PurePosixPath, lines: int = 20) -> str:
     try:
-        text = log.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        text = (await env.read(str(log))).decode("utf-8", errors="replace")
+    except EnvError:
         return ""
     return "\n".join(text.splitlines()[-lines:])
