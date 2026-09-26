@@ -1,28 +1,57 @@
-"""Ralph loop (flowbench: ralph_loop) -- a fresh session every turn, so nothing carries over."""
+"""Ralph loop (flowbench: ralph_loop) -- a fresh session every turn, so nothing carries over.
 
-import time
-from typing import Any
+    hmz exec -f ralph_loop -a agent=claude/claude-opus-5:high -b cost=5 "the task"
 
-from hmz.flows import Agent, Allowance, flow
+A turn that fails counts as one answered with nothing. It stops after three rounds in a row
+answered with nothing, or when the budget is spent -- the turn that finds it spent raises the
+budget's `BudgetExceeded` -- and `--resume` carries on counting rounds.
+"""
+
+import asyncio
+
+from hmz.flows import (
+    Agent,
+    AgentCollection,
+    EnvCollection,
+    FlowContext,
+    FlowParams,
+    HarnessError,
+    LocalEnv,
+    flow,
+)
 
 STALLED = 3
+PAUSE = 5.0
 
 
-@flow(budget=Allowance(tokens=10.0), resumable=True)
-def run(
-    agents: tuple[Agent],
-    task: str,
-    state: dict[str, Any] | None = None,
+class Agents(AgentCollection):
+    agent: Agent
+
+
+class Envs(EnvCollection):
+    workspace: LocalEnv
+
+
+@flow(agents=Agents, envs=Envs, params=FlowParams, resumable=True)
+async def ralph_loop(
+    task: str, *, agents: Agents, envs: Envs, params: FlowParams, ctx: FlowContext
 ) -> None:
-    (agent,) = agents
-    kept = state if state is not None else {}
+    """The task again and again, a fresh session every round."""
+    state = ctx.state
+    assert state is not None
+    agent = agents["agent"]
     stalled = 0
     while True:
-        kept["rounds"] = kept.get("rounds", 0) + 1
-        print(f"round {kept['rounds']}")
-        answered = agent(task, suppress=True)
+        state["rounds"] = rounds = (state["rounds"] if "rounds" in state else 0) + 1
+        print(f"round {rounds}")
+        session = await agent.spawn(env=envs["workspace"])
+        try:
+            answered = await agent.run(task, session=session)
+        except HarnessError as error:
+            print(f"round {rounds} failed: {error}")
+            answered = ""
         stalled = 0 if answered else stalled + 1
         if stalled >= STALLED:
             print(f"stopping: {stalled} rounds in a row answered with nothing")
             return
-        time.sleep(5)
+        await asyncio.sleep(PAUSE)

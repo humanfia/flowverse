@@ -4,127 +4,109 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import pytest
-from hmz.coganchor.agents import HumanAgent, driver
-from hmz.flows import NEVER_DONE, carries, checked, configures, load, proved, wanted
+from hmz.flows import Budget
+from hmz.runtime.flowing.engine import load_flow, run_flow
+from hmz.runtime.flowing.harnesses import open_agent
+from hmz.runtime.flowing.specs import parse_agents
 
-ROOT = Path(__file__).parents[1]
-FLOW = ROOT / "flows" / "aot"
-sys.path[:0] = [str(FLOW), str(FLOW.parent)]
+from tests.kit import FLOWS
 
-import aot
-
-if TYPE_CHECKING:
-    from hmz.coganchor.agents import AgentBase
+FLOW = FLOWS / "aot"
 
 WRITER = os.environ.get("AOT_WRITER", "")
 CRITIC = os.environ.get("AOT_CRITIC", "") or WRITER
+BUDGET = float(os.environ.get("AOT_BUDGET", "20"))
 
-pytestmark = pytest.mark.skipif(
-    not WRITER,
-    reason="a compile is minutes of a real agent; AOT_WRITER=cli/model:effort runs these",
-)
-
-
-def agent_of(spec: str) -> AgentBase:
-    cli, _, rest = spec.partition("/")
-    model, _, effort = rest.rpartition(":")
-    agent, config = driver(cli)
-    return agent(config(model=model, effort=effort))
+pytestmark = [
+    pytest.mark.skipif(
+        not WRITER,
+        reason="a compile is minutes of a real agent; AOT_WRITER=cli/model:effort runs these",
+    ),
+    pytest.mark.asyncio,
+]
 
 
-def compiled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task: str) -> Path:
-    monkeypatch.chdir(tmp_path)
-    agents = aot.Compiling(
-        writer=agent_of(WRITER), critic=agent_of(CRITIC), human=HumanAgent()
+def agent_of(role: str, spec: str) -> Any:
+    return open_agent(parse_agents([f"{role}={spec}"])[0])
+
+
+def local(at: Path) -> Any:
+    from hmz.runtime.flowing.environments import local_env
+
+    try:
+        return local_env(at)
+    except NotImplementedError:
+        pytest.skip("this humanize has no local environment driver yet")
+
+
+async def compiled(tmp_path: Path, task: str) -> Path:
+    await run_flow(
+        load_flow(str(FLOW), caller_globals={}),
+        task,
+        agents={"writer": agent_of("writer", WRITER), "critic": agent_of("critic", CRITIC)},
+        envs={},
+        params={},
+        budget=Budget(cost=BUDGET),
+        local=local(tmp_path),
     )
-    carries(str(FLOW), list(agents))
-    aot.run(agents, task)
     landed = tmp_path / ".humanize" / "flows"
     flows = [one for one in landed.iterdir() if (one / "__init__.py").is_file()]
     assert len(flows) == 1, f"expected one compiled flow, found {flows}"
     return flows[0]
 
 
-def equivalent(
-    at: Path, *, drives_count: int, person: bool, takes_config: bool
-) -> None:
-    entry = at / "__init__.py"
-    places = wanted(entry)
-    assert len(places) == drives_count, places
-    chairs = [one for one in _all_places(entry) if one.person]
-    assert bool(chairs) == person
-    if takes_config:
-        assert configures(entry) is not None
-    found = checked(at)
-    assert not [one for one in found if one.severity == "error"], found
-    assert "unbounded-loop" not in {one.code for one in found}, found
-    proof = proved(at, scenarios=(NEVER_DONE,))
-    assert proof.findings == (), proof.findings
-    assert proof.outcomes[0].finished, proof.outcomes
+async def equivalent(at: Path, *, drives: int, person: bool, takes_params: bool) -> Any:
+    gates = sys.modules["_aot.gates"]
+    files = {
+        str(one.relative_to(at)): one.read_bytes()
+        for one in at.rglob("*")
+        if one.is_file() and "__pycache__" not in one.parts
+    }
+    found = await gates.checked(files, at.name, 60.0)
+    assert not found.blocking(strict=False), found.findings
+    assert len(found.agents) == drives, found.agents
+    assert found.person == person
+    landed: Any = load_flow(str(at), caller_globals={})
+    declared = landed.describe()
+    assert bool(declared.params.model_fields) == takes_params
+    return found
 
 
-def _all_places(entry: Path):
-    from hmz.flows.driving import declares
-
-    return declares(entry)[1]
-
-
-def test_flame_chase_from_one_line(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    at = compiled(
+async def test_flame_chase_from_one_line(tmp_path: Path) -> None:
+    at = await compiled(
         tmp_path,
-        monkeypatch,
         "two agents take turns on the same task, one after the other, for a bounded "
-        "number of rounds under the run's allowance",
+        "number of rounds",
     )
-    equivalent(at, drives_count=2, person=False, takes_config=True)
-    source = (at / "__init__.py").read_text()
-    assert "range(" in source
+    await equivalent(at, drives=2, person=False, takes_params=True)
+    assert "range(" in (at / "__init__.py").read_text()
 
 
-def test_gen_idea_from_its_description(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    at = compiled(
+async def test_gen_idea_from_its_description(tmp_path: Path) -> None:
+    at = await compiled(
         tmp_path,
-        monkeypatch,
         "open a loose idea into a repository-grounded design draft: one agent reads "
         "the repository, expands the idea into a draft with goals, constraints and "
         "open questions, and writes it to a markdown file whose path it prints; one "
         "pass, no loop",
     )
-    equivalent(at, drives_count=1, person=False, takes_config=False)
+    await equivalent(at, drives=1, person=False, takes_params=False)
 
 
-def test_gen_plan_from_its_description(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    at = compiled(
+async def test_gen_plan_from_its_description(tmp_path: Path) -> None:
+    at = await compiled(
         tmp_path,
-        monkeypatch,
         "turn a design draft into an implementation plan two sides converge on: a "
         "planner writes and revises the plan file, and an analyst who shares no "
         "context with the planner reviews it fresh each round and answers whether it "
         "is settled; the loop ends when the analyst says settled, and a cap on the "
         "rounds backstops an analyst that never does",
     )
-    equivalent(at, drives_count=2, person=False, takes_config=True)
-    source = (at / "__init__.py").read_text()
-    assert "range(" in source
-
-
-def test_rlcr_from_its_description(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    at = compiled(tmp_path, monkeypatch, RLCR)
-    equivalent(at, drives_count=2, person=False, takes_config=True)
-    source = (at / "__init__.py").read_text()
-    assert "schema=" in source
-    assert "range(" in source
+    await equivalent(at, drives=2, person=False, takes_params=True)
+    assert "range(" in (at / "__init__.py").read_text()
 
 
 RLCR = (
@@ -138,24 +120,34 @@ RLCR = (
 )
 
 
+async def test_rlcr_from_its_description(tmp_path: Path) -> None:
+    at = await compiled(tmp_path, RLCR)
+    await equivalent(at, drives=2, person=False, takes_params=True)
+    source = (at / "__init__.py").read_text()
+    assert "output_schema=" in source
+    assert "range(" in source
+
+
 @pytest.mark.skipif(
     os.environ.get("AOT_SMOKE", "") != "1",
     reason="the smoke drives the compiled loop with real agents; AOT_SMOKE=1 runs it",
 )
-def test_the_compiled_rlcr_runs_once_on_a_toy_repository(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    at = compiled(tmp_path, monkeypatch, RLCR)
-    equivalent(at, drives_count=2, person=False, takes_config=True)
+async def test_the_compiled_rlcr_runs_once_on_a_toy_repository(tmp_path: Path) -> None:
+    at = await compiled(tmp_path, RLCR)
+    found = await equivalent(at, drives=2, person=False, takes_params=True)
     workshop = tmp_path / "workshop"
     workshop.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=workshop, check=True)
     (workshop / "README.md").write_text("# workshop\n\nA toy repository.\n")
-    monkeypatch.chdir(workshop)
-    run = load(str(at))
-    run(
-        (agent_of(WRITER), agent_of(CRITIC)),
+    builder, reviewer = found.agents
+    await run_flow(
+        load_flow(str(at), caller_globals={}),
         "create a file called hello.txt containing exactly the line `hello`, and "
         "nothing else; the task is done when that file exists with that content",
+        agents={builder: agent_of(builder, WRITER), reviewer: agent_of(reviewer, CRITIC)},
+        envs={},
+        params={},
+        budget=Budget(cost=BUDGET),
+        local=local(workshop),
     )
     assert (workshop / "hello.txt").read_text().strip() == "hello"

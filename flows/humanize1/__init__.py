@@ -2,42 +2,71 @@
 
 from __future__ import annotations
 
+import asyncio
+import datetime
 import hashlib
 import os
 import re
-import shutil
-import subprocess
-import threading
 import time
 import uuid
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple, cast
+from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Any, Literal
 
 from _humanize1 import guards, loop, planning, prompts
-from _humanize1.loop import Loop, State, answered, git, spoken
+from _humanize1.loop import (
+    PERMANENT,
+    Here,
+    Loop,
+    State,
+    TurnTimedOut,
+    git,
+    move,
+    read,
+    remove,
+    timed,
+    utc,
+    write,
+)
 from _humanize1.prompts import render
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from hmz.flows import Agent, Moment, Person, Session, Stopped, Unrecoverable, flow
-from hmz.flows import Question as Asking
+from hmz.flows import (
+    Agent,
+    AgentCollection,
+    EnvCollection,
+    FlowParams,
+    HarnessError,
+    Outworlder,
+    PermissionRequestHookAgentMixin,
+    SessionError,
+    flow,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from hmz.flows import FlowContext, FlowState, Session
 
 
-class Drafting(NamedTuple):
+class Builder(Agent, PermissionRequestHookAgentMixin): ...
+
+
+class Drafting(AgentCollection):
     drafter: Agent
 
 
-class Planning(NamedTuple):
+class Planning(AgentCollection):
     planner: Agent
     analyst: Agent
 
 
-class Building(NamedTuple):
-    builder: Annotated[Agent, Moment.PERMISSION_REQUEST]
+class Building(AgentCollection):
+    builder: Builder
     reviewer: Agent
-    human: Person
+    human: Outworlder
+
+
+class Where(EnvCollection):
+    workspace: Here
 
 
 LANGUAGES = {
@@ -64,7 +93,7 @@ _REVIEW_HEADINGS = (
 
 _NO_MATERIAL_ROUNDS = 2
 
-_STOP_GRACE = 1.0
+_ANSWERING = 3
 
 IDEAS = ".humanize/ideas"
 
@@ -206,10 +235,21 @@ class Quiz(BaseModel):
     )
 
 
-class Idea(BaseModel):
+class Choice(BaseModel):
+    """What the person picked for one of the quiz's questions."""
+
+    model_config = {"extra": "forbid"}
+
+    choice: Literal["", "A", "B", "C", "D"] = Field(
+        default="",
+        description="The letter of the option picked, or blank to answer none of them.",
+    )
+
+
+class Idea(FlowParams):
     """Every flag `gen-idea` takes, under the name the plugin gives it."""
 
-    model_config = {"frozen": True}
+    model_config = ConfigDict(frozen=True)
 
     n: int = Field(
         default=6, ge=2, le=10, description="--n: how many directions explore the idea"
@@ -220,7 +260,7 @@ class Idea(BaseModel):
     )
 
 
-class Plan(BaseModel):
+class Plan(FlowParams):
     """Every flag `gen-plan` takes, under the name the plugin gives it.
 
     `--input` is a field here where the three phases were one flow it was not: the draft is
@@ -228,7 +268,7 @@ class Plan(BaseModel):
     read and edited first.
     """
 
-    model_config = {"frozen": True}
+    model_config = ConfigDict(frozen=True)
 
     input: str = Field(
         default="",
@@ -267,7 +307,7 @@ class Plan(BaseModel):
     )
 
 
-class Rlcr(BaseModel):
+class Rlcr(FlowParams):
     """Every flag the loop takes, under the name the plugin gives it.
 
     What the plugin reads from `.humanize/config.json` is here too, since a config file and a
@@ -279,7 +319,7 @@ class Rlcr(BaseModel):
     `--require-bitlesson-entry-for-none` are one switch written twice.
     """
 
-    model_config = {"frozen": True}
+    model_config = ConfigDict(frozen=True)
 
     plan_file: str = Field(
         default="",
@@ -349,6 +389,11 @@ class Rlcr(BaseModel):
         return self
 
 
+_SHELL = 30
+
+_ENOUGH = 5
+
+
 def _language(said: str) -> tuple[str, str]:
     wanted = said.strip().lower()
     if not wanted or wanted in ("english", "en"):
@@ -370,36 +415,71 @@ def _slug(task: str) -> str:
 
 
 def _stamp() -> str:
-    import datetime
-
     return datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
 
 
-def _head(root: Path) -> str:
-    status, branch = git("rev-parse", "--abbrev-ref", "HEAD", at=root)
+def _under(root: PurePosixPath, said: str) -> PurePosixPath:
+    where = PurePosixPath(said)
+    return where if where.is_absolute() else root / where
+
+
+def _named(root: PurePosixPath, plan: PurePosixPath) -> str:
+    return str(plan.relative_to(root) if plan.is_relative_to(root) else plan)
+
+
+def _says(value: object) -> str:
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    return str(value)
+
+
+async def _head(env: Here) -> str:
+    status, branch = await git(env, "rev-parse", "--abbrev-ref", "HEAD")
     return "" if status else branch
 
 
-def _base(root: Path, asked: str) -> str:
+async def _base(env: Here, asked: str) -> str:
     if asked:
         return asked
-    status, said = git("symbolic-ref", "refs/remotes/origin/HEAD", at=root)
+    status, said = await git(env, "symbolic-ref", "refs/remotes/origin/HEAD")
     if not status and said:
         remote = said.rsplit("/", 1)[-1]
-        if not git("show-ref", "--verify", "--quiet", f"refs/heads/{remote}", at=root)[
-            0
-        ]:
+        if not (
+            await git(env, "show-ref", "--verify", "--quiet", f"refs/heads/{remote}")
+        )[0]:
             return remote
     for named in ("main", "master"):
-        if not git("show-ref", "--verify", "--quiet", f"refs/heads/{named}", at=root)[
-            0
-        ]:
+        if not (
+            await git(env, "show-ref", "--verify", "--quiet", f"refs/heads/{named}")
+        )[0]:
             return named
     return ""
 
 
-def _review_base(root: Path, config: Rlcr) -> str:
-    return "" if config.skip_code_review else _base(root, config.base_branch)
+async def _review_base(env: Here, config: Rlcr) -> str:
+    return "" if config.skip_code_review else await _base(env, config.base_branch)
+
+
+async def _writable(env: Here, directory: PurePosixPath) -> None:
+    status, _, err = await env.exec(
+        ["mkdir", "-p", "--", str(directory)], timeout=_SHELL
+    )
+    if status:
+        raise ValueError(f"{directory}: cannot create output directory: {err.strip()}")
+    status, _, _ = await env.exec(["test", "-w", str(directory)], timeout=_SHELL)
+    if status:
+        raise ValueError(f"{directory}: no write permission to output directory")
+
+
+async def _last(env: Here) -> PurePosixPath:
+    status, said, _ = await env.exec(["ls", "-t", "--", IDEAS], timeout=_SHELL)
+    written = [one for one in said.splitlines() if one.endswith(".md")]
+    if status or not written:
+        raise ValueError(
+            f"no draft to plan from under {IDEAS}: run gen-idea first, or set input to a "
+            "draft you already have"
+        )
+    return env.workdir / IDEAS / written[0]
 
 
 def _section(held: str, *headings: str) -> str:
@@ -432,77 +512,53 @@ def _undecided(held: str) -> list[str]:
     return found
 
 
-def _asked(human: Person, question: str, options: list[str]) -> str:
-    listed = list(zip("ABCD", options, strict=False))
-    said = human.asked(
-        Asking(
-            text=question,
-            options=tuple(f"{letter}. {one}" for letter, one in listed),
-        )
+async def _asked(
+    human: Outworlder, session: Session, question: str, options: list[str]
+) -> str:
+    listed = "\n".join(
+        f"{letter}. {one}" for letter, one in zip("ABCD", options, strict=False)
     )
-    if not said:
-        return ""
-    for letter, one in listed:
-        if said.strip() in (one, f"{letter}. {one}"):
-            return letter
-    return said.strip()[:1].upper()
+    said = await human.run(
+        f"{question}\n\n{listed}", session=session, output_schema=Choice
+    )
+    return said.choice
 
 
-class _DeadlineError(TimeoutError):
-    def __init__(self, message: str, done: threading.Event) -> None:
-        super().__init__(message)
-        self.done = done
+async def _answered[T: BaseModel](
+    agent: Agent, env: Here, prompt: str, schema: type[T]
+) -> T:
+    for attempt in range(1, _ANSWERING + 1):
+        try:
+            session = await agent.spawn(env=env)
+            return await agent.run(prompt, session=session, output_schema=schema)
+        except PERMANENT:
+            raise
+        except HarnessError as why:
+            if attempt == _ANSWERING:
+                raise
+            print(f"Warning: {why}; asking again.")
+    raise AssertionError("a positive number of attempts asked nothing")
 
 
 class _TurnError(RuntimeError):
-    def __init__(
-        self,
-        stage: str,
-        why: str,
-        *,
-        timed_out: bool = False,
-        done: threading.Event | None = None,
-    ) -> None:
+    def __init__(self, stage: str, why: str, *, timed_out: bool = False) -> None:
         super().__init__(f"{stage}: {why}")
         self.stage = stage
         self.timed_out = timed_out
-        self.done = done
 
 
 class _EmptyTurnError(ValueError):
     pass
 
 
-def _within[T](owner: Agent, call: Callable[[], T], seconds: float, stage: str) -> T:
-    if seconds <= 0:
-        return call()
-
-    landed: list[tuple[bool, object]] = []
-    done = threading.Event()
-
-    def run() -> None:
-        try:
-            landed.append((True, call()))
-        except BaseException as why:  # noqa: BLE001
-            landed.append((False, why))
-        finally:
-            done.set()
-
-    worker = threading.Thread(
-        target=run,
-        name=f"humanize1-{owner.id}-{stage}",
-        daemon=True,
-    )
-    worker.start()
-    if not done.wait(seconds):
-        owner.stop()
-        worker.join(timeout=_STOP_GRACE)
-        raise _DeadlineError(f"took longer than {seconds:g}s", done)
-
-    succeeded, answer = landed[0]
-    if succeeded:
-        return cast("T", answer)
-    raise cast("BaseException", answer)
+@dataclass
+class _Turns:
+    agents: Planning
+    env: Here
+    config: Plan
+    writing: Session | None = None
+    began: float = field(default_factory=time.monotonic)
+    stopped: set[str] = field(default_factory=set[str])
 
 
 def _turn_limit(config: Plan, began: float, stage: str) -> float:
@@ -519,42 +575,52 @@ def _turn_limit(config: Plan, began: float, stage: str) -> float:
     return min(limits) if limits else 0
 
 
-def _take(
-    owner: Agent,
-    target: Agent | Session,
+async def _take(
+    turns: _Turns,
+    role: Literal["planner", "analyst"],
     prompt: str,
-    config: Plan,
-    began: float,
     stage: str,
     *,
     schema: type[BaseModel] | None = None,
 ) -> Any:
-    attempts = config.turn_retries + 1
+    if role in turns.stopped:
+        raise _TurnError(
+            stage, f"the {role} was stopped after a timeout", timed_out=True
+        )
+    agent = turns.agents[role]
+    attempts = turns.config.turn_retries + 1
     for attempt in range(1, attempts + 1):
+        limit = _turn_limit(turns.config, turns.began, stage)
         try:
-            limit = _turn_limit(config, began, stage)
-
-            def call() -> Any:
-                answer = (
-                    target(prompt, suppress=True, schema=schema)
-                    if schema is not None
-                    else target(prompt, suppress=True)
-                )
-                if answer is None or not str(answer).strip():
-                    raise _EmptyTurnError("the turn returned an empty answer")
-                return answer
-
-            return _within(owner, call, limit, stage)
-        except Stopped:
-            raise
-        except _DeadlineError as why:
-            raise _TurnError(stage, str(why), timed_out=True, done=why.done) from why
-        except Unrecoverable as why:
+            if role == "analyst":
+                session = await agent.spawn(env=turns.env)
+            elif turns.writing is None:
+                session = turns.writing = await agent.spawn(env=turns.env)
+            else:
+                session = turns.writing
+            answer = await timed(
+                lambda budget, session=session: (
+                    agent.run(prompt, session=session, budget=budget)
+                    if schema is None
+                    else agent.run(
+                        prompt, session=session, output_schema=schema, budget=budget
+                    )
+                ),
+                limit,
+            )
+            if role == "analyst" and not str(answer).strip():
+                raise _EmptyTurnError("the turn returned an empty answer")
+        except TurnTimedOut as why:
+            turns.stopped.add(role)
+            raise _TurnError(stage, str(why), timed_out=True) from why
+        except PERMANENT as why:
             raise _TurnError(stage, str(why)) from why
-        except (subprocess.CalledProcessError, ValueError) as why:
+        except (HarnessError, _EmptyTurnError) as why:
             if attempt == attempts:
                 raise _TurnError(stage, str(why)) from why
             print(f"Warning: {stage} failed; retrying ({attempt} of {attempts}): {why}")
+        else:
+            return answer
     raise AssertionError("a positive number of planning attempts took no turn")
 
 
@@ -577,8 +643,8 @@ def _material_digest(plan: str) -> str:
     return hashlib.sha256(material.encode()).hexdigest()
 
 
-def _partial(where: Path, why: str) -> None:
-    held = where.read_text(encoding="utf-8")
+async def _partial(env: Here, where: PurePosixPath, why: str) -> None:
+    held = await read(env, where) or ""
     status = "- Final Status: `partially_converged`"
     held, changed = re.subn(r"(?m)^- Final Status:.*$", status, held, count=1)
     note = f"- Flow Note: {' '.join(why.split())}"
@@ -595,144 +661,95 @@ def _partial(where: Path, why: str) -> None:
             if marker in held
             else section + held
         )
-    where.write_text(held, encoding="utf-8")
+    await write(env, where, held)
 
 
-def _stage(where: Path) -> Path:
+async def _stage(env: Here, where: PurePosixPath) -> PurePosixPath:
     staged = where.with_name(f".humanize-plan-{uuid.uuid4().hex}.tmp")
-    shutil.copyfile(where, staged)
+    await write(env, staged, await read(env, where) or "")
     return staged
 
 
-def _abandon(staged: Path, why: _TurnError, owner: Agent) -> None:
-    if not why.timed_out or not owner.stopped or why.done is None:
-        staged.unlink(missing_ok=True)
-        return
-
-    def remove_after_turn() -> None:
-        why.done.wait()
-        staged.unlink(missing_ok=True)
-
-    threading.Thread(
-        target=remove_after_turn,
-        name=f"humanize1-cleanup-{staged.name}",
-        daemon=True,
-    ).start()
+async def _promote(env: Here, staged: PurePosixPath, where: PurePosixPath) -> None:
+    if failed := await move(env, staged, where):
+        raise RuntimeError(f"could not move {staged} to {where}: {failed}")
 
 
-def _promote(staged: Path, where: Path) -> None:
-    staged.replace(where)
-
-
-def _idea(drafting: Session, task: str, config: Idea, root: Path) -> Path:
-    where = Path(config.output or f"{IDEAS}/{_slug(task)}-{_stamp()}.md")
-    if not where.is_absolute():
-        where = root / where
-    if where.exists():
+async def _idea(drafter: Agent, env: Here, task: str, config: Idea) -> PurePosixPath:
+    where = _under(env.workdir, config.output or f"{IDEAS}/{_slug(task)}-{_stamp()}.md")
+    if await read(env, where) is not None:
         raise ValueError(
             f"{where}: output file already exists - choose a different path"
         )
-    where.parent.mkdir(parents=True, exist_ok=True)
-    if not os.access(where.parent, os.W_OK):
-        raise ValueError(f"{where.parent}: no write permission to output directory")
-    spoken(
-        drafting,
-        render(
-            planning.GEN_IDEA,
-            N=config.n,
-            OUTPUT_FILE=where,
-            TEMPLATE=planning.GEN_IDEA_TEMPLATE,
-            IDEA_BODY=task,
-        ),
+    await _writable(env, where.parent)
+    session = await drafter.spawn(env=env)
+    asked = render(
+        planning.GEN_IDEA,
+        N=config.n,
+        OUTPUT_FILE=where,
+        TEMPLATE=planning.GEN_IDEA_TEMPLATE,
+        IDEA_BODY=task,
     )
-    return where
+    for _ in range(_ANSWERING):
+        said = await drafter.run(asked, session=session)
+        if await read(env, where) is not None:
+            return where
+        if said.strip():
+            raise ValueError(
+                f"{where}: the drafter wrote no draft, saying: {said.strip()}"
+            )
+    raise ValueError(f"{where}: the drafter answered nothing and wrote no draft")
 
 
-def _plan(
-    agents: Planning,
-    writing: Session,
-    task: str,
-    config: Plan,
-    root: Path,
-    draft: Path,
-) -> Path:
-    began = time.monotonic()
-    if not draft.is_file():
+async def _plan(turns: _Turns, task: str, draft: PurePosixPath) -> PurePosixPath:
+    env, config = turns.env, turns.config
+    held = await read(env, draft)
+    if held is None:
         raise ValueError(f"{draft}: input file not found")
-    held = draft.read_text(encoding="utf-8")
     if not held.strip():
         raise ValueError(f"{draft}: input file is empty")
-    where = Path(config.output or PLAN)
-    if not where.is_absolute():
-        where = root / where
-    if where.exists():
+    where = _under(env.workdir, config.output or PLAN)
+    if await read(env, where) is not None:
         raise ValueError(
             f"{where}: output file already exists - please choose another path"
         )
-    where.parent.mkdir(parents=True, exist_ok=True)
-    if not os.access(where.parent, os.W_OK):
-        raise ValueError(f"{where.parent}: no write permission to output directory")
+    await _writable(env, where.parent)
 
-    try:
-        read = cast(
-            "Relevance",
-            _take(
-                agents.analyst,
-                agents.analyst,
-                render(planning.RELEVANCE, INPUT_FILE=draft, DRAFT_CONTENT=held),
-                config,
-                began,
-                "draft relevance check",
-                schema=Relevance,
-            ),
-        )
-    except _TurnError as why:
-        template = (
-            planning.GEN_PLAN_TEMPLATE
-            + "\n--- Original Design Draft Start ---\n\n"
-            + held
-            + "\n--- Original Design Draft End ---\n"
-        )
-        where.write_text(template, encoding="utf-8")
-        _partial(where, str(why))
-        print(
-            f"Warning: {why}; returning the template and original draft as a partial plan."
-        )
-        return where
-    if not read.relevant:
-        raise ValueError(
-            f"the draft does not appear to be related to this repository: {read.why}"
-        )
-
-    template = (
-        planning.GEN_PLAN_TEMPLATE
-        + "\n--- Original Design Draft Start ---\n\n"
-        + held
-        + "\n--- Original Design Draft End ---\n"
-    )
-    where.write_text(template, encoding="utf-8")
     draft_suffix = (
         "\n--- Original Design Draft Start ---\n\n"
         + held
         + "\n--- Original Design Draft End ---\n"
     )
+    template = planning.GEN_PLAN_TEMPLATE + draft_suffix
+    try:
+        relevance: Relevance = await _take(
+            turns,
+            "analyst",
+            render(planning.RELEVANCE, INPUT_FILE=draft, DRAFT_CONTENT=held),
+            "draft relevance check",
+            schema=Relevance,
+        )
+    except _TurnError as why:
+        await write(env, where, template)
+        await _partial(env, where, str(why))
+        print(
+            f"Warning: {why}; returning the template and original draft as a partial plan."
+        )
+        return where
+    if not relevance.relevant:
+        raise ValueError(
+            f"the draft does not appear to be related to this repository: {relevance.why}"
+        )
+
+    await write(env, where, template)
     limitations: list[str] = []
 
     try:
-        analysis = cast(
-            "str",
-            _take(
-                agents.analyst,
-                agents.analyst,
-                render(
-                    planning.GEN_PLAN_ANALYSIS,
-                    INPUT_FILE=draft,
-                    DRAFT_CONTENT=held,
-                ),
-                config,
-                began,
-                "independent planning analysis",
-            ),
+        analysis: str = await _take(
+            turns,
+            "analyst",
+            render(planning.GEN_PLAN_ANALYSIS, INPUT_FILE=draft, DRAFT_CONTENT=held),
+            "independent planning analysis",
         )
     except _TurnError as why:
         limitations.append(str(why))
@@ -746,66 +763,54 @@ def _plan(
         )
         print(f"Warning: {why}; continuing with planner-only candidate generation.")
 
-    before_candidate = where.read_text(encoding="utf-8")
-    staged = _stage(where)
+    staged = await _stage(env, where)
     try:
-        _take(
-            agents.planner,
-            writing,
-            render(
-                planning.GEN_PLAN_CANDIDATE,
-                OUTPUT_FILE=staged,
-                ANALYSIS=analysis,
-            ),
-            config,
-            began,
+        await _take(
+            turns,
+            "planner",
+            render(planning.GEN_PLAN_CANDIDATE, OUTPUT_FILE=staged, ANALYSIS=analysis),
             "candidate plan",
         )
     except _TurnError as why:
-        _abandon(staged, why, agents.planner)
-        _partial(where, str(why))
+        await remove(env, staged)
+        await _partial(env, where, str(why))
         print(
             f"Warning: {why}; returning the template and original draft as a partial plan."
         )
         return where
-    candidate = staged.read_text(encoding="utf-8")
-    if _candidate_text(candidate) == _candidate_text(before_candidate):
-        staged.unlink(missing_ok=True)
+    candidate = await read(env, staged) or ""
+    if _candidate_text(candidate) == _candidate_text(template):
+        await remove(env, staged)
         raise RuntimeError(
             "gen-plan's planner returned without writing the candidate plan"
         )
     if not candidate.endswith(draft_suffix):
-        staged.unlink(missing_ok=True)
+        await remove(env, staged)
         raise RuntimeError("gen-plan's planner did not preserve the original draft")
-    _promote(staged, where)
+    await _promote(env, staged, where)
 
     converged = False
     prior = ""
     unchanged = 0
     material = _material_digest(candidate)
-    if config.mode == "discussion" and not agents.analyst.stopped:
+    if config.mode == "discussion" and "analyst" not in turns.stopped:
         for round_number in range(1, CONVERGING + 1):
-            current = where.read_text(encoding="utf-8")
+            current = await read(env, where) or ""
             try:
-                round_ = cast(
-                    "Convergence",
-                    _take(
-                        agents.analyst,
-                        agents.analyst,
-                        render(
-                            planning.GEN_PLAN_CONVERGENCE,
-                            OUTPUT_FILE=where,
-                            TASK=task,
-                            PRIOR=prior,
-                            ROUND=round_number,
-                            TOTAL_ROUNDS=CONVERGING,
-                            PLAN_CONTENT=_candidate_text(current),
-                        ),
-                        config,
-                        began,
-                        f"reasonability review {round_number}",
-                        schema=Convergence,
+                round_: Convergence = await _take(
+                    turns,
+                    "analyst",
+                    render(
+                        planning.GEN_PLAN_CONVERGENCE,
+                        OUTPUT_FILE=where,
+                        TASK=task,
+                        PRIOR=prior,
+                        ROUND=round_number,
+                        TOTAL_ROUNDS=CONVERGING,
+                        PLAN_CONTENT=_candidate_text(current),
                     ),
+                    f"reasonability review {round_number}",
+                    schema=Convergence,
                 )
             except _TurnError as why:
                 limitations.append(str(why))
@@ -818,33 +823,29 @@ def _plan(
                 converged = True
                 break
             prior = f"What was still open after the last round:\n\n{review}\n"
-            staged = _stage(where)
+            staged = await _stage(env, where)
             try:
-                _take(
-                    agents.planner,
-                    writing,
+                await _take(
+                    turns,
+                    "planner",
                     render(
-                        planning.GEN_PLAN_REVISION,
-                        OUTPUT_FILE=staged,
-                        REVIEW=review,
+                        planning.GEN_PLAN_REVISION, OUTPUT_FILE=staged, REVIEW=review
                     ),
-                    config,
-                    began,
                     f"plan revision {round_number}",
                 )
             except _TurnError as why:
-                _abandon(staged, why, agents.planner)
+                await remove(env, staged)
                 limitations.append(str(why))
                 print(f"Warning: {why}; keeping the previous candidate.")
                 break
-            revised = staged.read_text(encoding="utf-8")
+            revised = await read(env, staged) or ""
             if not revised.endswith(draft_suffix):
-                staged.unlink(missing_ok=True)
+                await remove(env, staged)
                 limitations.append(
                     f"plan revision {round_number}: the original draft was not preserved"
                 )
                 break
-            _promote(staged, where)
+            await _promote(env, staged, where)
             changed = _material_digest(revised)
             unchanged = unchanged + 1 if changed == material else 0
             material = changed
@@ -861,14 +862,16 @@ def _plan(
         and config.mode == "discussion"
     )
     status = "converged" if converged else "partially_converged"
-    if agents.planner.stopped:
-        _partial(where, limitations[-1] if limitations else "the planner timed out")
+    if "planner" in turns.stopped:
+        await _partial(
+            env, where, limitations[-1] if limitations else "the planner timed out"
+        )
         return where
-    staged = _stage(where)
+    staged = await _stage(env, where)
     try:
-        _take(
-            agents.planner,
-            writing,
+        await _take(
+            turns,
+            "planner",
             render(
                 planning.GEN_PLAN_FINAL,
                 OUTPUT_FILE=staged,
@@ -892,20 +895,19 @@ def _plan(
                     else ""
                 ),
             ),
-            config,
-            began,
             "final plan consolidation",
         )
     except _TurnError as why:
-        _abandon(staged, why, agents.planner)
-        limitations.append(str(why))
-        _partial(where, str(why))
+        await remove(env, staged)
+        await _partial(env, where, str(why))
         print(f"Warning: {why}; returning the last durable candidate.")
         return where
-    finished = staged.read_text(encoding="utf-8")
+    finished = await read(env, staged) or ""
     if not finished.endswith(draft_suffix):
-        staged.unlink(missing_ok=True)
-        _partial(where, "final consolidation did not preserve the original draft")
+        await remove(env, staged)
+        await _partial(
+            env, where, "final consolidation did not preserve the original draft"
+        )
         return where
     finished = re.sub(
         r"(?m)^- Final Status:.*$",
@@ -913,8 +915,8 @@ def _plan(
         finished,
         count=1,
     )
-    staged.write_text(finished, encoding="utf-8")
-    _promote(staged, where)
+    await write(env, staged, finished)
+    await _promote(env, staged, where)
 
     if undecided := _undecided(finished):
         raise ValueError(
@@ -930,106 +932,82 @@ def _plan(
         variant = where.with_name(f"{where.stem}_{code}{where.suffix}")
         staged = variant.with_name(f".humanize-plan-{uuid.uuid4().hex}.tmp")
         try:
-            _take(
-                agents.planner,
-                writing,
+            await _take(
+                turns,
+                "planner",
                 render(
                     planning.GEN_PLAN_TRANSLATE,
                     OUTPUT_FILE=where,
                     LANGUAGE=language,
                     VARIANT_FILE=staged,
                 ),
-                config,
-                began,
                 f"{language} plan translation",
             )
         except _TurnError as why:
-            _abandon(staged, why, agents.planner)
+            await remove(env, staged)
             print(
                 f"Warning: {why}; the main plan is complete but no translation was kept."
             )
         else:
-            staged.replace(variant)
+            if failed := await move(env, staged, variant):
+                print(
+                    f"Warning: {failed}; the main plan is complete but no translation "
+                    "was kept."
+                )
     return where
 
 
-def _rlcr(
-    agents: Building,
-    building: Session,
-    config: Rlcr,
-    root: Path,
-    plan: Path | None,
-    kept: dict[str, Any],
-) -> None:
-    if _head(root) == "":
-        raise ValueError(
-            "rlcr runs in a git repository: every review reads the work since the commit "
-            "the plan was fixed in"
-        )
-    if (
-        config.agent_teams
-        and os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") != "1"
-    ):
-        raise ValueError(
-            "agent_teams requires the CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS environment "
-            "variable to be set:\n\n  export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
-        )
-    if config.push_every_round and not git("remote", at=root)[1]:
-        raise ValueError(
-            "push_every_round needs a remote to push to, and this repository has none"
-        )
-    carrying = _again(agents.reviewer, config, root, plan, kept)
-    running, told = (
-        carrying if carrying is not None else _fresh(agents, config, root, plan, kept)
-    )
-    with (
-        agents.builder.hooks.on(Moment.STOP, running),
-        agents.builder.hooks.on(Moment.PERMISSION_REQUEST, guards.Guard(running, root)),
-        agents.builder.hooks.on(
-            Moment.USER_PROMPT_SUBMIT, guards.Prompted(running, root)
-        ),
-    ):
-        spoken(building, told)
-
-
-def _again(
+async def _again(
     reviewer: Agent,
+    env: Here,
     config: Rlcr,
-    root: Path,
-    plan: Path | None,
-    kept: dict[str, Any],
+    plan: PurePosixPath | None,
+    kept: FlowState | None,
 ) -> tuple[Loop, str] | None:
-    said = str(kept.get("loop") or "")
+    said = str(kept["loop"] or "") if kept is not None and "loop" in kept else ""
     if not said:
         return None
-    where = _under(root, said)
-    running = Loop.picked_up(reviewer, where, root, kept=kept)
+    where = _under(env.workdir, said)
+    running = await Loop.picked_up(reviewer, env, where, kept)
     if running is None:
         print(
             f"{where}: no live state file to carry on from -- that loop has ended, or was "
             "written by another version of this flow. Starting a fresh loop."
         )
         return None
-    if moved := _moved(running):
+    if moved := await _moved(running):
         print(f"{where}: {moved}. Starting a fresh loop.")
         return None
     if differs := _differs(running, config, plan):
         print(f"{where}: {differs}. Starting a fresh loop.")
         return None
-    told = (
-        running.prompt.read_text(encoding="utf-8") if running.prompt.is_file() else ""
-    )
+    told = await read(env, running.prompt) or ""
     if not told.strip():
         print(
             f"{running.prompt}: nothing was written down for where that loop is, so there "
             "is nothing to send a builder back in with. Starting a fresh loop."
         )
         return None
-    running.state.codex_model = reviewer.config.model
-    running.state.codex_effort = reviewer.config.effort
-    running.state_file.write_text(running.state.written(), encoding="utf-8")
+    running.state.codex_model = reviewer.model
+    running.state.codex_effort = reviewer.effort
+    await write(env, running.state_file, running.state.written())
     print(f"Carrying on the loop in {where}, {_where_it_is(running)}.")
     return running, told
+
+
+async def _built(builder: Builder, session: Session, asking: str) -> None:
+    for attempt in range(1, loop._TRIES + 1):
+        try:
+            await builder.run(asking, session=session)
+        except (*PERMANENT, SessionError):
+            raise
+        except HarnessError as why:
+            if attempt == loop._TRIES:
+                raise
+            print(f"Warning: the builder's turn failed; taking it again: {why}")
+            await asyncio.sleep(loop._PAUSE * attempt)
+        else:
+            return
 
 
 def _where_it_is(running: Loop) -> str:
@@ -1040,31 +1018,32 @@ def _where_it_is(running: Loop) -> str:
     return f"at round {running.state.current_round}"
 
 
-def _moved(running: Loop) -> str:
-    state, root = running.state, running.root
-    branch = _head(root)
+async def _moved(running: Loop) -> str:
+    state, env, root = running.state, running.env, running.root
+    branch = await _head(env)
     if state.start_branch and branch != state.start_branch:
         return f"that loop is building on {state.start_branch}, and this is on {branch}"
     plan, backup = root / state.plan_file, running.where / "plan.md"
-    if not plan.is_file():
+    held = await read(env, plan)
+    if held is None:
         return f"the plan that loop is building is not at {plan} any more"
     if state.review_started:
         return ""
-    if state.plan_file:
-        tracked = git("ls-files", "--error-unmatch", state.plan_file, at=root)[0] == 0
-        if tracked is not state.plan_tracked:
-            return (
-                f"{state.plan_file} is {'now' if tracked else 'no longer'} tracked in git, "
-                "which is not how that loop was set up"
-            )
-    if not backup.is_file():
+    if state.plan_file and (
+        refused := await guards.tracking(
+            env, state.plan_file, tracked=state.plan_tracked
+        )
+    ):
+        return refused
+    kept = await read(env, backup)
+    if kept is None:
         return f"that loop's own copy of {state.plan_file} is not in {running.where} any more"
-    if plan.read_bytes() != backup.read_bytes():
+    if held != kept:
         return f"{plan} has changed since that loop was set up"
     return ""
 
 
-def _differs(running: Loop, config: Rlcr, plan: Path | None) -> str:
+def _differs(running: Loop, config: Rlcr, plan: PurePosixPath | None) -> str:
     state, root = running.state, running.root
     if plan is not None and (named := _named(root, plan)) != state.plan_file:
         return f"that loop is building {state.plan_file}, and this run says {named}"
@@ -1074,7 +1053,11 @@ def _differs(running: Loop, config: Rlcr, plan: Path | None) -> str:
         return (
             "that loop was set up with skip_impl, and this run says it builds the plan"
         )
-    if config.base_branch and config.base_branch != state.base_branch:
+    if (
+        config.base_branch
+        and not config.skip_code_review
+        and config.base_branch != state.base_branch
+    ):
         return (
             f"that loop is reviewing against {state.base_branch or 'nothing'}, and this "
             f"run says {config.base_branch}"
@@ -1107,75 +1090,86 @@ def _differs(running: Loop, config: Rlcr, plan: Path | None) -> str:
     return ""
 
 
-def _named(root: Path, plan: Path) -> str:
-    return str(plan.relative_to(root) if plan.is_relative_to(root) else plan)
-
-
-def _says(value: object) -> str:
-    if isinstance(value, bool):
-        return "on" if value else "off"
-    return str(value)
-
-
-def _fresh(
+async def _fresh(
     agents: Building,
+    env: Here,
     config: Rlcr,
-    root: Path,
-    plan: Path | None,
-    kept: dict[str, Any],
+    plan: PurePosixPath | None,
+    kept: FlowState | None,
 ) -> tuple[Loop, str]:
+    root = env.workdir
+    reviewer = agents["reviewer"]
     held = ""
     if plan is not None:
-        if not plan.is_file():
+        said = await read(env, plan)
+        if said is None:
             raise ValueError(f"{plan}: no plan file to build")
-        held = plan.read_text(encoding="utf-8")
+        held = said
         if len(held.splitlines()) < _ENOUGH:
             raise ValueError(f"{plan}: the plan file has almost nothing in it")
+        if refused := await guards.tracking(
+            env, _named(root, plan), tracked=config.track_plan_file
+        ):
+            raise ValueError(refused)
+
+    base = await _review_base(env, config)
+    commit = ""
+    if base:
+        status, commit = await git(
+            env, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"
+        )
+        if status:
+            raise ValueError(f"base_branch {base!r} names no commit in this repository")
 
     if plan is not None and not config.skip_impl:
-        read = answered(
-            agents.reviewer,
+        checked = await _answered(
+            reviewer,
+            env,
             render(prompts.PLAN_COMPLIANCE, PLAN_FILE=plan, PLAN_CONTENT=held),
             Compliance,
         )
-        if not read.relevant:
-            raise ValueError(f"the plan is not related to this repository: {read.why}")
-        if read.switches_branch:
+        if not checked.relevant:
+            raise ValueError(
+                f"the plan is not related to this repository: {checked.why}"
+            )
+        if checked.switches_branch:
             raise ValueError(
                 "the plan contains branch-switching instructions, which are incompatible "
-                f"with RLCR: {read.why}"
+                f"with RLCR: {checked.why}"
             )
 
-    if plan is not None and not (config.skip_quiz or config.skip_impl):
-        _understood(agents, plan, held)
+    if (
+        plan is not None
+        and not (config.skip_quiz or config.skip_impl)
+        and not agents["human"].away
+    ):
+        await _understood(agents, env, plan, held)
 
-    stamp = loop.started()
-    where = loop.directory(root, stamp)
+    where = loop.directory(root, loop.started())
     if plan is None:
-        (where / "plan.md").write_text(
+        await write(
+            env,
+            where / "plan.md",
             "# Skip Implementation Mode\n\nThis RLCR loop was started with `skip_impl`, "
             "which skips the implementation phase and goes directly to code review.\n\n"
             "No implementation plan was provided - this is expected for skip-impl mode.\n",
-            encoding="utf-8",
         )
         named = _named(root, where / "plan.md")
     else:
-        shutil.copyfile(plan, where / "plan.md")
+        await write(env, where / "plan.md", held)
         named = _named(root, plan)
 
-    base = _review_base(root, config)
-    commit = git("rev-parse", base, at=root)[1] if base else ""
     state = State(
         current_round=0,
         max_iterations=config.max,
-        codex_model=agents.reviewer.config.model,
-        codex_effort=agents.reviewer.config.effort,
+        codex_model=reviewer.model,
+        codex_effort=reviewer.effort,
         codex_timeout=config.codex_timeout,
         push_every_round=config.push_every_round,
         full_review_round=config.full_review_round,
         plan_file=named,
         plan_tracked=config.track_plan_file,
-        start_branch=_head(root),
+        start_branch=await _head(env),
         base_branch=base,
         base_commit=commit,
         review_started=config.skip_impl,
@@ -1185,43 +1179,41 @@ def _fresh(
         bitlesson_required=not config.skip_impl,
         bitlesson_allow_empty_none=not config.require_bitlesson_entry_for_none,
         mainline_stall_count=0,
-        started_at=_utc(),
+        started_at=utc(),
     )
-    running = Loop(agents.reviewer, where, root, state, kept=kept)
-    _set_up(running, config, plan, held)
+    running = Loop(reviewer, env, where, state, kept=kept)
+    await _set_up(running, config, plan, held)
     if config.skip_impl:
-        (where / loop.REVIEW_STARTED).write_text(
-            "build_finish_round=0\n", encoding="utf-8"
-        )
+        await write(env, where / loop.REVIEW_STARTED, "build_finish_round=0\n")
 
     told = _round_zero(running, config, held)
-    running.prompt.write_text(told, encoding="utf-8")
-    kept.update(loop=str(where.relative_to(root)), rounds=state.current_round)
+    await write(env, running.prompt, told)
+    if kept is not None:
+        kept["loop"] = _named(root, where)
+        kept["rounds"] = state.current_round
     return running, told
 
 
-_ENOUGH = 5
-
-
-def _utc() -> str:
-    import datetime
-
-    return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _understood(agents: Building, plan: Path, held: str) -> None:
-    quiz = agents.reviewer(
-        render(prompts.PLAN_UNDERSTANDING_QUIZ, PLAN_FILE=plan, PLAN_CONTENT=held),
-        suppress=True,
-        schema=Quiz,
-    )
+async def _understood(
+    agents: Building, env: Here, plan: PurePosixPath, held: str
+) -> None:
+    reviewer, human = agents["reviewer"], agents["human"]
+    try:
+        quiz = await reviewer.run(
+            render(prompts.PLAN_UNDERSTANDING_QUIZ, PLAN_FILE=plan, PLAN_CONTENT=held),
+            session=await reviewer.spawn(env=env),
+            output_schema=Quiz,
+        )
+    except HarnessError:
+        quiz = None
     if quiz is None or not quiz.questions:
         print("Plan understanding quiz unavailable, continuing without it.")
         return
+    person = await human.spawn(env=env)
     right = 0
     asked = 0
     for question in quiz.questions:
-        picked = _asked(agents.human, question.question, question.options)
+        picked = await _asked(human, person, question.question, question.options)
         if not picked:
             return
         asked += 1
@@ -1229,8 +1221,9 @@ def _understood(agents: Building, plan: Path, held: str) -> None:
     if asked and right == asked:
         print("Your understanding of the plan looks solid. Proceeding with setup.")
         return
-    going = _asked(
-        agents.human,
+    going = await _asked(
+        human,
+        person,
         f"{quiz.summary}\n\nThe answers were "
         + ", ".join(
             f"Q{at + 1}: {question.answer}"
@@ -1246,11 +1239,13 @@ def _understood(agents: Building, plan: Path, held: str) -> None:
         )
 
 
-def _set_up(running: Loop, config: Rlcr, plan: Path | None, held: str) -> None:
+async def _set_up(
+    running: Loop, config: Rlcr, plan: PurePosixPath | None, held: str
+) -> None:
+    env = running.env
     lessons = running.root / running.state.bitlesson_file
-    if not lessons.exists():
-        lessons.parent.mkdir(parents=True, exist_ok=True)
-        lessons.write_text(prompts.BITLESSON, encoding="utf-8")
+    if await read(env, lessons) is None:
+        await write(env, lessons, prompts.BITLESSON)
     goal = _section(held, "goal", "objective", "overview")
     criteria = _section(held, "acceptance", "criteria", "requirements")
     if config.skip_impl and plan is not None:
@@ -1277,21 +1272,20 @@ def _set_up(running: Loop, config: Rlcr, plan: Path | None, held: str) -> None:
             AC_SECTION=criteria
             or "[To be defined by the builder in Round 0 based on the plan]",
         )
-    running.tracker.write_text(tracker, encoding="utf-8")
-    running.summary.write_text(
-        render(prompts.SUMMARY_TEMPLATE, ROUND=0), encoding="utf-8"
-    )
+    await write(env, running.tracker, tracker)
+    await write(env, running.summary, render(prompts.SUMMARY_TEMPLATE, ROUND=0))
     if config.skip_impl:
-        running.contract.write_text(
+        await write(
+            env,
+            running.contract,
             render(
                 prompts.ROUND_CONTRACT_SKIP_IMPL_ANCHORED,
                 PLAN_FILE=running.state.plan_file,
             )
             if plan is not None
             else prompts.ROUND_CONTRACT_SKIP_IMPL,
-            encoding="utf-8",
         )
-    running.state_file.write_text(running.state.written(), encoding="utf-8")
+    await write(env, running.state_file, running.state.written())
 
 
 def _round_zero(running: Loop, config: Rlcr, held: str) -> str:
@@ -1333,64 +1327,123 @@ def _round_zero(running: Loop, config: Rlcr, held: str) -> str:
     return told
 
 
-def _last(root: Path) -> Path:
-    written = [one for one in (root / IDEAS).glob("*.md") if one.is_file()]
-    if not written:
-        raise ValueError(
-            f"no draft to plan from under {IDEAS}: run gen-idea first, or set input to a "
-            "draft you already have"
-        )
-    return max(written, key=lambda one: one.stat().st_mtime)
-
-
-def _under(root: Path, said: str) -> Path:
-    where = Path(said)
-    return where if where.is_absolute() else root / where
-
-
-@flow(name="gen-idea", about="Opens a loose idea into a repo-grounded draft.")
-def gen_idea(agents: Drafting, task: str, config: Idea | None = None) -> None:
+@flow(
+    agents=Drafting,
+    envs=Where,
+    params=Idea,
+    name="gen-idea",
+    description="Opens a loose idea into a repo-grounded draft.",
+)
+async def gen_idea(
+    task: str,
+    *,
+    agents: Drafting,
+    envs: Where,
+    params: Idea,
+    ctx: FlowContext,  # noqa: ARG001
+) -> str:
     if not task.strip():
         raise ValueError("gen-idea opens an idea, and this run was given none")
-    _idea(agents.drafter.new(), task, config or Idea(), Path.cwd())
+    return str(await _idea(agents["drafter"], envs["workspace"], task, params))
 
 
 @flow(
+    agents=Planning,
+    envs=Where,
+    params=Plan,
     name="gen-plan",
-    about="Turns a draft into a plan the writing and the reading side have converged on.",
+    description="Turns a draft into a plan the writing and the reading side have converged on.",
 )
-def gen_plan(agents: Planning, task: str, config: Plan | None = None) -> None:
-    setting = config or Plan()
-    root = Path.cwd()
-    draft = _under(root, setting.input) if setting.input else _last(root)
-    _plan(agents, agents.planner.new(), task, setting, root, draft)
+async def gen_plan(
+    task: str,
+    *,
+    agents: Planning,
+    envs: Where,
+    params: Plan,
+    ctx: FlowContext,  # noqa: ARG001
+) -> str:
+    env = envs["workspace"]
+    draft = _under(env.workdir, params.input) if params.input else await _last(env)
+    return str(await _plan(_Turns(agents, env, params), task, draft))
 
 
 @flow(
+    agents=Building,
+    envs=Where,
+    params=Rlcr,
     name="rlcr",
-    about="Builds the plan under review until nothing is left to say.",
+    description="Builds the plan under review until nothing is left to say.",
     resumable=True,
 )
-def rlcr(
-    agents: Building,
+async def rlcr(
     task: str,  # noqa: ARG001
-    config: Rlcr | None = None,
-    state: dict[str, Any] | None = None,
-) -> None:
-    setting = config or Rlcr()
-    root = Path.cwd()
+    *,
+    agents: Building,
+    envs: Where,
+    params: Rlcr,
+    ctx: FlowContext,
+) -> str:
+    env = envs["workspace"]
+    root = env.workdir
     plan = (
-        _under(root, setting.plan_file)
-        if setting.plan_file
+        _under(root, params.plan_file)
+        if params.plan_file
         else None
-        if setting.skip_impl
+        if params.skip_impl
         else _under(root, PLAN)
     )
-    _rlcr(
-        agents,
-        agents.builder.new(),
-        setting,
-        root,
-        plan,
-        state if state is not None else {},
+    if await _head(env) == "":
+        raise ValueError(
+            "rlcr runs in a git repository: every review reads the work since the commit "
+            "the plan was fixed in"
+        )
+    if (
+        params.agent_teams
+        and os.environ.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") != "1"
+    ):
+        raise ValueError(
+            "agent_teams requires the CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS environment "
+            "variable to be set:\n\n  export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+        )
+    if params.push_every_round and not (await git(env, "remote"))[1]:
+        raise ValueError(
+            "push_every_round needs a remote to push to, and this repository has none"
+        )
+    carrying = await _again(agents["reviewer"], env, params, plan, ctx.state)
+    running, told = (
+        carrying
+        if carrying is not None
+        else await _fresh(agents, env, params, plan, ctx.state)
     )
+    builder = agents["builder"]
+    guard = guards.Guard(running)
+    builder.on_permission_request(guard)
+    builder.on_pre_tool_use(guard.watching)
+    builder.on_user_prompt_submit(guards.Prompted(running))
+    session = await builder.spawn(env=env)
+    asking: str | None = told
+    while asking is not None:
+        await _built(builder, session, asking)
+        asking = running.continuing = await running.stopped()
+    return running.over
+
+
+__all__ = [
+    "Builder",
+    "Building",
+    "Choice",
+    "Compliance",
+    "Convergence",
+    "Drafting",
+    "Here",
+    "Idea",
+    "Plan",
+    "Planning",
+    "Quiz",
+    "Relevance",
+    "Rlcr",
+    "Where",
+    "gen_idea",
+    "gen_plan",
+    "rlcr",
+]

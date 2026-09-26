@@ -1,84 +1,129 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
-import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from hmz.flows import Stopped
-
-from .core.utils import close_safely
+from .lanes.runtime import STOPPING
 from .lanes.scheduler import LaneScheduler
 from .orchestration.state import WorkspaceStartupCancelled
 
 
 class ParallelRuntime(LaneScheduler):
-    def _close_sessions(self) -> None:
-        for lane in self.lanes.values():
-            close_safely(lane.session)
-
-    def _control_cycle(self) -> None:
+    async def _control_cycle(self) -> None:
         pass
 
-    def _record_exit(self, status: str) -> None:
-        self._close_sessions()
-        self.control["status"] = status
-        self._persist()
+    def _running(self) -> list[asyncio.Task[Any]]:
+        return [lane.task for lane in self.lanes.values() if lane.task is not None]
 
-    def run(self) -> None:
+    async def _collect_lanes(self) -> BaseException | None:
+        """Collects every landed turn, each lane whatever became of the others.
+
+        Returns:
+          The first budget or cancellation a turn raised, or None.
+
+        Raises:
+          Exception: The first error recording a turn raised, once every lane is collected.
+        """
+        stopping: BaseException | None = None
+        failed: Exception | None = None
+        for lane in self.lanes.values():
+            try:
+                await self._collect_lane(lane)
+            except STOPPING as why:
+                stopping = stopping or why
+            except Exception as why:  # noqa: BLE001
+                failed = failed or why
+        if failed is not None:
+            raise failed
+        return stopping
+
+    async def _finish_turns(self) -> None:
+        """Lets the turns under way land and records them, as a spent budget allows."""
+        while running := self._running():
+            await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+            await self._collect_lanes()
+
+    async def _stop_turns(self) -> None:
+        tasks = self._running()
+        for lane in self.lanes.values():
+            lane.task = None
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _record_exit(self, status: str) -> None:
+        with contextlib.suppress(Exception):
+            await self._collect_lanes()
+        await self._stop_turns()
+        self.control["status"] = status
+        with contextlib.suppress(Exception):
+            await self._persist()
+
+    async def run(self) -> None:
         prepared = False
         try:
-            lock = self.prepare()
+            await self.prepare()
             prepared = True
             print(
                 f"parallel_flame_chase:{self._mode} · run {self.control['run_id']} · "
                 f"state {self.paths.root}"
             )
-            with lock:
-                while True:
-                    for lane in self.lanes.values():
-                        self._collect_lane(lane)
-                    self._control_cycle()
-                    if (
-                        self.max_turns is not None
-                        and self.completed_turns >= self.max_turns
-                    ):
-                        self.control["status"] = "test-complete"
-                        self._persist()
-                        return
-                    for lane in self.lanes.values():
-                        self._schedule_lane(lane)
-                    self.sleeper(float(getattr(self.config, "rest_seconds", 1.0)))
+            while True:
+                stopping = await self._collect_lanes()
+                if stopping is not None:
+                    await self._finish_turns()
+                    raise stopping
+                await self._control_cycle()
+                if (
+                    self.max_turns is not None
+                    and self.completed_turns >= self.max_turns
+                ):
+                    self.control["status"] = "test-complete"
+                    await self._persist()
+                    return
+                for lane in self.lanes.values():
+                    await self._schedule_lane(lane)
+                await self.sleeper(self.params.rest_seconds)
         except WorkspaceStartupCancelled:
             return
-        except (Stopped, KeyboardInterrupt):
+        except (*STOPPING, asyncio.CancelledError, KeyboardInterrupt):
             if prepared:
-                self._record_exit("stopped")
+                await self._record_exit("stopped")
             raise
         except BaseException:
             if prepared:
-                self._record_exit("failed")
+                await self._record_exit("failed")
             raise
         finally:
-            self._close_sessions()
-            self.executor.shutdown(wait=False, cancel_futures=True)
+            await self._stop_turns()
+            await self.release()
 
 
-def execute(
+async def execute(
     agents: Any,
+    envs: Any,
     task: str,
-    config: Any,
-    state: dict[str, Any] | None,
+    params: Any,
+    ctx: Any,
     *,
+    planner: Any,
+    lane_turn: Any,
     _clock: Callable[[], dt.datetime] | None = None,
-    _sleep: Callable[[float], None] = time.sleep,
+    _sleep: Callable[[float], Awaitable[object]] | None = None,
     _max_turns: int | None = None,
 ) -> None:
-    ParallelRuntime(
+    await ParallelRuntime(
         agents,
+        envs,
         task,
-        config,
-        state,
+        params,
+        ctx.state,
+        planner=planner,
+        lane_turn=lane_turn,
         clock=_clock,
         sleeper=_sleep,
         max_turns=_max_turns,

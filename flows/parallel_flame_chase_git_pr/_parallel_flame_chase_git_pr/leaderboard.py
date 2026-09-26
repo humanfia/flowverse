@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from typing import cast
+import json
+from typing import Any, cast
 
-from ..core.models import LANES, CandidateSubmission
-from ..core.utils import json_copy
+from .models import LANES, CandidateSubmission
 
 LEADERBOARD_VERSION = 1
+
+
+def json_copy(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
 def empty_leaderboard(run_id: str) -> dict[str, object]:
@@ -159,6 +163,7 @@ def with_submission(
 __all__ = [
     "LEADERBOARD_VERSION",
     "empty_leaderboard",
+    "json_copy",
     "validate_leaderboard",
     "with_submission",
 ]

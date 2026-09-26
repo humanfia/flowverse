@@ -3,26 +3,85 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
-from typing import Annotated, Any, NamedTuple
+from typing import Any, Literal, NotRequired
 
-from _recursive_lean.runtime import Runtime
-from hmz.flows import Agent, AgentDefaults, Moment, flow, load
-from pydantic import BaseModel, Field, field_validator, model_validator
+from _recursive_lean.runtime import Runtime, take_turn
+from hmz.flows import (
+    Agent,
+    AgentCollection,
+    BashEnvMixin,
+    EnvCollection,
+    FilesEnvMixin,
+    FlowContext,
+    FlowParams,
+    GitWorktreeEnvMixin,
+    LocalEnv,
+    Permission,
+    PermissionKind,
+    PermissionRequestHookAgentMixin,
+    ScratchDirEnvMixin,
+    flow,
+    load,
+)
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 MIN_RECURSIVE_NODES = 3
 
+RLCR = "humanize1:rlcr"
 
-class Agents(NamedTuple):
-    worker: Annotated[
-        Agent, Moment.PERMISSION_REQUEST, AgentDefaults(permission="auto")
-    ]
-    reviewer: Annotated[Agent, AgentDefaults(permission="auto")]
+# The flow's own sessions rerun the comparator, whose Lean builds write through the linked
+# `.lake/packages`, and commit repairs in linked worktrees whose Git metadata is the primary
+# checkout's; both roles may read the internet. Holding this much also covers what the
+# humanize1 roles they are handed to ask, which run under their own declarations.
+ROLE_PERMISSION = Permission(
+    local=PermissionKind.ALL,
+    user=PermissionKind.ALL,
+    system=PermissionKind.READ,
+    online=PermissionKind.ALL,
+)
 
 
-class Config(BaseModel):
-    model_config = {"extra": "forbid", "frozen": True}
+class Worker(Agent, PermissionRequestHookAgentMixin):
+    """Plans, proves, formalizes and repairs; RLCR's builder, whose guards hook permission."""
+
+    _permission = ROLE_PERMISSION
+    _skills = ("recursive-lean-proof",)
+
+
+class Reviewer(Agent):
+    """Audits every proof, decomposition and Lean candidate, and reruns the comparator."""
+
+    _permission = ROLE_PERMISSION
+    _skills = ("recursive-lean-proof",)
+
+
+class Workspace(
+    LocalEnv,
+    BashEnvMixin,
+    FilesEnvMixin,
+    GitWorktreeEnvMixin,
+    ScratchDirEnvMixin,
+):
+    """The Lean repository: commands, files, node worktrees, and a scratch directory for them."""
+
+
+class Agents(AgentCollection):
+    worker: Worker
+    reviewer: Reviewer
+
+
+class Envs(EnvCollection):
+    workspace: Workspace
+
+
+class Turning(AgentCollection):
+    worker: NotRequired[Worker]
+    reviewer: NotRequired[Reviewer]
+
+
+class Config(FlowParams):
+    model_config = ConfigDict(frozen=True)
 
     max_depth: int = Field(
         default=2,
@@ -41,7 +100,7 @@ class Config(BaseModel):
         ge=1,
         le=200,
         description=(
-            "global worker-pool size for every dependency-ready node in the DAG"
+            "worker-pool size for the dependency-ready nodes of one DAG frontier"
         ),
     )
     max_nodes: int = Field(
@@ -155,8 +214,8 @@ class Config(BaseModel):
         return self
 
 
-class WorktreeRlcrConfig(BaseModel):
-    model_config = {"extra": "forbid", "frozen": True}
+class WorktreeRlcrConfig(FlowParams):
+    model_config = ConfigDict(frozen=True)
 
     plan_file: str = Field(description="absolute immutable implementation plan path")
     max: int = Field(
@@ -180,6 +239,16 @@ class WorktreeRlcrConfig(BaseModel):
     claude_answer_codex: bool = True
 
 
+class Turn(FlowParams):
+    role: Literal["worker", "reviewer"] = Field(
+        description="which agent takes the turn"
+    )
+    schema_name: str = Field(
+        default="",
+        description="the model of `_recursive_lean.models` it answers as; blank for text",
+    )
+
+
 def _nested_rlcr_config(config: WorktreeRlcrConfig) -> dict[str, Any]:
     forwarded = config.model_dump()
     forwarded["base_branch"] = ""
@@ -188,61 +257,99 @@ def _nested_rlcr_config(config: WorktreeRlcrConfig) -> dict[str, Any]:
 
 
 @flow(
+    agents=Agents,
+    envs=Envs,
+    params=Config,
     resumable=True,
-    about="Recursive Lean proving with RLCR plans, comparator gates, a live DAG, and a wiki",
+    description=(
+        "Recursive Lean proving with RLCR plans, comparator gates, a live DAG, and a wiki"
+    ),
 )
-def run(
-    agents: Agents,
+async def recursive_lean_prover(
     task: str,
-    config: Config | None = None,
-    state: dict[str, Any] | None = None,
+    *,
+    agents: Agents,
+    envs: Envs,
+    params: Config,
+    ctx: FlowContext,
 ) -> None:
-    Runtime(agents, task, config or Config(), state).execute()
+    await Runtime(agents, envs, task, params, ctx.state, ctx).execute()
 
 
 @flow(
+    agents=Agents,
+    envs=Envs,
+    params=WorktreeRlcrConfig,
     name="worktree-rlcr",
+    hidden=True,
     resumable=True,
-    selectable=False,
-    about="Run official RLCR in one node worktree while inheriting recursive Lean rules",
+    description="Run official RLCR in one node worktree",
 )
-def worktree_rlcr(
-    agents: Agents,
+async def worktree_rlcr(
     task: str,
-    config: WorktreeRlcrConfig,
-    state: dict[str, Any] | None = None,
-) -> None:
-    worktree = Path.cwd()
+    *,
+    agents: Agents,
+    envs: Envs,
+    params: WorktreeRlcrConfig,
+    ctx: FlowContext,
+) -> str:
+    workspace = envs["workspace"]
+    worktree = Path(str(workspace.workdir))
     manifest = worktree / "lake-manifest.json"
-    ignored = subprocess.run(
-        ["git", "check-ignore", "--quiet", "lake-manifest.json"],
-        capture_output=True,
-        text=True,
-        check=False,
+    ignored, _, _ = await workspace.exec(
+        ["git", "check-ignore", "--quiet", "lake-manifest.json"]
     )
-    common = subprocess.run(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        capture_output=True,
-        text=True,
-        check=False,
+    common, found, _ = await workspace.exec(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]
     )
-    if (
-        not manifest.exists()
-        and ignored.returncode == 0
-        and common.returncode == 0
-        and common.stdout.strip()
-    ):
-        source = Path(common.stdout.strip()).parent / "lake-manifest.json"
+    if not manifest.exists() and ignored == 0 and common == 0 and found.strip():
+        source = Path(found.strip()).parent / "lake-manifest.json"
         if source.is_file() and source.resolve() != manifest.resolve():
             shutil.copy2(source, manifest)
-    forwarded = _nested_rlcr_config(config)
-    load("official/humanize1:rlcr", inherit_skills=True)(
-        agents,
+    rlcr = load(RLCR)
+    return await rlcr(
         task,
-        forwarded,
+        agents={"builder": agents["worker"], "reviewer": agents["reviewer"]},
+        envs={"workspace": workspace},
+        params=rlcr.expected_params.model_validate(_nested_rlcr_config(params)),
     )
-    if state is not None:
-        state.clear()
 
 
-__all__ = ["Agents", "Config", "WorktreeRlcrConfig", "run", "worktree_rlcr"]
+@flow(
+    agents=Turning,
+    envs=Envs,
+    params=Turn,
+    name="turn",
+    hidden=True,
+    description="One turn of one agent in a session of its own, closed as it returns",
+)
+async def turn(
+    task: str,
+    *,
+    agents: Turning,
+    envs: Envs,
+    params: Turn,
+    ctx: FlowContext,
+) -> Any:
+    agent = agents.get(params.role)
+    if agent is None:
+        raise ValueError(
+            f"a {params.role} turn was asked for, and no {params.role} given"
+        )
+    return await take_turn(agent, task, params.schema_name, envs["workspace"])
+
+
+__all__ = [
+    "Agents",
+    "Config",
+    "Envs",
+    "Reviewer",
+    "Turn",
+    "Turning",
+    "Worker",
+    "Workspace",
+    "WorktreeRlcrConfig",
+    "recursive_lean_prover",
+    "turn",
+    "worktree_rlcr",
+]

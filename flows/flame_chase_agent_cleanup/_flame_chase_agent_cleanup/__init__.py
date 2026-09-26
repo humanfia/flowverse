@@ -1,5 +1,6 @@
 from .cleaning import Cleaned
-from .config import Config, required
+from .config import Config
 from .loop import drive
+from .roles import Worker, Workspace
 
-__all__ = ["Cleaned", "Config", "drive", "required"]
+__all__ = ["Cleaned", "Config", "Worker", "Workspace", "drive"]

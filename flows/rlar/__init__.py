@@ -1,15 +1,43 @@
-"""RLAR (flowbench: rlar) -- an actor works in one session, and a fresh reviewer reads its work."""
+"""RLAR (flowbench: rlar) -- an actor works in one session, and a fresh reviewer reads its work.
 
-import time
-from typing import Any, NamedTuple
+    hmz exec -f rlar -a actor=claude/claude-opus-5:high -a reviewer=codex/gpt-5.6-sol:high \
+        -b cost=20 "the task"
 
-from hmz.flows import Agent, flow
+It ends when the reviewer says the task is done, or when the budget is spent; `--resume`
+hands a fresh actor the last review to pick up from. A turn that fails, or a review out of
+shape, is taken again next round; three failures in a row end it with the last one.
+"""
+
+import asyncio
+
+from hmz.flows import (
+    Agent,
+    AgentCollection,
+    EnvCollection,
+    FlowContext,
+    FlowParams,
+    FlowState,
+    HarnessError,
+    LocalEnv,
+    flow,
+)
 from pydantic import BaseModel, Field
 
+FAILED = 3
+PAUSE = 5.0
 
-class Agents(NamedTuple):
+
+class Reviewer(Agent):
+    _skills = ("review-notes",)
+
+
+class Agents(AgentCollection):
     actor: Agent
-    reviewer: Agent
+    reviewer: Reviewer
+
+
+class Envs(EnvCollection):
+    workspace: LocalEnv
 
 
 class Review(BaseModel):
@@ -57,20 +85,52 @@ Review of the last round:
 {notes}"""
 
 
-@flow(resumable=True)
-def run(agents: Agents, task: str, state: dict[str, Any]) -> None:
-    working = agents.actor.new()
-    notes = state.get("notes") or ""
+@flow(agents=Agents, envs=Envs, params=FlowParams, resumable=True)
+async def rlar(
+    task: str, *, agents: Agents, envs: Envs, params: FlowParams, ctx: FlowContext
+) -> str:
+    """An actor works in one session until a fresh reviewer says the task is done."""
+    state = ctx.state
+    assert state is not None
+    actor, reviewer = agents["actor"], agents["reviewer"]
+    workspace = envs["workspace"]
+    working = await actor.spawn(env=workspace)
+    notes: str = state["notes"] if "notes" in state else ""
     prompt = PICKED_UP.format(task=task, notes=notes) if notes else task
+    failed = 0
     while True:
-        worked = working(prompt, suppress=True)
+        try:
+            worked = await actor.run(prompt, session=working)
+        except HarnessError:
+            failed += 1
+            if failed >= FAILED:
+                raise
+            worked = ""
         if worked:
-            review = agents.reviewer(REVIEW_PROMPT + task, suppress=True, schema=Review)
+            reading = await reviewer.spawn(env=workspace)
+            try:
+                review = await reviewer.run(
+                    REVIEW_PROMPT + task, session=reading, output_schema=Review
+                )
+            except HarnessError:
+                failed += 1
+                if failed >= FAILED:
+                    raise
+                review = None
+            else:
+                failed = 0
             if review is not None and review.done:
                 print(review.notes)
-                state.clear()
-                return
+                _forget(state)
+                return review.notes
             if review is not None and review.notes:
                 prompt = notes = review.notes
-            state.update(rounds=state.get("rounds", 0) + 1, notes=notes)
-        time.sleep(5)
+            state["rounds"] = (state["rounds"] if "rounds" in state else 0) + 1
+            state["notes"] = notes
+        await asyncio.sleep(PAUSE)
+
+
+def _forget(state: FlowState) -> None:
+    for key in ("notes", "rounds"):
+        if key in state:
+            del state[key]

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import time
 from collections import Counter
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from .config import Config
-from .guard import guarded, limits
+from .guard import guarded, limits, rest
 from .tree import (
     MIB,
     Measure,
@@ -87,8 +86,8 @@ def places(strays: list[str]) -> str:
         f"{place} ({count})" if place.endswith("/") else place
         for place, count in counted.most_common(PLACES_SHOWN)
     ]
-    rest = len(counted) - len(shown)
-    return ", ".join(shown) + (f", and {rest} more places" if rest > 0 else "")
+    more = len(counted) - len(shown)
+    return ", ".join(shown) + (f", and {more} more places" if more > 0 else "")
 
 
 def overages(found: Measure, held: Config) -> list[str]:
@@ -114,29 +113,33 @@ def repair_prompt(overs: list[str]) -> str:
     )
 
 
-def _measure(
-    held: Config, root: Path, saved: Path, manifest: set[str], epoch: int
+async def _measure(
+    env: Any, held: Config, saved: PurePosixPath, manifest: set[str], epoch: int
 ) -> tuple[Measure, list[str]]:
-    if touched := freeze_ignores(root, saved):
+    if touched := await freeze_ignores(env, saved):
         print(
             f"epoch {epoch}: put back the .gitignore files the cleaner changed: {touched}"
         )
-    found = measure(root, manifest, held.work_paths)
+    found = await measure(env, manifest, held.work_paths)
     return found, overages(found, held)
 
 
-def _clean(
+async def _clean(
     cleaner: Any,
     held: Config,
-    root: Path,
-    saved: Path,
+    env: Any,
+    saved: PurePosixPath,
     manifest: set[str],
     epoch: int,
 ) -> None:
-    session = cleaner.new(cwd=str(root))
-    with guarded(session, **limits(held, f"epoch {epoch} cleaner")) as watch:
-        report = session(cleaning_prompt(held), suppress=True, schema=Cleaned)
-    ended = watch.timed_out
+    session = await cleaner.spawn(env=env)
+    report, ended = await guarded(
+        cleaner,
+        session,
+        cleaning_prompt(held),
+        output_schema=Cleaned,
+        **limits(held, f"epoch {epoch} cleaner"),
+    )
     if report is None:
         print(f"epoch {epoch}: the cleaner answered nothing usable")
     else:
@@ -156,33 +159,35 @@ def _clean(
         )
         print(f"epoch {epoch}: cleaner says its check {said_check}")
 
-    found, overs = _measure(held, root, saved, manifest, epoch)
+    found, overs = await _measure(env, held, saved, manifest, epoch)
     print(f"epoch {epoch}: measured -- " + ("; ".join(overs) or "within every cap"))
     used = 0
     while overs and used < held.repairs and not ended:
         print(f"epoch {epoch}: repair {used + 1} of {held.repairs}")
         landed = False
         for _ in range(DELIVERY_TRIES):
-            label = f"epoch {epoch} cleaner repair {used + 1}"
-            with guarded(session, **limits(held, label)) as watch:
-                said = session(repair_prompt(overs), suppress=True)
-            ended = watch.timed_out
+            said, ended = await guarded(
+                cleaner,
+                session,
+                repair_prompt(overs),
+                **limits(held, f"epoch {epoch} cleaner repair {used + 1}"),
+            )
             if said or ended:
                 landed = True
                 break
             print(f"epoch {epoch}: a repair turn never landed; resting, then retrying")
-            time.sleep(5)
+            await rest()
         if not landed:
             print(
                 f"epoch {epoch}: repair delivery gave out; falling to the mechanical cut"
             )
             break
         used += 1
-        found, overs = _measure(held, root, saved, manifest, epoch)
+        found, overs = await _measure(env, held, saved, manifest, epoch)
     if overs:
         print(f"epoch {epoch}: the flow cuts mechanically")
-        delete_strays(root, found.strays)
-        truncate_notes(root, held.next_lines)
+        await delete_strays(env, found.strays)
+        await truncate_notes(env, held.next_lines)
         if found.comment_count > held.comment_lines:
             print(
                 f"epoch {epoch}: comment lines still {found.comment_count} against"
@@ -193,63 +198,65 @@ def _clean(
         print(f"epoch {epoch}: within every cap after {used} repair(s)")
 
 
-def clean_epoch(
+async def clean_epoch(
     cleaner: Any,
     held: Config,
-    root: Path,
+    env: Any,
     manifest: set[str],
-    store: Path,
+    store: PurePosixPath,
     epoch: int,
 ) -> None:
     limit = int(held.max_tracked_file_mb * MIB)
     print(f"epoch {epoch}: saving the tree aside as the revert point")
-    saved = save_tree(root, store)
+    saved = await save_tree(env, store)
     try:
-        _clean(cleaner, held, root, saved, manifest, epoch)
+        await _clean(cleaner, held, env, saved, manifest, epoch)
         title = f"epoch {epoch}: distilled tree"
         if held.check_command:
             log = store / "checks" / f"epoch-{epoch:03d}.log"
-            if run_check(root, held.check_command, log):
+            if await run_check(env, held.check_command, log):
                 print(f"epoch {epoch}: the check passed; the cleaning stands")
             else:
-                restore_tree(root, saved)
+                await restore_tree(env, saved)
                 title = (
                     f"epoch {epoch}: the tree the coding turns left; the check failed,"
                     " so the cleaning was reverted"
                 )
                 print(
                     f"epoch {epoch}: the check failed -- this epoch's cleaning was"
-                    f" reverted; its output is in {log}:\n{tail(log)}"
+                    f" reverted; its output is in {log}:\n{await tail(env, log)}"
                 )
-        archived = archive_history(saved, store, epoch, limit)
-        erased = bool(archived) and erase_history(root, store, epoch, limit, title)
+        archived = await archive_history(env, saved, store, epoch, limit)
+        erased = bool(archived) and await erase_history(env, store, epoch, limit, title)
         if not archived:
             print(
                 f"epoch {epoch}: the history could not be archived, so it is kept as it"
                 " is this epoch"
             )
         elif not erased:
-            restore_tree(root, saved)
+            await restore_tree(env, saved)
             print(
                 f"epoch {epoch}: a git step failed; the tree, old history included, was"
                 " restored from the revert point"
             )
     except BaseException:
         try:
-            restore_tree(root, saved)
+            await restore_tree(env, saved)
         except BaseException:
             print(
                 f"epoch {epoch}: interrupted, and putting the tree back broke; the"
                 f" revert point survives at {saved}"
             )
             raise
-        drop_saved(saved)
+        await drop_saved(env, saved)
         print(f"epoch {epoch}: interrupted; the tree was put back as it was before it")
         raise
-    if erased:
-        link_history(store, epoch)
-        print(
-            f"epoch {epoch}: one commit stands; the history it replaced is {archived}"
-            f" in {history_repo(store)}"
-        )
-    drop_saved(saved)
+    try:
+        if erased:
+            await link_history(env, store, epoch)
+            print(
+                f"epoch {epoch}: one commit stands; the history it replaced is"
+                f" {archived} in {history_repo(store)}"
+            )
+    finally:
+        await drop_saved(env, saved)
