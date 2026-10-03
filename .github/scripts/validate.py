@@ -14,12 +14,13 @@
     uv run .github/scripts/validate.py --base origin/main --network  # + changed ones vs GitHub
 
 Offline checks run on every manifest: the schema, the directory names, SemVer, reserved names,
-licenses and dependencies. With --base, every version directory that exists at that revision
-must be left exactly as it was, unless --allow-modify is given or, in GitHub Actions, the pull
-request carries the `allow-modify` label; and only the manifests added or changed since --base
-are "in scope". With --network, the in-scope manifests (all of them without --base) are checked
-against the GitHub API: the repository is public, `ref` resolves to `commit`, and `subdir` holds
-the flow at that commit. GITHUB_TOKEN or GH_TOKEN is sent when set; it is only used to read.
+licenses, and dependencies, down to whether hmz could install each release. With --base, every
+version directory that exists at that revision must be left exactly as it was, unless
+--allow-modify is given or, in GitHub Actions, a maintainer labelled the pull request
+`allow-modify`; and only the manifests added or changed since --base are "in scope". With
+--network, the in-scope manifests (all of them without --base) are checked against the GitHub
+API: the repository is public, `ref` resolves to `commit` and holds it, and `subdir` holds the
+flow at that commit. GITHUB_TOKEN or GH_TOKEN is sent when set; it is only used to read.
 
 In GitHub Actions the in-scope manifests are written to $GITHUB_OUTPUT as `manifests`, a JSON
 list of {path, name, version, repo, commit, subdir} objects.
@@ -53,9 +54,9 @@ FLOWS = "flows"
 MANIFEST = "flow.yaml"
 SCHEMA = ROOT / "schema" / "flow.schema.json"
 NAME = re.compile(r"[a-z][a-z0-9_]*")
-#: What no value may hold: the schema's patterns, run by Python's `re`, let a trailing
-#: newline through.
-BREAK = re.compile(r"[\x00-\x1f\x7f]")
+#: What no value may hold: control characters and line separators. The schema's patterns,
+#: run by Python's `re`, let a trailing newline through.
+BREAK = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
 #: The flows built into humanize. An index flow of one of these names would shadow a builtin.
 RESERVED = frozenset(
     {
@@ -70,6 +71,12 @@ RESERVED = frozenset(
 )
 ALLOW_MODIFY = "allow-modify"
 API = "https://api.github.com"
+#: What git says `before` is for a push that created the branch.
+NO_COMMIT = "0" * 40
+#: Errors asking GitHub can end in, once retried.
+UNREACHABLE = (OSError, ValueError, http.client.HTTPException)
+
+type Release = tuple[str, str]  # (name, version)
 
 
 class Report:
@@ -261,62 +268,129 @@ def check_manifest(
     return manifest if ok else None
 
 
-def check_dependencies(
+def read(
     report: Report,
-    index: dict[str, dict[str, Path]],
-    manifests: dict[Path, dict[str, Any]],
-) -> None:
-    """Each dependency is a flow here with a version in range, and no flows form a cycle.
-
-    A cycle is one between flows, whatever their versions, which is what hmz refuses to
-    install: it follows a flow's dependencies and stops at a flow it is already inside.
-    """
-    versions = {
-        flow: {v: semver.Version.parse(v) for v in releases}
+) -> tuple[dict[str, dict[str, Path]], dict[Path, dict[str, Any]]]:
+    """Every manifest's place, and every manifest that passes the offline checks."""
+    schema = jsonschema.Draft202012Validator(
+        json.loads(SCHEMA.read_text(encoding="utf-8"))
+    )
+    licensing = get_spdx_licensing()
+    index = layout(report)
+    manifests = {
+        path: manifest
         for flow, releases in index.items()
+        for version, path in releases.items()
+        if (manifest := check_manifest(report, path, flow, version, schema, licensing))
     }
+    return index, manifests
+
+
+def clauses(ranged: str) -> list[str]:
+    """A range's clauses, read as hmz reads them: whitespace dropped, all of them to hold.
+
+    Raises:
+      ValueError: If a clause is empty, or not a comparison with a full version.
+    """
+    said = [re.sub(r"\s+", "", clause) for clause in ranged.split(",")]
+    for clause in said:
+        if not clause:
+            raise ValueError("a clause is empty")
+        semver.Version(0).match(clause)  # raises for what python-semver cannot compare
+    return said
+
+
+def newest(versions: list[semver.Version], ranged: str) -> semver.Version | None:
+    """The version hmz picks in a range: the newest that is not a prerelease, else the newest."""
+    fits = sorted(
+        (one for one in versions if all(map(one.match, clauses(ranged)))), reverse=True
+    )
+    return next((one for one in fits if not one.prerelease), fits[0] if fits else None)
+
+
+def plan(releases: dict[Release, dict[str, Any]], asked: Release) -> list[Release]:
+    """What hmz installs for one release where nothing is installed: what it needs, then it.
+
+    The same walk as hmz's installer: each dependency at the newest version in its range,
+    once per flow, refusing a flow that needs itself or two ranges of one flow that no single
+    version satisfies.
+
+    Raises:
+      ValueError: Saying why it cannot be installed.
+    """
+    versions: dict[str, list[semver.Version]] = {}
+    for name, version in releases:
+        versions.setdefault(name, []).append(semver.Version.parse(version))
+    chosen: dict[str, str] = {}
+    ordered: list[Release] = []
+
+    def visit(one: Release, path: tuple[str, ...]) -> None:
+        name, version = one
+        chosen[name] = version
+        for need, ranged in sorted(releases[one].get("dependencies", {}).items()):
+            if need in (*path, name):
+                raise ValueError(
+                    f"{need} needs itself: {' -> '.join((*path, name, need))}"
+                )
+            if need in chosen:
+                if not all(
+                    map(semver.Version.parse(chosen[need]).match, clauses(ranged))
+                ):
+                    raise ValueError(
+                        f"{name} {version} needs {need} {ranged}, and the rest of the "
+                        f"install needs {need} {chosen[need]}"
+                    )
+                continue
+            picked = newest(versions.get(need, []), ranged)
+            if picked is None:
+                raise ValueError(
+                    f"{name} {version} needs {need} {ranged}; none is listed"
+                )
+            visit((need, str(picked)), (*path, name))
+        ordered.append(one)
+
+    visit(asked, ())
+    return ordered
+
+
+def check_dependencies(report: Report, manifests: dict[Path, dict[str, Any]]) -> None:
+    """Each dependency is a flow here with a version in range, and each release installs.
+
+    Flows may not depend on one another in a cycle, whatever their versions; and each release
+    must be one hmz's installer can install where nothing else is, which is checked with the
+    same walk it takes.
+    """
+    releases = {(m["name"], m["version"]): m for m in manifests.values()}
+    versions: dict[str, list[semver.Version]] = {}
+    for name, version in releases:
+        versions.setdefault(name, []).append(semver.Version.parse(version))
     graph: dict[str, set[str]] = {}
+    sound = True
     for path, manifest in manifests.items():
         node = graph.setdefault(manifest["name"], set())
         for dep, ranged in manifest.get("dependencies", {}).items():
             if dep == manifest["name"]:
-                report.error(rel(path), f"dependencies: {dep} depends on itself")
-                continue
-            if dep in RESERVED:
-                report.error(
-                    rel(path),
-                    f"dependencies: {dep} is built into humanize, so is never listed",
-                )
-                continue
-            if dep not in versions:
-                report.error(
-                    rel(path), f"dependencies: no flow is called {dep!r} in this index"
-                )
-                continue
-            node.add(dep)
-            # Read as hmz reads it: whitespace anywhere in a clause is dropped.
-            clauses = [re.sub(r"\s+", "", clause) for clause in ranged.split(",")]
-            try:
-                if not all(clauses):
-                    raise ValueError("a clause is empty")
-                matching = [
-                    name
-                    for name, v in versions[dep].items()
-                    if all(v.match(clause) for clause in clauses)
-                ]
-            except ValueError as error:
-                report.error(
-                    rel(path),
-                    f"dependencies: {dep}: {ranged!r} is not a range like "
-                    f">=0.1.0,<0.2.0: {error}",
-                )
-                continue
-            if not matching:
-                there = ", ".join(sorted(versions[dep], key=semver.Version.parse))
-                report.error(
-                    rel(path),
-                    f"dependencies: no version of {dep} is {ranged!r}; there are {there}",
-                )
+                problem = f"{dep} depends on itself"
+            elif dep in RESERVED:
+                problem = f"{dep} is built into humanize, so is never listed"
+            elif dep not in versions:
+                problem = f"no flow is called {dep!r} in this index"
+            else:
+                node.add(dep)
+                try:
+                    found = newest(versions[dep], ranged)
+                except ValueError as error:
+                    problem = (
+                        f"{dep}: {ranged!r} is not a range like >=0.1.0,<0.2.0: {error}"
+                    )
+                else:
+                    there = ", ".join(map(str, sorted(versions[dep])))
+                    problem = (
+                        "" if found else f"no {dep} is {ranged!r}; there are {there}"
+                    )
+            if problem:
+                report.error(rel(path), f"dependencies: {problem}")
+                sound = False
     try:
         graphlib.TopologicalSorter(graph).prepare()
     except graphlib.CycleError as error:
@@ -325,6 +399,14 @@ def check_dependencies(
             f"{FLOWS}/{cycle[0]}",
             "dependencies form a cycle: " + " -> ".join(reversed(cycle)),
         )
+        sound = False
+    if not sound:
+        return
+    for path, manifest in manifests.items():
+        try:
+            plan(releases, (manifest["name"], manifest["version"]))
+        except ValueError as error:
+            report.error(rel(path), f"dependencies: hmz could not install it: {error}")
 
 
 def blob(data: bytes) -> str:
@@ -359,9 +441,9 @@ def held_now(directory: str) -> dict[str, str]:
 def github(path: str, accept: str = "application/vnd.github+json") -> Any:
     """GET from the GitHub API: the decoded JSON, or None for what is not there.
 
-    "Not there" is any client error but a rate limit: missing (404), empty (409), blocked
-    (403, 451), or unreadable (422). Rate limits are waited out for up to ten minutes and
-    server errors retried; either one lasting raises `urllib.error.URLError`.
+    "Not there" is missing (404), empty (409), gone (410), unreadable (422) or blocked (451).
+    Rate limits are waited out for up to ten minutes, and server errors and other refusals
+    (403) retried; anything lasting, or a bad token (401), raises `urllib.error.URLError`.
     """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     headers = {"Accept": accept, "X-GitHub-Api-Version": "2022-11-28"}
@@ -369,6 +451,7 @@ def github(path: str, accept: str = "application/vnd.github+json") -> Any:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(f"{API}/{path}", headers=headers)
     for attempt in range(5):
+        wait = 5 * 2**attempt
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 body = response.read()
@@ -376,33 +459,36 @@ def github(path: str, accept: str = "application/vnd.github+json") -> Any:
                 json.loads(body) if accept.endswith("json") else body.decode().strip()
             )
         except urllib.error.HTTPError as error:
-            said = error.headers
-            limited = error.code == 429 or (
-                error.code == 403
-                and ("retry-after" in said or said["x-ratelimit-remaining"] == "0")
-            )
-            if error.code < 500 and not limited:
+            if error.code in (404, 409, 410, 422, 451):
                 return None
-            wait = 5 * 2**attempt
-            if limited:
+            said = error.headers
+            if error.code == 429 or said["x-ratelimit-remaining"] == "0":
                 reset = float(said.get("x-ratelimit-reset") or time.time())
                 wait = float(said.get("retry-after") or reset - time.time()) + 1
-            if attempt == 4 or wait > 600:
+            elif "retry-after" in said:
+                wait = float(said["retry-after"]) + 1
+            if error.code == 401 or attempt == 4 or wait > 600:
                 raise
         except (urllib.error.URLError, http.client.HTTPException, TimeoutError):
             if attempt == 4:
                 raise
-            wait = 5 * 2**attempt
         time.sleep(max(wait, 1))
     raise AssertionError
 
 
-def allowed() -> bool:
-    """Whether this Actions run checks a pull request a maintainer labelled allow-modify.
+def labelled(number: int | str, repository: str) -> bool:
+    """Whether a pull request carries allow-modify now."""
+    labels = github(f"repos/{repository}/issues/{number}/labels?per_page=100") or []
+    return ALLOW_MODIFY in {one["name"] for one in labels}
 
-    The label is read as it is now, not as the event saw it, so that a re-run sees it. It
-    covers the commits there when it was applied: a push takes it off (the labeler workflow
-    does), and a run for a push disregards it, since that run and the labeler race.
+
+def allowed(base: str) -> bool:
+    """Whether a maintainer's allow-modify covers what this GitHub Actions run checks.
+
+    A pull request: only in the run that applying the label starts, so it covers the commits
+    the maintainer saw; a push afterwards starts a run without it (and the labeler takes the
+    label off). The merge queue: the pull request's label as it is now. A push to main: the
+    label of any pull request merged by the commits since `base`.
     """
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     repository = os.environ.get("GITHUB_REPOSITORY")
@@ -410,23 +496,19 @@ def allowed() -> bool:
         return False
     event = json.loads(Path(event_path).read_text(encoding="utf-8"))
     if "pull_request" in event:
-        if event.get("action") in ("synchronize", "reopened"):
-            return False
-        numbers = [event["pull_request"]["number"]]
-    elif "merge_group" in event:
-        numbers = re.findall(r"/pr-(\d+)-", event["merge_group"].get("head_ref", ""))
-    elif event.get("after"):  # a push to main: the pull requests it merged
-        merged = github(f"repos/{repository}/commits/{event['after']}/pulls") or []
-        numbers = [one["number"] for one in merged]
-    else:
-        return False
-    return any(
-        ALLOW_MODIFY
-        in {
-            one["name"] for one in github(f"repos/{repository}/issues/{n}/labels") or []
+        label = (event.get("label") or {}).get("name")
+        return event.get("action") == "labeled" and label == ALLOW_MODIFY
+    if "merge_group" in event:
+        queued = re.findall(r"/pr-(\d+)-", event["merge_group"].get("head_ref", ""))
+        return any(labelled(number, repository) for number in queued)
+    if event.get("after"):
+        merged = {
+            pull["number"]
+            for sha in git("rev-list", f"{base}..HEAD").split()
+            for pull in github(f"repos/{repository}/commits/{sha}/pulls") or []
         }
-        for n in numbers
-    )
+        return any(labelled(number, repository) for number in merged)
+    return False
 
 
 def check_published(report: Report, base: str, allow: bool) -> set[str]:
@@ -438,7 +520,12 @@ def check_published(report: Report, base: str, allow: bool) -> set[str]:
         if held_now(directory) != files
     ]
     if touched and not allow:
-        allow = allowed()
+        try:
+            allow = allowed(base)
+        except UNREACHABLE as error:
+            report.warning(
+                FLOWS, f"the {ALLOW_MODIFY} label could not be read: {error}"
+            )
     for directory in touched:
         what = "changed" if (ROOT / directory).exists() else "deleted"
         if allow:
@@ -449,7 +536,8 @@ def check_published(report: Report, base: str, allow: bool) -> set[str]:
             report.error(
                 directory,
                 f"a published version is {what}: a version is never edited, so publish a new "
-                f"one instead (only a maintainer's {ALLOW_MODIFY} label lets this through)",
+                f"one instead (a maintainer applying {ALLOW_MODIFY} after the last push lets "
+                "this through)",
             )
     old = {path: one for files in before.values() for path, one in files.items()}
     return {
@@ -488,6 +576,17 @@ def check_remote(report: Report, path: Path, manifest: dict[str, Any]) -> None:
     if at != commit:
         report.error(where, f"commit: {ref} of {repo} is {at}, not {commit}")
         return
+    if re.fullmatch(r"[0-9a-f]{7,40}", ref) and commit.startswith(ref):
+        # GitHub answers for a commit of any fork of the repository too: one named by itself
+        # has to be shown to be the repository's own.
+        default = found["default_branch"]
+        compared = github(
+            f"repos/{repo}/compare/{urllib.parse.quote(default, safe='')}...{commit}"
+            "?per_page=1"
+        )
+        if (compared or {}).get("status") not in ("behind", "identical"):
+            report.error(where, f"ref: {commit} is not on {repo}'s {default}; tag it")
+            return
     subdir = manifest.get("subdir", "")
     shown = f"{subdir}/" if subdir else "the root"
     contents = f"repos/{repo}/contents" + (
@@ -526,27 +625,21 @@ def main() -> int:
     args = parser.parse_args()
 
     report = Report()
-    schema = jsonschema.Draft202012Validator(
-        json.loads(SCHEMA.read_text(encoding="utf-8"))
-    )
-    licensing = get_spdx_licensing()
-    index = layout(report)
-    manifests = {
-        path: manifest
-        for flow, releases in index.items()
-        for version, path in releases.items()
-        if (manifest := check_manifest(report, path, flow, version, schema, licensing))
-    }
-    check_dependencies(report, index, manifests)
+    index, manifests = read(report)
+    check_dependencies(report, manifests)
 
     in_scope = {rel(path) for path in manifests}
-    if args.base:
+    base = args.base
+    if base == NO_COMMIT:
+        base = None  # a push that created the branch: nothing was published before it
+    elif base:
         try:
-            git("rev-parse", "--verify", "--quiet", f"{args.base}^{{commit}}")
+            git("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
         except subprocess.CalledProcessError:
-            report.error(FLOWS, f"--base {args.base} is not a commit of this clone")
+            report.error(FLOWS, f"--base {base} is not a commit of this clone")
             return 1
-        in_scope &= check_published(report, args.base, args.allow_modify)
+    if base:
+        in_scope &= check_published(report, base, args.allow_modify)
     chosen = [
         (path, manifests[path]) for path in sorted(manifests) if rel(path) in in_scope
     ]
@@ -554,7 +647,7 @@ def main() -> int:
         for path, manifest in chosen:
             try:
                 check_remote(report, path, manifest)
-            except (OSError, ValueError, http.client.HTTPException) as error:
+            except UNREACHABLE as error:
                 report.error(rel(path), f"GitHub could not be asked: {error}")
 
     listed = [
@@ -576,7 +669,7 @@ def main() -> int:
         f"{total} manifest(s) of {len(index)} flow(s); {len(listed)} in scope", end=""
     )
     print(" and checked against GitHub" if args.network else "", end="")
-    print("".join(f"\n  {one['path']}" for one in listed) if args.base else "")
+    print("".join(f"\n  {one['path']}" for one in listed) if base else "")
     if report.errors:
         print(f"{report.errors} error(s)")
         return 1

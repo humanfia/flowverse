@@ -173,12 +173,14 @@ request `new-flow`, `new-version`, `modify` or `infra`.
   its own. hmz tells users who installed an older version that it exists.
 - **A published version is never edited.** CI refuses a change to, or the deletion of, a
   version directory already on `main`, unless a maintainer labels the pull request
-  `allow-modify`. The label covers the commits the maintainer reviewed: a push takes it off,
-  to be applied again once the new commits are reviewed. Correct a mistake by publishing a new
-  version.
+  `allow-modify`. The label covers the commits the maintainer reviewed: applying it starts the
+  run that lets the change through, so it is applied last, and a push takes it off until the
+  new commits are reviewed. Correct a mistake by publishing a new version.
 - **Withdrawing a version** you published, because it is broken or unsafe: open a pull request
   deleting its directory and say why; a maintainer applies `allow-modify`. hmz stops offering
-  it. Copies already installed stay where they are, so publish a fixed version too.
+  it. Copies already installed stay where they are, so publish a fixed version too. Releases of
+  other flows that only that version satisfies could no longer be installed, so CI refuses the
+  withdrawal unless they are withdrawn with it.
 - **Removal by maintainers.** Maintainers remove every version of a flow, without notice,
   when it is malicious or compromised, when its repository disappears or stops being public,
   when a published tag is moved, or when it breaks a license. The name may then be withheld

@@ -40,6 +40,9 @@ jobs:
               "allow-modify": ["b60205", "Maintainers only: lets a published version change"],
             };
             const MANAGED = ["new-flow", "new-version", "modify", "infra"];
+            // SemVer 2.0.0 without build metadata: what a version directory is called.
+            const ID = String.raw`(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)`;
+            const VERSION = new RegExp(String.raw`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-${ID}(\.${ID})*)?$`);
             const { owner, repo } = context.repo;
             const pr = context.payload.pull_request;
 
@@ -66,7 +69,7 @@ jobs:
             for (const file of files) {
               for (const path of [file.filename, file.previous_filename].filter(Boolean)) {
                 const [top, flow, version, ...rest] = path.split("/");
-                if (top !== "flows" || rest.length === 0) {
+                if (top !== "flows" || rest.length === 0 || !VERSION.test(version)) {
                   wanted.add("infra");
                   continue;
                 }
@@ -88,15 +91,23 @@ jobs:
               }
             }
 
-            const current = new Set(pr.labels.map((label) => label.name));
+            const current = new Set(
+              (await github.paginate(github.rest.issues.listLabelsOnIssue, {
+                owner, repo, issue_number: pr.number, per_page: 100,
+              })).map((label) => label.name),
+            );
             const stale = MANAGED.filter((name) => current.has(name) && !wanted.has(name));
             // allow-modify covers the commits a maintainer reviewed, not ones pushed since.
             if (current.has("allow-modify") && ["synchronize", "reopened"].includes(context.payload.action)) {
-              stale.push("allow-modify");
+              stale.unshift("allow-modify");
               core.notice("allow-modify removed: new commits need a maintainer to apply it again");
             }
             for (const name of stale) {
-              await github.rest.issues.removeLabel({ owner, repo, issue_number: pr.number, name });
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: pr.number, name });
+              } catch (error) {
+                if (error.status !== 404) throw error; // taken off meanwhile
+              }
             }
             const adding = [...wanted].filter((name) => !current.has(name));
             if (adding.length > 0) {

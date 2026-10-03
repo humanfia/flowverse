@@ -11,8 +11,9 @@ name: validate
 
 on:
   pull_request:
-    # labeled/unlabeled: a maintainer's allow-modify label takes effect without a new push. A
-    # push takes it off again (labeler.yml), and a run for a push disregards it.
+    # labeled: a maintainer applying allow-modify starts the one run of the pull request that
+    # honours it (validate.py); a push afterwards starts one that does not, and labeler.yml
+    # takes the label off. unlabeled: taking it off re-checks at once.
     types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
   push:
@@ -23,8 +24,10 @@ on:
 
 permissions: {}
 
+# A pull request's newest push supersedes its older runs. Every other run is its own group, so
+# that a push to main or the weekly run is never cancelled by the next one queueing.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
