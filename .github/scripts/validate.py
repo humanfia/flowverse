@@ -356,7 +356,7 @@ def held_now(directory: str) -> dict[str, str]:
     }
 
 
-def github(path: str) -> Any:
+def github(path: str, accept: str = "application/vnd.github+json") -> Any:
     """GET from the GitHub API: the decoded JSON, or None for what is not there.
 
     "Not there" is any client error but a rate limit: missing (404), empty (409), blocked
@@ -364,34 +364,32 @@ def github(path: str) -> Any:
     server errors retried; either one lasting raises `urllib.error.URLError`.
     """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+    headers = {"Accept": accept, "X-GitHub-Api-Version": "2022-11-28"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(f"{API}/{path}", headers=headers)
     for attempt in range(5):
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                return json.load(response)
+                body = response.read()
+            return (
+                json.loads(body) if accept.endswith("json") else body.decode().strip()
+            )
         except urllib.error.HTTPError as error:
-            headers = error.headers
+            said = error.headers
             limited = error.code == 429 or (
                 error.code == 403
-                and (
-                    "retry-after" in headers or headers["x-ratelimit-remaining"] == "0"
-                )
+                and ("retry-after" in said or said["x-ratelimit-remaining"] == "0")
             )
             if error.code < 500 and not limited:
                 return None
             wait = 5 * 2**attempt
             if limited:
-                reset = float(headers.get("x-ratelimit-reset") or time.time())
-                wait = float(headers.get("retry-after") or reset - time.time()) + 1
+                reset = float(said.get("x-ratelimit-reset") or time.time())
+                wait = float(said.get("retry-after") or reset - time.time()) + 1
             if attempt == 4 or wait > 600:
                 raise
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError):
             if attempt == 4:
                 raise
             wait = 5 * 2**attempt
@@ -480,12 +478,15 @@ def check_remote(report: Report, path: Path, manifest: dict[str, Any]) -> None:
         return
     if found.get("archived"):
         report.warning(where, f"repo: {repo} is archived")
-    at = github(f"repos/{repo}/commits/{urllib.parse.quote(ref, safe='')}")
+    at = github(
+        f"repos/{repo}/commits/{urllib.parse.quote(ref, safe='')}",
+        accept="application/vnd.github.sha",
+    )
     if at is None:
         report.error(where, f"ref: {repo} has no tag, branch or commit {ref!r}")
         return
-    if at["sha"] != commit:
-        report.error(where, f"commit: {ref} of {repo} is {at['sha']}, not {commit}")
+    if at != commit:
+        report.error(where, f"commit: {ref} of {repo} is {at}, not {commit}")
         return
     subdir = manifest.get("subdir", "")
     shown = f"{subdir}/" if subdir else "the root"

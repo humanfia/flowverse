@@ -3,10 +3,10 @@
 # one check branch protection and the merge queue require.
 #
 # What is in scope depends on the event:
-#   pull_request, merge_group  the manifests added or changed against the base; all four jobs
-#   push to main               the same against the previous main; no import check (it ran on the PR)
-#   schedule, workflow_dispatch  every manifest against GitHub (moved tags, repos gone or private);
-#                              no import check
+#   pull_request, merge_group    the manifests added or changed against the base; all jobs
+#   push to main                 the same against the previous main; no import check (the PR had it)
+#   schedule, workflow_dispatch  every manifest against GitHub, for moved tags and repos gone
+#                                private or away; no import check
 name: validate
 
 on:

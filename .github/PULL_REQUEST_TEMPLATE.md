@@ -1,5 +1,6 @@
 <!--
-Adding a flow or a version of one? Tick every box below; CONTRIBUTING.md explains each.
+Adding a flow or a version of one? Tick every box below; CONTRIBUTING.md explains each:
+https://github.com/humanfia/flowverse/blob/main/CONTRIBUTING.md
 Changing the index itself (schema, scripts, workflows, docs)? Delete the checklist and say what
 changes and why.
 -->
@@ -17,4 +18,4 @@ changes and why.
 - [ ] I ran the flow with hmz at that commit, and its tests pass.
 - [ ] The repository has a license, and `license` names it.
 - [ ] `uv run .github/scripts/validate.py --base origin/main --network` passes.
-- [ ] I read the [code of conduct](../CODE_OF_CONDUCT.md).
+- [ ] I read the [code of conduct](https://github.com/humanfia/flowverse/blob/main/CODE_OF_CONDUCT.md).
