@@ -31,10 +31,10 @@ flows/
 ```yaml
 name: recursive_lean_prover
 version: 0.1.0
-description: Recursively plans, proves, compares, reviews and catalogues Lean theorems.
+description: Recursively plan, prove, compare, review and catalogue Lean theorems.
 repo: humanfia/flow-recursive-lean-prover
 ref: v0.1.0
-commit: <the 40-character commit v0.1.0 resolved to when it was reviewed>
+commit: 6cfb688a5a38b51965b641fed8ad7aa063ae197f
 subdir: recursive_lean_prover
 license: Apache-2.0
 dependencies:

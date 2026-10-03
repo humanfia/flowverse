@@ -1,8 +1,8 @@
 name: aot
 version: 0.1.0
-description: Writes a flow from a description, then loads, smoke-runs and reviews it before landing it.
+description: The flow that writes a flow - a description in, a loaded, smoke-run and reviewed flow out.
 repo: humanfia/flow-aot
 ref: v0.1.0
-commit: ffffffffffffffffffffffffffffffffffffffff
+commit: 009db348737af610758fa495c8fb3890ff98fab9
 subdir: aot
 license: Apache-2.0
