@@ -1,0 +1,8 @@
+name: humanize1
+version: 0.1.0
+description: RLCR from humanize 1 as three flows (gen-idea, gen-plan, rlcr), each set up before it starts.
+repo: humanfia/flow-humanize1
+ref: v0.1.0
+commit: ffffffffffffffffffffffffffffffffffffffff
+subdir: humanize1
+license: Apache-2.0

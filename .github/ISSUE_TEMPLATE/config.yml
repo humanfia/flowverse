@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a malicious or compromised flow
+    url: https://github.com/humanfia/flowverse/security/advisories/new
+    about: Privately, never in a public issue. See SECURITY.md.
+  - name: A bug in hmz itself
+    url: https://github.com/humanfia/humanize/issues/new/choose
+    about: hmz, its menus and its built-in flows are humanize's.
+  - name: Submit your own flow
+    url: https://github.com/humanfia/flowverse/blob/main/CONTRIBUTING.md
+    about: Authors open a pull request adding a manifest; no issue needed.
+  - name: Documentation
+    url: https://docs.humanfia.ai/humanize/
+    about: How to write, test and run flows.

@@ -1,0 +1,98 @@
+# Labels each pull request by what it changes, so reviewers can triage at a glance:
+#   new-flow     adds flows/<name>/ for a flow the index did not have
+#   new-version  adds a version directory to a flow already here
+#   modify       changes or deletes a published version (fails validation without allow-modify)
+#   infra        changes anything outside flows/<name>/<version>/
+#
+# pull_request_target is the trigger that may label a pull request from a fork. It is safe here
+# because nothing of the pull request is checked out or run: the diff is read through the API.
+name: labeler
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] -- runs nothing from the pull request
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: label
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # the base's flows/<name>/
+      issues: write # creates a label the first time it is needed
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const LABELS = {
+              "new-flow": ["0e8a16", "Adds a flow the index did not have"],
+              "new-version": ["1d76db", "Adds a version of a flow already in the index"],
+              "modify": ["d93f0b", "Changes or deletes a published version"],
+              "infra": ["c5def5", "Changes something other than a manifest"],
+              "allow-modify": ["b60205", "Maintainers only: lets a published version change"],
+            };
+            const MANAGED = ["new-flow", "new-version", "modify", "infra"];
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+
+            const atBase = new Map();
+            async function versionsAtBase(flow) {
+              if (!atBase.has(flow)) {
+                try {
+                  const { data } = await github.rest.repos.getContent({
+                    owner, repo, path: `flows/${flow}`, ref: pr.base.sha,
+                  });
+                  atBase.set(flow, new Set([].concat(data).map((entry) => entry.name)));
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                  atBase.set(flow, null);
+                }
+              }
+              return atBase.get(flow);
+            }
+
+            const wanted = new Set();
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            for (const file of files) {
+              for (const path of [file.filename, file.previous_filename].filter(Boolean)) {
+                const [top, flow, version, ...rest] = path.split("/");
+                if (top !== "flows" || rest.length === 0) {
+                  wanted.add("infra");
+                  continue;
+                }
+                const versions = await versionsAtBase(flow);
+                wanted.add(versions === null ? "new-flow" : versions.has(version) ? "modify" : "new-version");
+              }
+            }
+
+            const existing = new Set(
+              (await github.paginate(github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 }))
+                .map((label) => label.name),
+            );
+            for (const [name, [color, description]] of Object.entries(LABELS)) {
+              if (existing.has(name)) continue;
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              } catch (error) {
+                if (error.status !== 422) throw error; // made meanwhile by another run
+              }
+            }
+
+            const current = new Set(pr.labels.map((label) => label.name));
+            for (const name of MANAGED.filter((name) => current.has(name) && !wanted.has(name))) {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: pr.number, name });
+            }
+            const adding = [...wanted].filter((name) => !current.has(name));
+            if (adding.length > 0) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: adding });
+            }
+            core.info(`labels: ${[...wanted].join(", ") || "none"}`);

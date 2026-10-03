@@ -1,6 +1,0 @@
-{
-  "url": "http://127.0.0.1:8765",
-  "control_key_file": "/ABS/trusted/control.key",
-  "ledger_file": "/ABS/evaluator/workspace/.flowbench/mle-submissions.jsonl",
-  "candidates_dir": "/ABS/evaluator/workspace/.flowbench/mle-candidates"
-}
