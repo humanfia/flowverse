@@ -28,7 +28,7 @@
     "repo": {
       "description": "The public GitHub repository holding the flow, as owner/repo.",
       "type": "string",
-      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.{1,2}$)[A-Za-z0-9._-]{1,100}$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
     },
     "ref": {
       "description": "The tag (preferred), branch or commit the release is cut from.",
@@ -42,9 +42,9 @@
       "pattern": "^[0-9a-f]{40}$"
     },
     "subdir": {
-      "description": "The directory of the repository that holds the flow (its __init__.py, or <name>.py), relative to the root. Left out: the root.",
+      "description": "The directory of the repository holding the flow (its __init__.py, or <name>.py), relative to the root, in parts of letters, digits, _, . and - that do not start with . or -. Left out: the root.",
       "type": "string",
-      "pattern": "^(?!\\.{1,2}(/|$))[A-Za-z0-9_.-]+(/(?!\\.{1,2}(/|$))[A-Za-z0-9_.-]+)*$",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$",
       "maxLength": 255
     },
     "license": {

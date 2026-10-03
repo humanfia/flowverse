@@ -5,13 +5,14 @@
 # What is in scope depends on the event:
 #   pull_request, merge_group  the manifests added or changed against the base; all four jobs
 #   push to main               the same against the previous main; no import check (it ran on the PR)
-#   schedule (weekly)          every manifest against GitHub: moved tags, deleted or private repos
-#   workflow_dispatch          every manifest, all four jobs
+#   schedule, workflow_dispatch  every manifest against GitHub (moved tags, repos gone or private);
+#                              no import check
 name: validate
 
 on:
   pull_request:
-    # labeled/unlabeled: a maintainer's allow-modify label takes effect without a new push.
+    # labeled/unlabeled: a maintainer's allow-modify label takes effect without a new push. A
+    # push takes it off again (labeler.yml), and a run for a push disregards it.
     types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
   push:
@@ -96,7 +97,7 @@ jobs:
     needs: validate
     if: needs.validate.outputs.manifests != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30 # a rate limit is waited out
     permissions:
       contents: read
       pull-requests: read
@@ -126,7 +127,7 @@ jobs:
     needs: [validate, verify]
     if: >-
       needs.validate.outputs.manifests != '[]'
-      && contains(fromJSON('["pull_request", "merge_group", "workflow_dispatch"]'), github.event_name)
+      && contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions: {}

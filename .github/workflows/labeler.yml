@@ -3,6 +3,7 @@
 #   new-version  adds a version directory to a flow already here
 #   modify       changes or deletes a published version (fails validation without allow-modify)
 #   infra        changes anything outside flows/<name>/<version>/
+# and takes allow-modify off on every push, so that it only ever covers commits a maintainer saw.
 #
 # pull_request_target is the trigger that may label a pull request from a fork. It is safe here
 # because nothing of the pull request is checked out or run: the diff is read through the API.
@@ -88,7 +89,13 @@ jobs:
             }
 
             const current = new Set(pr.labels.map((label) => label.name));
-            for (const name of MANAGED.filter((name) => current.has(name) && !wanted.has(name))) {
+            const stale = MANAGED.filter((name) => current.has(name) && !wanted.has(name));
+            // allow-modify covers the commits a maintainer reviewed, not ones pushed since.
+            if (current.has("allow-modify") && ["synchronize", "reopened"].includes(context.payload.action)) {
+              stale.push("allow-modify");
+              core.notice("allow-modify removed: new commits need a maintainer to apply it again");
+            }
+            for (const name of stale) {
               await github.rest.issues.removeLabel({ owner, repo, issue_number: pr.number, name });
             }
             const adding = [...wanted].filter((name) => !current.has(name));

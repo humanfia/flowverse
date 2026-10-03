@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import graphlib
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -52,6 +53,9 @@ FLOWS = "flows"
 MANIFEST = "flow.yaml"
 SCHEMA = ROOT / "schema" / "flow.schema.json"
 NAME = re.compile(r"[a-z][a-z0-9_]*")
+#: What no value may hold: the schema's patterns, run by Python's `re`, let a trailing
+#: newline through.
+BREAK = re.compile(r"[\x00-\x1f\x7f]")
 #: The flows built into humanize. An index flow of one of these names would shadow a builtin.
 RESERVED = frozenset(
     {
@@ -76,9 +80,9 @@ class Report:
 
     def _say(self, level: str, where: str, message: str) -> None:
         if os.environ.get("GITHUB_ACTIONS") == "true":
-            message = (
-                message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-            )
+            escapes = {"%": "%25", "\r": "%0D", "\n": "%0A"}
+            message = message.translate(str.maketrans(escapes))
+            where = where.translate(str.maketrans({**escapes, ":": "%3A", ",": "%2C"}))
             print(f"::{level} file={where}::{message}")
         else:
             print(f"{level}: {where}: {message}")
@@ -189,10 +193,11 @@ def explain(error: jsonschema.ValidationError) -> str:
     """One schema error, said plainly."""
     field = ".".join(str(part) for part in error.absolute_path) or "the manifest"
     if error.validator == "additionalProperties" and not error.absolute_path:
-        unknown = sorted(set(error.instance) - set(error.schema["properties"]))
+        known = error.schema["properties"]
+        unknown = sorted(str(key) for key in error.instance if key not in known)
         return (
-            f"unknown key(s): {', '.join(map(str, unknown))}; a manifest holds only "
-            + ", ".join(error.schema["properties"])
+            f"unknown key(s): {', '.join(unknown)}; a manifest holds only "
+            + ", ".join(known)
         )
     if error.validator == "pattern":
         said = error.schema.get("description")
@@ -217,8 +222,14 @@ def check_manifest(
     if not isinstance(manifest, dict):
         report.error(where, "a manifest is a mapping of keys to values")
         return None
+    deps = manifest.get("dependencies")
+    texts = [*manifest.values(), *(deps.values() if isinstance(deps, dict) else [])]
+    if any(isinstance(text, str) and BREAK.search(text) for text in texts):
+        report.error(where, "a value holds a line break or another control character")
+        return None
     errors = sorted(
-        schema.iter_errors(manifest), key=lambda one: list(one.absolute_path)
+        schema.iter_errors(manifest),
+        key=lambda one: [str(part) for part in one.absolute_path],
     )
     for error in errors:
         report.error(where, explain(error))
@@ -255,14 +266,18 @@ def check_dependencies(
     index: dict[str, dict[str, Path]],
     manifests: dict[Path, dict[str, Any]],
 ) -> None:
-    """Each dependency is a flow here with a version in range, and no versions form a cycle."""
+    """Each dependency is a flow here with a version in range, and no flows form a cycle.
+
+    A cycle is one between flows, whatever their versions, which is what hmz refuses to
+    install: it follows a flow's dependencies and stops at a flow it is already inside.
+    """
     versions = {
         flow: {v: semver.Version.parse(v) for v in releases}
         for flow, releases in index.items()
     }
-    graph: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    graph: dict[str, set[str]] = {}
     for path, manifest in manifests.items():
-        node = graph.setdefault((manifest["name"], manifest["version"]), set())
+        node = graph.setdefault(manifest["name"], set())
         for dep, ranged in manifest.get("dependencies", {}).items():
             if dep == manifest["name"]:
                 report.error(rel(path), f"dependencies: {dep} depends on itself")
@@ -278,17 +293,22 @@ def check_dependencies(
                     rel(path), f"dependencies: no flow is called {dep!r} in this index"
                 )
                 continue
-            clauses = [clause.strip() for clause in ranged.split(",")]
+            node.add(dep)
+            # Read as hmz reads it: whitespace anywhere in a clause is dropped.
+            clauses = [re.sub(r"\s+", "", clause) for clause in ranged.split(",")]
             try:
-                matching = {
-                    (dep, name)
+                if not all(clauses):
+                    raise ValueError("a clause is empty")
+                matching = [
+                    name
                     for name, v in versions[dep].items()
                     if all(v.match(clause) for clause in clauses)
-                }
+                ]
             except ValueError as error:
                 report.error(
                     rel(path),
-                    f"dependencies: {dep}: {ranged!r} is not a range: {error}",
+                    f"dependencies: {dep}: {ranged!r} is not a range like "
+                    f">=0.1.0,<0.2.0: {error}",
                 )
                 continue
             if not matching:
@@ -297,15 +317,13 @@ def check_dependencies(
                     rel(path),
                     f"dependencies: no version of {dep} is {ranged!r}; there are {there}",
                 )
-            node |= matching
     try:
         graphlib.TopologicalSorter(graph).prepare()
     except graphlib.CycleError as error:
         cycle = error.args[1]
         report.error(
-            f"{FLOWS}/{cycle[0][0]}/{cycle[0][1]}/{MANIFEST}",
-            "dependencies form a cycle: "
-            + " -> ".join(f"{n}@{v}" for n, v in reversed(cycle)),
+            f"{FLOWS}/{cycle[0]}",
+            "dependencies form a cycle: " + " -> ".join(reversed(cycle)),
         )
 
 
@@ -323,7 +341,7 @@ def held_at(base: str) -> dict[str, dict[str, str]]:
         if entry:
             meta, path = entry.split("\t", 1)
             parts = path.split("/")
-            if len(parts) > 3:
+            if len(parts) > 3 and version_of(parts[2]) is not None:
                 held.setdefault("/".join(parts[:3]), {})[path] = meta.split()[2]
     return held
 
@@ -339,7 +357,12 @@ def held_now(directory: str) -> dict[str, str]:
 
 
 def github(path: str) -> Any:
-    """GET from the GitHub API: the decoded JSON, or None for a 404 or 422."""
+    """GET from the GitHub API: the decoded JSON, or None for what is not there.
+
+    "Not there" is any client error but a rate limit: missing (404), empty (409), blocked
+    (403, 451), or unreadable (422). Rate limits are waited out for up to ten minutes and
+    server errors retried; either one lasting raises `urllib.error.URLError`.
+    """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     headers = {
         "Accept": "application/vnd.github+json",
@@ -348,44 +371,64 @@ def github(path: str) -> Any:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(f"{API}/{path}", headers=headers)
-    for attempt in range(4):
+    for attempt in range(5):
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.load(response)
         except urllib.error.HTTPError as error:
-            if error.code in (404, 422):
-                return None
-            limited = (
-                error.code == 429 or error.headers.get("x-ratelimit-remaining") == "0"
+            headers = error.headers
+            limited = error.code == 429 or (
+                error.code == 403
+                and (
+                    "retry-after" in headers or headers["x-ratelimit-remaining"] == "0"
+                )
             )
-            if attempt == 3 or not (error.code >= 500 or limited):
+            if error.code < 500 and not limited:
+                return None
+            wait = 5 * 2**attempt
+            if limited:
+                reset = float(headers.get("x-ratelimit-reset") or time.time())
+                wait = float(headers.get("retry-after") or reset - time.time()) + 1
+            if attempt == 4 or wait > 600:
                 raise
-        except urllib.error.URLError:
-            if attempt == 3:
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 4:
                 raise
-        time.sleep(5 * 2**attempt)
+            wait = 5 * 2**attempt
+        time.sleep(max(wait, 1))
     raise AssertionError
 
 
-def labels() -> set[str]:
-    """The labels the pull request this Actions run checks carries now (not at the event)."""
+def allowed() -> bool:
+    """Whether this Actions run checks a pull request a maintainer labelled allow-modify.
+
+    The label is read as it is now, not as the event saw it, so that a re-run sees it. It
+    covers the commits there when it was applied: a push takes it off (the labeler workflow
+    does), and a run for a push disregards it, since that run and the labeler race.
+    """
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     repository = os.environ.get("GITHUB_REPOSITORY")
     if not event_path or not repository:
-        return set()
+        return False
     event = json.loads(Path(event_path).read_text(encoding="utf-8"))
-    number = (event.get("pull_request") or {}).get("number")
-    if number is None:
-        queued = re.search(
-            r"/pr-(\d+)-", (event.get("merge_group") or {}).get("head_ref", "")
-        )
-        number = queued and queued[1]
-    if not number:
-        return set()
-    return {
-        one["name"]
-        for one in github(f"repos/{repository}/issues/{number}/labels") or []
-    }
+    if "pull_request" in event:
+        if event.get("action") in ("synchronize", "reopened"):
+            return False
+        numbers = [event["pull_request"]["number"]]
+    elif "merge_group" in event:
+        numbers = re.findall(r"/pr-(\d+)-", event["merge_group"].get("head_ref", ""))
+    elif event.get("after"):  # a push to main: the pull requests it merged
+        merged = github(f"repos/{repository}/commits/{event['after']}/pulls") or []
+        numbers = [one["number"] for one in merged]
+    else:
+        return False
+    return any(
+        ALLOW_MODIFY
+        in {
+            one["name"] for one in github(f"repos/{repository}/issues/{n}/labels") or []
+        }
+        for n in numbers
+    )
 
 
 def check_published(report: Report, base: str, allow: bool) -> set[str]:
@@ -397,7 +440,7 @@ def check_published(report: Report, base: str, allow: bool) -> set[str]:
         if held_now(directory) != files
     ]
     if touched and not allow:
-        allow = ALLOW_MODIFY in labels()
+        allow = allowed()
     for directory in touched:
         what = "changed" if (ROOT / directory).exists() else "deleted"
         if allow:
@@ -508,7 +551,10 @@ def main() -> int:
     ]
     if args.network:
         for path, manifest in chosen:
-            check_remote(report, path, manifest)
+            try:
+                check_remote(report, path, manifest)
+            except (OSError, ValueError, http.client.HTTPException) as error:
+                report.error(rel(path), f"GitHub could not be asked: {error}")
 
     listed = [
         {

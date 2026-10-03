@@ -4,6 +4,9 @@ rules:
   document-start: disable
   line-length:
     max: 120
+    # A manifest's description is one line of up to 200 characters, which the schema checks.
+    ignore: |
+      flows/
   # `on:` is a workflow's key, not a boolean.
   truthy:
     check-keys: false

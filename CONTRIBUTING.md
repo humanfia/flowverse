@@ -136,8 +136,8 @@ dependencies:
 
 A range is comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`) of full versions, joined by commas,
 all of which must hold; a bare version means `==`. Each dependency must be a flow in this
-index with at least one version in range, and dependencies may not form a cycle. The flows
-built into humanize are always there and are never listed.
+index with at least one version in range, and no flow may come to depend on itself, in any of
+its versions. The flows built into humanize are always there and are never listed.
 
 ## What CI checks
 
@@ -173,7 +173,9 @@ request `new-flow`, `new-version`, `modify` or `infra`.
   its own. hmz tells users who installed an older version that it exists.
 - **A published version is never edited.** CI refuses a change to, or the deletion of, a
   version directory already on `main`, unless a maintainer labels the pull request
-  `allow-modify`. Correct a mistake by publishing a new version.
+  `allow-modify`. The label covers the commits the maintainer reviewed: a push takes it off,
+  to be applied again once the new commits are reviewed. Correct a mistake by publishing a new
+  version.
 - **Withdrawing a version** you published, because it is broken or unsafe: open a pull request
   deleting its directory and say why; a maintainer applies `allow-modify`. hmz stops offering
   it. Copies already installed stay where they are, so publish a fixed version too.
