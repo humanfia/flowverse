@@ -1,0 +1,16 @@
+# The actions CI pins, kept fresh: monthly, one grouped pull request. The tools CI runs with
+# uvx and the packages pinned in .github/scripts/*.py are moved by hand.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

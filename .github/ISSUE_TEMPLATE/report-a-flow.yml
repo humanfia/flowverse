@@ -1,0 +1,39 @@
+name: Report a flow
+description: A listed flow that will not install or load, says what it does not do, or is abandoned.
+title: "[Flow report]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Malicious, compromised, or a security risk?** Do not report it here: report it privately at
+        <https://github.com/humanfia/flowverse/security/advisories/new>.
+
+        A bug in what the flow does is for its own repository; report it here when the listing is wrong.
+  - type: input
+    id: flow
+    attributes:
+      label: Flow and version
+      description: As listed in hmz or here, flows/<name>/<version>.
+      placeholder: my_review 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: problem
+    attributes:
+      label: What is wrong
+      options:
+        - It will not install or load
+        - The description or license is wrong
+        - The repository is gone, private, or abandoned
+        - Its name impersonates someone else
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What you did, what happened, and the hmz version (`hmz --version`).
+    validations:
+      required: true

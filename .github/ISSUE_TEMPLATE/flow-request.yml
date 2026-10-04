@@ -1,0 +1,41 @@
+name: Request a flow
+description: Ask for a flow that exists somewhere to be listed here, or for a flow nobody has written yet.
+title: "[Flow request]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Wrote the flow yourself? Skip this and open a pull request adding its manifest, as
+        [CONTRIBUTING.md](https://github.com/humanfia/flowverse/blob/main/CONTRIBUTING.md) explains.
+  - type: input
+    id: name
+    attributes:
+      label: Flow name
+      description: The name it would have, or has, in lowercase with underscores.
+      placeholder: my_review
+    validations:
+      required: true
+  - type: input
+    id: repo
+    attributes:
+      label: Repository
+      description: Where the flow lives, if it exists already.
+      placeholder: https://github.com/octocat/my-review-flow
+  - type: textarea
+    id: what
+    attributes:
+      label: What it does
+      description: What the flow is for, and why it belongs in the index.
+    validations:
+      required: true
+  - type: dropdown
+    id: author
+    attributes:
+      label: Have you asked the author?
+      options:
+        - There is no flow yet
+        - "Yes"
+        - "No"
+    validations:
+      required: true

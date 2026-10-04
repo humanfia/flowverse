@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/humanfia/flowverse/main/schema/flow.schema.json",
+  "title": "Flowverse manifest",
+  "description": "One release of one flow, kept at flows/<name>/<version>/flow.yaml.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "version", "description", "repo", "ref", "commit", "license"],
+  "properties": {
+    "name": {
+      "description": "The flow's name: lowercase letters, digits and underscores, starting with a letter. Equals the <name> directory.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "maxLength": 64
+    },
+    "version": {
+      "description": "A SemVer 2.0.0 version without build metadata, such as 1.2.0 or 2.0.0-rc.1. Equals the <version> directory.",
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-((0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(\\.(0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?$",
+      "maxLength": 128
+    },
+    "description": {
+      "description": "What the flow does, in one line.",
+      "type": "string",
+      "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$",
+      "maxLength": 200
+    },
+    "repo": {
+      "description": "The public GitHub repository holding the flow, as owner/repo.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+    },
+    "ref": {
+      "description": "The tag (preferred), branch or commit the release is cut from.",
+      "type": "string",
+      "pattern": "^[^\\s~^:?*\\[\\\\]+$",
+      "maxLength": 255
+    },
+    "commit": {
+      "description": "The full 40-character commit `ref` resolved to when the release was reviewed. hmz installs exactly this commit.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "subdir": {
+      "description": "The directory of the repository holding the flow (its __init__.py, or <name>.py), relative to the root, in parts of letters, digits, _, . and - that do not start with . or -. Left out: the root.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$",
+      "maxLength": 255
+    },
+    "license": {
+      "description": "The flow's license, as an SPDX license identifier such as Apache-2.0 or MIT.",
+      "type": "string",
+      "minLength": 1
+    },
+    "dependencies": {
+      "description": "Other flows of this index the flow calls, each with a version range: comparisons such as >=1.0.0 joined by commas, all of which must hold.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^\\s*(<=|>=|==|!=|<|>)?\\s*\\S+\\s*(,\\s*(<=|>=|==|!=|<|>)?\\s*\\S+\\s*)*$"
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+name: aot
+version: 0.1.0
+description: The flow that writes a flow - a description in, a loaded, smoke-run and reviewed flow out.
+repo: humanfia/aot-flow
+ref: v0.1.0
+commit: 009db348737af610758fa495c8fb3890ff98fab9
+subdir: aot
+license: Apache-2.0

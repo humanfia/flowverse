@@ -1,0 +1,3 @@
+# LF everywhere, so a checkout on any system holds the bytes that were committed and
+# validation compares published versions byte for byte.
+* text=auto eol=lf

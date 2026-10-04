@@ -1,0 +1,174 @@
+# Checks the index, cheapest first: lint -> validate (offline, every manifest) -> verify (the
+# GitHub API, the manifests in scope) -> import-check (runs the flow, isolated) -> index-ok, the
+# one check branch protection and the merge queue require.
+#
+# What is in scope depends on the event:
+#   pull_request, merge_group    the manifests added or changed against the base; all jobs
+#   push to main                 the same against the previous main; no import check (the PR had it)
+#   schedule, workflow_dispatch  every manifest against GitHub, for moved tags and repos gone
+#                                private or away; no import check
+name: validate
+
+on:
+  pull_request:
+    # labeled: a maintainer applying allow-modify starts the one run of the pull request that
+    # honours it (validate.py); a push afterwards starts one that does not, and labeler.yml
+    # takes the label off. unlabeled: taking it off re-checks at once.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+# A pull request's newest push supersedes its older runs. Every other run is its own group, so
+# that a push to main or the weekly run is never cancelled by the next one queueing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: yamllint
+        run: uvx yamllint@1.38.0 --strict --format github .
+
+      - name: actionlint
+        run: uvx --from actionlint-py==1.7.12.25 actionlint
+
+      - name: zizmor
+        run: uvx zizmor@1.30.1 --format github .
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: ruff
+        run: |
+          uvx ruff@0.16.10 check .github/scripts
+          uvx ruff@0.16.10 format --check .github/scripts
+
+  validate:
+    name: validate
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # the allow-modify label
+    outputs:
+      manifests: ${{ steps.validate.outputs.manifests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the base to compare against
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: Every manifest, offline
+        id: validate
+        run: uv run .github/scripts/validate.py ${BASE:+--base "$BASE"}
+        env:
+          # A pull request is checked out as its merge into the base, so HEAD^1 is that base.
+          BASE: >-
+            ${{ github.event_name == 'pull_request' && 'HEAD^1'
+            || github.event.merge_group.base_sha || github.event.before }}
+          GITHUB_TOKEN: ${{ github.token }}
+
+  verify:
+    name: verify
+    needs: validate
+    if: needs.validate.outputs.manifests != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # a rate limit is waited out
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: The manifests in scope, against GitHub
+        run: uv run .github/scripts/validate.py --network ${BASE:+--base "$BASE"}
+        env:
+          BASE: >-
+            ${{ github.event_name == 'pull_request' && 'HEAD^1'
+            || github.event.merge_group.base_sha || github.event.before }}
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # Importing a flow runs its code, which is code from whoever opened the pull request. So this
+  # job runs on pull_request (never pull_request_target), holds no secrets, persists no
+  # credentials, and its token is granted nothing.
+  import-check:
+    name: import ${{ matrix.manifest.name }} ${{ matrix.manifest.version }}
+    needs: [validate, verify]
+    if: >-
+      needs.validate.outputs.manifests != '[]'
+      && contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJSON(needs.validate.outputs.manifests) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: index
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ matrix.manifest.repo }}
+          ref: ${{ matrix.manifest.commit }}
+          path: flow
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: hmz loads the flow and lists what it offers
+        run: uv run index/.github/scripts/import_check.py flow "index/$MANIFEST"
+        env:
+          MANIFEST: ${{ matrix.manifest.path }}
+
+  index-ok:
+    name: index-ok
+    if: always()
+    needs: [lint, validate, verify, import-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job passed, or had nothing to check
+        run: jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<< "$NEEDS"
+        env:
+          NEEDS: ${{ toJSON(needs) }}
