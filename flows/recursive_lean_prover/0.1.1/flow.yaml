@@ -1,0 +1,10 @@
+name: recursive_lean_prover
+version: 0.1.1
+description: Recursively plan, prove, compare, review and catalogue Lean theorems.
+repo: humanfia/recursive-lean-prover-flow
+ref: v0.1.1
+commit: 05d255dcf941b788ccf4971df0199574bf3e246c
+subdir: recursive_lean_prover
+license: Apache-2.0
+dependencies:
+  humanize1: ">=0.1.0,<0.2.0"
