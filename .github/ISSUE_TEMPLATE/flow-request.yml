@@ -21,7 +21,7 @@ body:
     attributes:
       label: Repository
       description: Where the flow lives, if it exists already.
-      placeholder: https://github.com/octocat/flow-my-review
+      placeholder: https://github.com/octocat/my-review-flow
   - type: textarea
     id: what
     attributes:

@@ -27,7 +27,7 @@ happens after.
    directory, with its tests, README and LICENSE beside it at the root:
 
    ```text
-   flow-my-review/
+   my-review-flow/
    ├── my_review/              the flow: what `subdir` names
    │   ├── __init__.py         its @flow functions
    │   ├── _prompts.py         anything it imports, by plain name
@@ -85,7 +85,7 @@ happens after.
 name: my_review
 version: 0.1.0
 description: Reviews a change twice, the second time with fresh eyes.
-repo: octocat/flow-my-review
+repo: octocat/my-review-flow
 ref: v0.1.0
 commit: 0123456789abcdef0123456789abcdef01234567
 subdir: my_review

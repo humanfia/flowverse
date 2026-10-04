@@ -32,7 +32,7 @@ flows/
 name: recursive_lean_prover
 version: 0.1.0
 description: Recursively plan, prove, compare, review and catalogue Lean theorems.
-repo: humanfia/flow-recursive-lean-prover
+repo: humanfia/recursive-lean-prover-flow
 ref: v0.1.0
 commit: 6cfb688a5a38b51965b641fed8ad7aa063ae197f
 subdir: recursive_lean_prover
