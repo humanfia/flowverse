@@ -4,7 +4,7 @@ Thank you for sharing a flow. This index lists flows; it does not hold them. You
 flow in a GitHub repository of your own, then open a pull request here adding one small
 manifest that says where a released version of it is. Maintainers review it, CI checks it, and
 once it is merged every hmz can install it. A later version that changes nothing but where it
-is merges itself once CI passes.
+is, at the `v<version>` tag you released it with, merges itself once CI passes.
 
 How to write a flow is humanize's documentation:
 [Your first flow](https://docs.humanfia.ai/humanize/weaver/writing-a-flow),
@@ -185,7 +185,11 @@ nothing, no credentials kept. A weekly run checks every manifest again, `install
      of them and was never published before: a withdrawn version put back waits for review;
   3. each manifest added is the same as the newest version's in every key but `version`, `ref`
      and `commit`;
-  4. every job of validate passed on the pull request's head commit, `install` among them.
+  4. each version added is one its repository's owner released after the newest: `ref` is the
+     repository's own tag `v<version>` (or `<version>`), `commit` is what that tag points at,
+     and that commit comes after the newest version's (GitHub compares it as `ahead`). A
+     branch, a commit by itself, an older commit or a tag of another version waits for review;
+  5. every job of validate passed on the pull request's head commit, `install` among them.
 
   It says in a comment why it did or did not. It reads the pull request through GitHub's API
   and runs none of it, and GitHub refuses the merge if anything was pushed after the checks
@@ -204,7 +208,8 @@ nothing, no credentials kept. A weekly run checks every manifest again, `install
 
 - **A new version** is a new directory beside the others, `flows/<owner>/<flow>/<new
   version>/`, in a pull request of its own; one that changes nothing but `version`, `ref` and
-  `commit` [merges itself](#review-and-merge). hmz tells users who installed an older version
+  `commit`, at its own tag `v<version>` on a commit after the newest version's,
+  [merges itself](#review-and-merge). hmz tells users who installed an older version
   that it exists.
 - **A published version is never edited.** CI refuses a change to, or the deletion of, a
   version directory already on `main`, unless a maintainer labels the pull request

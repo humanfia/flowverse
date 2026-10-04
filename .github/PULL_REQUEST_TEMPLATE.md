@@ -4,8 +4,9 @@ https://github.com/humanfia/flowverse/blob/main/CONTRIBUTING.md
 Changing the index itself (schema, scripts, workflows, docs)? Delete the checklist and say what
 changes and why.
 
-A new version of a flow already listed that changes nothing but version, ref and commit is
-merged automatically once every check passes; anything else waits for a maintainer.
+A new version of a flow already listed that changes nothing but version, ref and commit, at its
+repository's own tag v<version> on a commit after the newest version's, is merged automatically
+once every check passes; anything else waits for a maintainer.
 -->
 
 ## What this adds

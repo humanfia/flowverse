@@ -1,8 +1,9 @@
 # Merges a pull request without review once validate passes on it, if it is a safe version bump:
 # it only adds flows/.../<version>/flow.yaml files, each a version of a flow already listed that
-# is newer than all of them, was never published before, and is the same as the newest but for
-# version, ref and commit, and every job of validate passed on its head, installing each version
-# with hmz among them.
+# is newer than all of them, was never published before, is the same as the newest but for
+# version, ref and commit, and is at its repository's own tag v<version> on a commit after the
+# newest version's; and every job of validate passed on its head, installing each version with
+# hmz among them.
 # .github/scripts/automerge.py decides, and says why or why not in a comment; anything else
 # waits for a maintainer.
 #
