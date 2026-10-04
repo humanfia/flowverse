@@ -34,10 +34,11 @@ merge is a squash GitHub refuses if the head has moved since.
 
 --event reads a workflow_run event of validate, finding the pull request it ran for, a fork's
 too; --pr names one, and decides on validate's newest finished run of its head. Without --apply
-it only says what it would do. With it, it merges and labels the pull request auto-merged, and
+it only says what it would do. With it, it merges, deletes the pull request's branch if it is
+one of this repository's (a fork's is its owner's), labels the pull request auto-merged, and
 says why it did or did not in one comment, kept up to date. --fixture decides from files of the
-facts as they would be read from GitHub, and fails if any case is decided otherwise than it
-expects.
+facts as they would be read from GitHub, and fails if any case is decided, or would delete a
+branch, otherwise than it expects.
 """
 
 from __future__ import annotations
@@ -119,9 +120,10 @@ def decide(facts: Facts) -> tuple[list[str], list[str]]:
     """Why a pull request is not a safe version bump, and the versions it adds.
 
     Args:
-      facts: What GitHub says, as :func:`gather` reads it: `pull` (number, state, draft, base,
-        head), `default` (the default branch), `run` (validate's: event, conclusion, head_sha,
-        path), `jobs` (each of its jobs' conclusion, by name), `files` (each file changed at
+      facts: What GitHub says, as :func:`gather` reads it: `repo` (this repository), `pull`
+        (number, state, draft, base, head, and its head's `branch` and the repository that is
+        in, `from`), `default` (the default branch), `run` (validate's: event, conclusion,
+        head_sha, path), `jobs` (each of its jobs' conclusion, by name), `files` (each file changed at
         the run's head against the base branch, by its status), `truncated` (whether there
         were too many to list), `base` (each manifest on the base branch, by path, with its
         text where it was read), `head` (the text of each manifest added, by path),
@@ -228,6 +230,16 @@ def decide(facts: Facts) -> tuple[list[str], list[str]]:
     if missing and run["conclusion"] == "success":
         why.append(f"validate ran no {', '.join(missing)}")
     return why, bumps
+
+
+def leftover(facts: Facts) -> str | None:
+    """The branch to delete once a pull request is merged: its head's, if in this repository.
+
+    GitHub deletes it on merge only for merges not made with a workflow's token. A fork's branch
+    is its owner's, and is left; a fork deleted since leaves none.
+    """
+    pull = facts["pull"]
+    return pull["branch"] if pull["from"] == facts["repo"] else None
 
 
 def gh(*args: str) -> Any:
@@ -343,12 +355,15 @@ def gather(repo: str, pull: dict[str, Any], run: dict[str, Any]) -> Facts:
         else {}
     )
     return {
+        "repo": repo,
         "pull": {
             "number": pull["number"],
             "state": pull["state"],
             "draft": pull["draft"],
             "base": pull["base"]["ref"],
             "head": pull["head"]["sha"],
+            "branch": pull["head"]["ref"],
+            "from": (pull["head"]["repo"] or {}).get("full_name"),
         },
         "default": gh(f"repos/{repo}")["default_branch"],
         "run": {
@@ -432,7 +447,8 @@ def handle(repo: str, number: int, run: dict[str, Any], apply: bool) -> int:
     if pull["head"]["sha"] != sha:
         print(f"#{number} is at {pull['head']['sha'][:7]} now; its own run decides")
         return 0
-    why, bumps = decide(gather(repo, pull, run))
+    facts = gather(repo, pull, run)
+    why, bumps = decide(facts)
     if why:
         print(f"#{number}: waits for review, as")
         print("".join(f"  - {one}\n" for one in why), end="")
@@ -446,7 +462,8 @@ def handle(repo: str, number: int, run: dict[str, Any], apply: bool) -> int:
             say(repo, number, body)
         return 0
     adds = ", ".join(f"`{one}`" for one in bumps)
-    print(f"#{number}: merges, adding {adds}")
+    branch = leftover(facts)
+    print(f"#{number}: merges, adding {adds}, deleting {branch or 'no branch'}")
     if not apply:
         return 0
     merged = subprocess.run(
@@ -461,6 +478,15 @@ def handle(repo: str, number: int, run: dict[str, Any], apply: bool) -> int:
         print(f"::error::#{number} could not be merged: {said}")
         say(repo, number, f"A safe version bump, which GitHub would not merge: {said}")
         return 1
+    if branch:
+        try:
+            gh(
+                "-X",
+                "DELETE",
+                f"repos/{repo}/git/refs/heads/{urllib.parse.quote(branch)}",
+            )
+        except RuntimeError as error:
+            print(f"::warning::#{number} was merged, and {branch} not deleted: {error}")
     try:
         gh(
             "-X",
@@ -490,12 +516,15 @@ def fixtures(paths: list[str]) -> int:
         said = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         for case in said["cases"]:
             expect, because = case.pop("expect", "wait"), case.pop("because", "")
-            name = case.pop("name")
-            why, _ = decide(said["facts"] | case)
-            got = "wait" if why else "merge"
+            deletes, name = case.pop("deletes", ABSENT), case.pop("name")
+            facts = said["facts"] | case
+            why, _ = decide(facts)
+            got, branch = "wait" if why else "merge", leftover(facts)
             ok = got == expect and (not because or any(because in one for one in why))
+            ok = ok and deletes in (ABSENT, branch)
             wrong += not ok
-            print(f"{'ok' if ok else 'WRONG'}  {name}: {got}")
+            then = "" if why else f", deleting {branch or 'no branch'}"
+            print(f"{'ok' if ok else 'WRONG'}  {name}: {got}{then}")
             print("".join(f"      {one}\n" for one in why), end="")
     return 1 if wrong else 0
 

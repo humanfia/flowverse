@@ -1,8 +1,11 @@
 # Cases automerge.py decides, each from the facts below with some of them replaced:
 #   uv run .github/scripts/automerge.py --fixture .github/scripts/fixtures/automerge.yaml
-# `expect` is merge or wait (the default); `because` is part of the reason a case waits.
+# `expect` is merge or wait (the default); `because` is part of the reason a case waits;
+# `deletes` is the branch deleted once it is merged, null for none.
 facts:
-  pull: {number: 7, state: open, draft: false, base: main, head: &head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+  repo: humanfia/flowverse
+  pull: &pull {number: 7, state: open, draft: false, base: main, head: &head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,
+               branch: feat/aot-0.1.1, from: humanfia/flowverse}
   default: main
   run: {event: pull_request, conclusion: success, head_sha: *head, path: .github/workflows/validate.yml}
   jobs: &jobs
@@ -57,6 +60,17 @@ facts:
 cases:
   - name: a new version of a flow of humanfia's
     expect: merge
+    deletes: feat/aot-0.1.1
+
+  - name: from a fork, whose branch is its owner's
+    expect: merge
+    pull: {<<: *pull, branch: main, from: alice/flowverse}
+    deletes: null
+
+  - name: from a fork deleted since
+    expect: merge
+    pull: {<<: *pull, from: null}
+    deletes: null
 
   - name: a new version of a namespaced flow
     expect: merge
@@ -367,15 +381,15 @@ cases:
 
   - name: pushed to since validate ran
     because: "its head is bbbbbbb"
-    pull: {number: 7, state: open, draft: false, base: main, head: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+    pull: {<<: *pull, head: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
 
   - name: a draft
     because: "it is a draft"
-    pull: {number: 7, state: open, draft: true, base: main, head: *head}
+    pull: {<<: *pull, draft: true}
 
   - name: into another branch
     because: "it is not into main"
-    pull: {number: 7, state: open, draft: false, base: next, head: *head}
+    pull: {<<: *pull, base: next}
 
   - name: too many files to list
     because: "more than 300 files"
