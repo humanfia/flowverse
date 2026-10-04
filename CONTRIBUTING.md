@@ -182,7 +182,7 @@ nothing, no credentials kept. A weekly run checks every manifest again, `install
   1. every file it changes is a `flow.yaml` it adds in a new version directory: nothing
      modified, deleted or renamed, and nothing else;
   2. each of those flows already has a version on `main`, and the one added is newer than all
-     of them;
+     of them and was never published before: a withdrawn version put back waits for review;
   3. each manifest added is the same as the newest version's in every key but `version`, `ref`
      and `commit`;
   4. every job of validate passed on the pull request's head commit, `install` among them.

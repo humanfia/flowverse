@@ -17,7 +17,8 @@ A pull request is merged without review when all of these hold, and waits for on
    flows/<owner>/<flow>/<version>/flow.yaml: nothing modified, deleted or renamed, and
    nothing else.
 2. Each of those flows already has a version on the base branch, and the one added is newer
-   than every one of them.
+   than every one of them and was never there before: a version withdrawn is not published
+   again without review.
 3. Each manifest added is the same as the newest version's on the base branch in every key but
    version, ref and commit.
 4. Every job of the validate workflow passed on the pull request's head commit, installing each
@@ -66,9 +67,9 @@ MANY = 300
 NAMED = 5
 MANIFEST = re.compile(r"flows/((?:[a-z0-9-]+/)?[a-z][a-z0-9_]*)/([^/]+)/flow\.yaml")
 RULE = (
-    "Only a pull request that adds new versions of flows already listed, each the same as "
-    "the newest version but for `version`, `ref` and `commit`, is merged without review once "
-    "validate passes: see [Review and merge]"
+    "Only a pull request that adds new versions of flows already listed, each never published "
+    "before and the same as the newest version but for `version`, `ref` and `commit`, is "
+    "merged without review once validate passes: see [Review and merge]"
     "(https://github.com/{repo}/blob/HEAD/CONTRIBUTING.md#review-and-merge)."
 )
 #: A key a manifest does not have, which no value it could have equals.
@@ -112,7 +113,8 @@ def decide(facts: Facts) -> tuple[list[str], list[str]]:
         path), `jobs` (each of its jobs' conclusion, by name), `files` (each file changed at
         the run's head against the base branch, by its status), `truncated` (whether there
         were too many to list), `base` (each manifest on the base branch, by path, with its
-        text where it was read) and `head` (the text of each manifest added, by path).
+        text where it was read), `head` (the text of each manifest added, by path) and
+        `withdrawn` (each manifest added that the base branch had before, and has no more).
 
     Returns:
       Nothing in the first list for a pull request to merge, and why not otherwise; and each
@@ -150,6 +152,9 @@ def decide(facts: Facts) -> tuple[list[str], list[str]]:
             continue
         flow, version = place
         needed.add(f"install {flow} {version}")
+        if path in facts["withdrawn"]:
+            why.append(f"`{flow}` {version} was published before, and withdrawn")
+            continue
         published = versions(facts["base"], flow)
         if not published:
             why.append(f"`{flow}` is a new flow")
@@ -236,11 +241,17 @@ def gather(repo: str, pull: dict[str, Any], run: dict[str, Any]) -> Facts:
         if one["type"] == "blob" and release(one["path"]) is not None
     }
     added: dict[str, str] = {}
+    withdrawn: list[str] = []
     for path, status in files.items():
         place = release(path)
         if status != "added" or place is None:
             continue
         added[path] = text(repo, path, sha)
+        # Not on the base branch now, yet in its history: published once, and withdrawn.
+        if path not in listed and gh(
+            f"repos/{repo}/commits?sha={base}&path={urllib.parse.quote(path)}&per_page=1"
+        ):
+            withdrawn.append(path)
         published = versions(listed, place[0])
         if published:
             newest = published[max(published)]
@@ -273,6 +284,7 @@ def gather(repo: str, pull: dict[str, Any], run: dict[str, Any]) -> Facts:
         "truncated": len(files) >= MANY or tree["truncated"],
         "base": listed,
         "head": added,
+        "withdrawn": withdrawn,
     }
 
 
@@ -386,9 +398,10 @@ def handle(repo: str, number: int, run: dict[str, Any], apply: bool) -> int:
     say(
         repo,
         number,
-        f"Merged automatically: it adds {adds}, each a new version of a flow already listed "
-        "and the same as its newest version but for `version`, `ref` and `commit`, and every "
-        f"job of validate passed on {sha}, installing it with hmz among them.",
+        f"Merged automatically: it adds {adds}, each a new version of a flow already listed, "
+        "never published before, and the same as its newest version but for `version`, `ref` "
+        f"and `commit`, and every job of validate passed on {sha}, installing it with hmz "
+        "among them.",
     )
     return 0
 

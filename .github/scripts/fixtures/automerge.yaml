@@ -45,6 +45,7 @@ facts:
       commit: 2222222222222222222222222222222222222222
       subdir: aot
       license: Apache-2.0
+  withdrawn: []
 
 cases:
   - name: a new version of a flow of humanfia's
@@ -120,6 +121,27 @@ cases:
         ref: v0.1.0
         commit: 5555555555555555555555555555555555555555
         license: MIT
+
+  - name: a withdrawn version published again
+    because: "`aot` 0.1.1 was published before, and withdrawn"
+    withdrawn: [flows/aot/0.1.1/flow.yaml]
+
+  - name: a withdrawn version of a namespaced flow published again, at another commit
+    because: "`alice/kernel` 0.2.0 was published before, and withdrawn"
+    jobs: {<<: *jobs, install alice/kernel 0.2.0: success}
+    files: {flows/alice/kernel/0.2.0/flow.yaml: added}
+    withdrawn: [flows/alice/kernel/0.2.0/flow.yaml]
+    head:
+      flows/alice/kernel/0.2.0/flow.yaml: |
+        name: kernel
+        version: 0.2.0
+        description: Tunes a kernel.
+        repo: Alice/kernel-flow
+        ref: v0.2.0
+        commit: 7777777777777777777777777777777777777777
+        license: MIT
+        dependencies:
+          humanize1: ">=0.1.0,<0.2.0"
 
   - name: a version older than the newest
     because: "`aot` 0.0.10 is not newer than 0.1.0"
