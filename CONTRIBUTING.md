@@ -191,9 +191,10 @@ nothing, no credentials kept. A weekly run checks every manifest again, `install
      branch, a commit by itself, an older commit or a tag of another version waits for review;
   5. every job of validate passed on the pull request's head commit, `install` among them.
 
-  It says in a comment why it did or did not. It reads the pull request through GitHub's API
-  and runs none of it, and GitHub refuses the merge if anything was pushed after the checks
-  ran.
+  It says in a comment why it did or did not, and deletes the branch it merged if that branch
+  is in this repository (a fork's is left to its owner). It reads the pull request through
+  GitHub's API and runs none of it, and GitHub refuses the merge if anything was pushed after
+  the checks ran.
 - Maintainers ([CODEOWNERS](.github/CODEOWNERS)) review every other pull request, and merge it
   once one of them has approved it and `index-ok` is green.
 - A new flow gets the closest look: its code at `commit`, what it runs, what it fetches, and

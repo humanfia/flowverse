@@ -3,7 +3,8 @@
 # is newer than all of them, was never published before, is the same as the newest but for
 # version, ref and commit, and is at its repository's own tag v<version> on a commit after the
 # newest version's; and every job of validate passed on its head, installing each version with
-# hmz among them.
+# hmz among them. It then deletes the pull request's branch if it is one of this repository's:
+# GitHub's own delete-on-merge skips merges made with this token, and a fork's branch is left.
 # .github/scripts/automerge.py decides, and says why or why not in a comment; anything else
 # waits for a maintainer.
 #
@@ -37,7 +38,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: read # validate's jobs
-      contents: write # the merge
+      contents: write # the merge, and deleting the branch merged
       pull-requests: write # the merge, the comment and the label
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
