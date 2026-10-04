@@ -20,7 +20,7 @@ Report here:
 - a weakness in the index itself: a way past review or CI, or a way for a manifest to make hmz
   install code other than the commit it names.
 
-Say which flow and version (`flows/<name>/<version>`), what you found and how, and anything that
+Say which flow and version (`flows/<owner>/<flow>/<version>`), what you found and how, and anything that
 shows it: a link to the code at the commit, a log, the steps. You need not have a fix.
 
 Somewhere else:

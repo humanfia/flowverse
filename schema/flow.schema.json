@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/humanfia/flowverse/main/schema/flow.schema.json",
   "title": "Flowverse manifest",
-  "description": "One release of one flow, kept at flows/<name>/<version>/flow.yaml.",
+  "description": "One release of one flow, kept at flows/<flow>/<version>/flow.yaml for a flow of humanfia's and at flows/<owner>/<flow>/<version>/flow.yaml for anybody else's, <owner> being who owns its repository on GitHub, in lowercase.",
   "type": "object",
   "additionalProperties": false,
   "required": ["name", "version", "description", "repo", "ref", "commit", "license"],
   "properties": {
     "name": {
-      "description": "The flow's name: lowercase letters, digits and underscores, starting with a letter. Equals the <name> directory.",
+      "description": "The flow's name: lowercase letters, digits and underscores, starting with a letter. Equals the <flow> directory.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]*$",
       "maxLength": 64
@@ -26,7 +26,7 @@
       "maxLength": 200
     },
     "repo": {
-      "description": "The public GitHub repository holding the flow, as owner/repo.",
+      "description": "The public GitHub repository holding the flow, as owner/repo. Its owner is humanfia for a flow at flows/<flow>/, and <owner> for one at flows/<owner>/<flow>/.",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
     },
@@ -42,7 +42,7 @@
       "pattern": "^[0-9a-f]{40}$"
     },
     "subdir": {
-      "description": "The directory of the repository holding the flow (its __init__.py, or <name>.py), relative to the root, in parts of letters, digits, _, . and - that do not start with . or -. Left out: the root.",
+      "description": "The directory of the repository holding the flow (its __init__.py, or <flow>.py), relative to the root, in parts of letters, digits, _, . and - that do not start with . or -. Left out: the root.",
       "type": "string",
       "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$",
       "maxLength": 255
@@ -53,10 +53,11 @@
       "minLength": 1
     },
     "dependencies": {
-      "description": "Other flows of this index the flow calls, each with a version range: comparisons such as >=1.0.0 joined by commas, all of which must hold.",
+      "description": "Other flows of this index the flow calls, each by its name here (humanize1, or alice/kernel) with a version range: comparisons such as >=1.0.0 joined by commas, all of which must hold.",
       "type": "object",
       "propertyNames": {
-        "pattern": "^[a-z][a-z0-9_]*$"
+        "description": "A flow of this index by its name here: <flow>, or <owner>/<flow> with the owner in lowercase.",
+        "pattern": "^([a-z0-9]([a-z0-9]|-(?=[a-z0-9])){0,38}/)?[a-z][a-z0-9_]*$"
       },
       "additionalProperties": {
         "type": "string",
