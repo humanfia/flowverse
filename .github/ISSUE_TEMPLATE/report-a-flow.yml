@@ -14,7 +14,7 @@ body:
     id: flow
     attributes:
       label: Flow and version
-      description: As listed in hmz or here, flows/<name>/<version>.
+      description: As listed in hmz or here, flows/<owner>/<flow>/<version>.
       placeholder: my_review 0.1.0
     validations:
       required: true

@@ -1,0 +1,53 @@
+# Merges a pull request without review once validate passes on it, if it is a safe version bump:
+# it only adds flows/.../<version>/flow.yaml files, each a version of a flow already listed that
+# is newer than all of them and the same as the newest but for version, ref and commit, and
+# every job of validate passed on its head, installing each version with hmz among them.
+# .github/scripts/automerge.py decides, and says why or why not in a comment; anything else
+# waits for a maintainer.
+#
+# workflow_run runs this file and the script as they are on main, with a token that can merge,
+# for a pull request whose code may be anybody's. It is safe here because nothing of the pull
+# request is checked out or run: what it changes is read through the API at the commit validate
+# passed on, and the merge is refused by GitHub if the head has moved since.
+name: automerge
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] -- runs nothing from the pull request
+    workflows: [validate]
+    types: [completed]
+
+permissions: {}
+
+# validate runs more than once on one commit (a label applied, a run retried): one decision at a
+# time for it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  automerge:
+    name: automerge
+    if: >-
+      github.repository == 'humanfia/flowverse'
+      && github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read # validate's jobs
+      contents: write # the merge
+      pull-requests: write # the merge, the comment and the label
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: Merge it if it is a safe version bump, and say why or why not
+        run: uv run .github/scripts/automerge.py --event "$GITHUB_EVENT_PATH" --apply
+        env:
+          GH_TOKEN: ${{ github.token }}

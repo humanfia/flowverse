@@ -1,12 +1,13 @@
 # Checks the index, cheapest first: lint -> validate (offline, every manifest) -> verify (the
-# GitHub API, the manifests in scope) -> import-check (runs the flow, isolated) -> index-ok, the
-# one check branch protection and the merge queue require.
+# GitHub API, the manifests in scope) -> install (hmz installs and loads each, isolated) ->
+# index-ok, the one check branch protection and the merge queue require. automerge.yml reads
+# these jobs by name.
 #
 # What is in scope depends on the event:
-#   pull_request, merge_group    the manifests added or changed against the base; all jobs
-#   push to main                 the same against the previous main; no import check (the PR had it)
-#   schedule, workflow_dispatch  every manifest against GitHub, for moved tags and repos gone
-#                                private or away; no import check
+#   pull_request, merge_group    the manifests added or changed against the base
+#   push to main                 the same against the previous main
+#   schedule, workflow_dispatch  every manifest, for moved tags, repos gone private or away, and
+#                                flows a newer hmz no longer installs or loads
 name: validate
 
 on:
@@ -65,6 +66,9 @@ jobs:
           uvx ruff@0.16.10 check .github/scripts
           uvx ruff@0.16.10 format --check .github/scripts
 
+      - name: automerge.py, on its fixtures
+        run: uv run .github/scripts/automerge.py --fixture .github/scripts/fixtures/automerge.yaml
+
   validate:
     name: validate
     needs: lint
@@ -122,15 +126,13 @@ jobs:
             || github.event.merge_group.base_sha || github.event.before }}
           GITHUB_TOKEN: ${{ github.token }}
 
-  # Importing a flow runs its code, which is code from whoever opened the pull request. So this
-  # job runs on pull_request (never pull_request_target), holds no secrets, persists no
-  # credentials, and its token is granted nothing.
-  import-check:
-    name: import ${{ matrix.manifest.name }} ${{ matrix.manifest.version }}
+  # Installing a flow fetches it and loading it runs its code, which is code from whoever opened
+  # the pull request. So this job runs on pull_request (never pull_request_target), holds no
+  # secrets, persists no credentials, and its token is granted nothing.
+  install:
+    name: install ${{ matrix.manifest.called }} ${{ matrix.manifest.version }}
     needs: [validate, verify]
-    if: >-
-      needs.validate.outputs.manifests != '[]'
-      && contains(fromJSON('["pull_request", "merge_group"]'), github.event_name)
+    if: needs.validate.outputs.manifests != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions: {}
@@ -141,29 +143,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: index
-          persist-credentials: false
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ matrix.manifest.repo }}
-          ref: ${{ matrix.manifest.commit }}
-          path: flow
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: false
 
-      - name: hmz loads the flow and lists what it offers
-        run: uv run index/.github/scripts/import_check.py flow "index/$MANIFEST"
+      - name: hmz installs the version, with what it needs, and loads it
+        run: uv run .github/scripts/install_check.py "$MANIFEST"
         env:
           MANIFEST: ${{ matrix.manifest.path }}
 
   index-ok:
     name: index-ok
     if: always()
-    needs: [lint, validate, verify, import-check]
+    needs: [lint, validate, verify, install]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

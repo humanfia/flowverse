@@ -19,13 +19,19 @@ and this index pins every released version of it to a commit, as
 
 ## Background
 
-One manifest per released version of a flow:
+One manifest per released version of a flow. A flow of Humanfia's is listed under its name; a
+flow of anybody else's under the GitHub user or organization that owns its repository, in
+lowercase:
 
 ```text
 flows/
-└── recursive_lean_prover/          the flow's name
-    └── 0.1.0/                      a SemVer 2.0.0 version
-        └── flow.yaml               where that version is
+├── recursive_lean_prover/          a flow of Humanfia's, by name
+│   └── 0.1.0/                      a SemVer 2.0.0 version
+│       └── flow.yaml               where that version is
+└── alice/                          anybody else's: the owner of its repository
+    └── kernel/                     the flow's name
+        └── 0.1.0/
+            └── flow.yaml
 ```
 
 ```yaml
@@ -46,6 +52,10 @@ published version is never edited: a change is a new version. Every field is des
 [CONTRIBUTING.md](CONTRIBUTING.md#the-manifest), and checked against
 [schema/flow.schema.json](schema/flow.schema.json).
 
+hmz calls each flow what its directory here says: `recursive_lean_prover`, `alice/kernel`, and
+`humanize1:rlcr` for a flow inside one. The flows of a flowverse you add yourself are
+`@<flowverse>/<flow>` and `@<flowverse>/<owner>/<flow>`.
+
 The loops humanize is built around (`chat`, `ralph_loop`, `goal`, `flame_chase`,
 `stateful_ralph`, `continue_loop`, `rlar`) ship inside humanize itself and are not listed here.
 
@@ -60,9 +70,12 @@ In `hmz`, open `/flows` and go to **Flowverses**. Pick a flow, pick one of its v
 install it; installed flows are the ones you can run. hmz keeps the index itself up to date in
 the background, and tells you when a flow you installed has a newer version.
 
-**Your own flowverse.** Any GitHub repository laid out like this one is a flowverse: a
-`flows/<name>/<version>/flow.yaml` per release. Add it from the same Flowverses page, next to
-this one. Copy [schema/](schema/) and [.github/](.github/) to give it the same checks.
+**Your own flowverse.** Any GitHub repository laid out like this one is a flowverse, a
+`flows/<flow>/<version>/flow.yaml` or `flows/<owner>/<flow>/<version>/flow.yaml` per release,
+except that a flow of anybody's may be listed by name alone there. Add it from the same
+Flowverses page, next to this one. Copy [schema/](schema/) and [.github/](.github/) to give it
+the same checks, setting `OWNER` in [validate.py](.github/scripts/validate.py) to whose flows
+may be listed by name alone, or to `None` for anybody's.
 
 > [!WARNING]
 > Installing a flow runs its code on your machine, and its agents work without asking for
@@ -72,7 +85,9 @@ this one. Copy [schema/](schema/) and [.github/](.github/) to give it the same c
 ## Contributing
 
 To list your flow, publish it in a repository of your own and open a pull request adding its
-manifest: [CONTRIBUTING.md](CONTRIBUTING.md) is the whole guide. Report a malicious flow
+manifest: [CONTRIBUTING.md](CONTRIBUTING.md) is the whole guide. A new version of a flow
+already listed that changes nothing but `version`, `ref` and `commit` is merged automatically
+once every check passes, installing it with hmz among them. Report a malicious flow
 privately, as [SECURITY.md](SECURITY.md) explains. Everyone taking part follows the
 [code of conduct](CODE_OF_CONDUCT.md).
 

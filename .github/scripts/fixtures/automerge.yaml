@@ -1,0 +1,266 @@
+# Cases automerge.py decides, each from the facts below with some of them replaced:
+#   uv run .github/scripts/automerge.py --fixture .github/scripts/fixtures/automerge.yaml
+# `expect` is merge or wait (the default); `because` is part of the reason a case waits.
+facts:
+  pull: {number: 7, state: open, draft: false, base: main, head: &head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+  default: main
+  run: {event: pull_request, conclusion: success, head_sha: *head, path: .github/workflows/validate.yml}
+  jobs: &jobs
+    lint: success
+    validate: success
+    verify: success
+    install aot 0.1.1: success
+    index-ok: success
+  files:
+    flows/aot/0.1.1/flow.yaml: added
+  truncated: false
+  base:
+    flows/aot/0.1.0/flow.yaml: &aot |
+      name: aot
+      version: 0.1.0
+      description: The flow that writes a flow.
+      repo: humanfia/aot-flow
+      ref: v0.1.0
+      commit: 009db348737af610758fa495c8fb3890ff98fab9
+      subdir: aot
+      license: Apache-2.0
+    flows/aot/0.0.9/flow.yaml: null
+    flows/alice/kernel/0.1.0/flow.yaml: |
+      name: kernel
+      version: 0.1.0
+      description: Tunes a kernel.
+      repo: Alice/kernel-flow
+      ref: v0.1.0
+      commit: 1111111111111111111111111111111111111111
+      license: MIT
+      dependencies:
+        humanize1: ">=0.1.0,<0.2.0"
+  head:
+    flows/aot/0.1.1/flow.yaml: &bump |
+      name: aot
+      version: 0.1.1
+      description: The flow that writes a flow.
+      repo: humanfia/aot-flow
+      ref: v0.1.1
+      commit: 2222222222222222222222222222222222222222
+      subdir: aot
+      license: Apache-2.0
+
+cases:
+  - name: a new version of a flow of humanfia's
+    expect: merge
+
+  - name: a new version of a namespaced flow
+    expect: merge
+    jobs: {lint: success, validate: success, verify: success, install alice/kernel 0.2.0-rc.1: success,
+           index-ok: success}
+    files: {flows/alice/kernel/0.2.0-rc.1/flow.yaml: added}
+    head:
+      flows/alice/kernel/0.2.0-rc.1/flow.yaml: |
+        name: kernel
+        version: 0.2.0-rc.1
+        description: Tunes a kernel.
+        repo: Alice/kernel-flow
+        ref: v0.2.0-rc.1
+        commit: 3333333333333333333333333333333333333333
+        license: MIT
+        dependencies:
+          humanize1: ">=0.1.0,<0.2.0"
+
+  - name: two versions at once
+    expect: merge
+    jobs: {<<: *jobs, install aot 0.1.2: success}
+    files: {flows/aot/0.1.1/flow.yaml: added, flows/aot/0.1.2/flow.yaml: added}
+    head:
+      flows/aot/0.1.1/flow.yaml: *bump
+      flows/aot/0.1.2/flow.yaml: |
+        name: aot
+        version: 0.1.2
+        description: The flow that writes a flow.
+        repo: humanfia/aot-flow
+        ref: v0.1.2
+        commit: 4444444444444444444444444444444444444444
+        subdir: aot
+        license: Apache-2.0
+
+  - name: a published version modified
+    because: "`flows/aot/0.1.0/flow.yaml` is modified"
+    files: {flows/aot/0.1.1/flow.yaml: added, flows/aot/0.1.0/flow.yaml: modified}
+
+  - name: a published version deleted
+    because: "is removed"
+    files: {flows/aot/0.1.1/flow.yaml: added, flows/aot/0.0.9/flow.yaml: removed}
+
+  - name: a version renamed
+    because: "is renamed"
+    files: {flows/aot/0.1.1/flow.yaml: renamed}
+
+  - name: another file beside the manifest
+    because: "`README.md` is modified"
+    files: {flows/aot/0.1.1/flow.yaml: added, README.md: modified}
+
+  - name: another file in the version directory
+    because: "`flows/aot/0.1.1/notes.md` is added"
+    files: {flows/aot/0.1.1/flow.yaml: added, flows/aot/0.1.1/notes.md: added}
+
+  - name: a workflow added
+    because: "`.github/workflows/x.yml` is added"
+    files: {flows/aot/0.1.1/flow.yaml: added, .github/workflows/x.yml: added}
+
+  - name: a new flow
+    because: "`bob/kernel` is a new flow"
+    jobs: {<<: *jobs, install bob/kernel 0.1.0: success}
+    files: {flows/bob/kernel/0.1.0/flow.yaml: added}
+    head:
+      flows/bob/kernel/0.1.0/flow.yaml: |
+        name: kernel
+        version: 0.1.0
+        description: Tunes a kernel.
+        repo: bob/kernel-flow
+        ref: v0.1.0
+        commit: 5555555555555555555555555555555555555555
+        license: MIT
+
+  - name: a version older than the newest
+    because: "`aot` 0.0.10 is not newer than 0.1.0"
+    jobs: {<<: *jobs, install aot 0.0.10: success}
+    files: {flows/aot/0.0.10/flow.yaml: added}
+    head: {flows/aot/0.0.10/flow.yaml: *aot}
+
+  - name: a prerelease of the newest
+    because: "is not newer than 0.1.0"
+    jobs: {<<: *jobs, install aot 0.1.0-rc.1: success}
+    files: {flows/aot/0.1.0-rc.1/flow.yaml: added}
+    head: {flows/aot/0.1.0-rc.1/flow.yaml: *aot}
+
+  - name: the repository changed
+    because: "`aot` 0.1.1 changes repo from 0.1.0"
+    head:
+      flows/aot/0.1.1/flow.yaml: |
+        name: aot
+        version: 0.1.1
+        description: The flow that writes a flow.
+        repo: humanfia/aot-fork
+        ref: v0.1.1
+        commit: 2222222222222222222222222222222222222222
+        subdir: aot
+        license: Apache-2.0
+
+  - name: the subdirectory changed
+    because: "changes subdir from"
+    head:
+      flows/aot/0.1.1/flow.yaml: |
+        name: aot
+        version: 0.1.1
+        description: The flow that writes a flow.
+        repo: humanfia/aot-flow
+        ref: v0.1.1
+        commit: 2222222222222222222222222222222222222222
+        subdir: other
+        license: Apache-2.0
+
+  - name: the subdirectory left out
+    because: "changes subdir from"
+    head:
+      flows/aot/0.1.1/flow.yaml: |
+        name: aot
+        version: 0.1.1
+        description: The flow that writes a flow.
+        repo: humanfia/aot-flow
+        ref: v0.1.1
+        commit: 2222222222222222222222222222222222222222
+        license: Apache-2.0
+
+  - name: the license changed
+    because: "changes license from"
+    head:
+      flows/aot/0.1.1/flow.yaml: |
+        name: aot
+        version: 0.1.1
+        description: The flow that writes a flow.
+        repo: humanfia/aot-flow
+        ref: v0.1.1
+        commit: 2222222222222222222222222222222222222222
+        subdir: aot
+        license: MIT
+
+  - name: a dependency added
+    because: "changes dependencies from"
+    head:
+      flows/aot/0.1.1/flow.yaml: |
+        name: aot
+        version: 0.1.1
+        description: The flow that writes a flow.
+        repo: humanfia/aot-flow
+        ref: v0.1.1
+        commit: 2222222222222222222222222222222222222222
+        subdir: aot
+        license: Apache-2.0
+        dependencies:
+          humanize1: ">=0.1.0"
+
+  - name: a dependency's range changed
+    because: "`alice/kernel` 0.1.1 changes dependencies from 0.1.0"
+    jobs: {<<: *jobs, install alice/kernel 0.1.1: success}
+    files: {flows/alice/kernel/0.1.1/flow.yaml: added}
+    head:
+      flows/alice/kernel/0.1.1/flow.yaml: |
+        name: kernel
+        version: 0.1.1
+        description: Tunes a kernel.
+        repo: Alice/kernel-flow
+        ref: v0.1.1
+        commit: 6666666666666666666666666666666666666666
+        license: MIT
+        dependencies:
+          humanize1: ">=0.1.0,<0.3.0"
+
+  - name: the description changed
+    because: "changes description from"
+    head:
+      flows/aot/0.1.1/flow.yaml: |
+        name: aot
+        version: 0.1.1
+        description: Something else entirely.
+        repo: humanfia/aot-flow
+        ref: v0.1.1
+        commit: 2222222222222222222222222222222222222222
+        subdir: aot
+        license: Apache-2.0
+
+  - name: the install job did not run
+    because: "validate ran no install aot 0.1.1"
+    jobs: {lint: success, validate: success, verify: success, index-ok: success}
+
+  - name: the install job failed
+    because: "install aot 0.1.1 (failure)"
+    jobs: {<<: *jobs, install aot 0.1.1: failure}
+
+  - name: validate failed
+    because: "validate did not pass"
+    run: {event: pull_request, conclusion: failure, head_sha: *head, path: .github/workflows/validate.yml}
+
+  - name: another workflow called validate
+    because: "the run is not .github/workflows/validate.yml"
+    run: {event: pull_request, conclusion: success, head_sha: *head, path: .github/workflows/x.yml}
+
+  - name: pushed to since validate ran
+    because: "its head is bbbbbbb"
+    pull: {number: 7, state: open, draft: false, base: main, head: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+
+  - name: a draft
+    because: "it is a draft"
+    pull: {number: 7, state: open, draft: true, base: main, head: *head}
+
+  - name: into another branch
+    because: "it is not into main"
+    pull: {number: 7, state: open, draft: false, base: next, head: *head}
+
+  - name: too many files to list
+    because: "more than 300 files"
+    truncated: true
+
+  - name: nothing changed
+    because: "it changes nothing"
+    files: {}
+    jobs: {lint: success, validate: success, verify: success, index-ok: success}

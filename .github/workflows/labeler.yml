@@ -1,8 +1,8 @@
 # Labels each pull request by what it changes, so reviewers can triage at a glance:
-#   new-flow     adds flows/<name>/ for a flow the index did not have
+#   new-flow     adds flows/<flow>/ or flows/<owner>/<flow>/ for a flow the index did not have
 #   new-version  adds a version directory to a flow already here
 #   modify       changes or deletes a published version (fails validation without allow-modify)
-#   infra        changes anything outside flows/<name>/<version>/
+#   infra        changes anything outside a version directory
 # and takes allow-modify off on every push, so that it only ever covers commits a maintainer saw.
 #
 # pull_request_target is the trigger that may label a pull request from a fork. It is safe here
@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read # the base's flows/<name>/
+      contents: read # the versions on the base of each flow
       issues: write # creates a label the first time it is needed
       pull-requests: write
     steps:
@@ -38,6 +38,7 @@ jobs:
               "modify": ["d93f0b", "Changes or deletes a published version"],
               "infra": ["c5def5", "Changes something other than a manifest"],
               "allow-modify": ["b60205", "Maintainers only: lets a published version change"],
+              "auto-merged": ["5319e7", "A version bump automerge.yml merged without review"],
             };
             const MANAGED = ["new-flow", "new-version", "modify", "infra"];
             // SemVer 2.0.0 without build metadata: what a version directory is called.
@@ -68,11 +69,15 @@ jobs:
             });
             for (const file of files) {
               for (const path of [file.filename, file.previous_filename].filter(Boolean)) {
-                const [top, flow, version, ...rest] = path.split("/");
-                if (top !== "flows" || rest.length === 0 || !VERSION.test(version)) {
+                // flows/<flow>/<version>/... or flows/<owner>/<flow>/<version>/...: no flow or
+                // owner is named like a version, so the first part that is one ends the flow.
+                const parts = path.split("/");
+                const at = [2, 3].find((i) => parts.length > i + 1 && VERSION.test(parts[i]));
+                if (parts[0] !== "flows" || at === undefined) {
                   wanted.add("infra");
                   continue;
                 }
+                const [flow, version] = [parts.slice(1, at).join("/"), parts[at]];
                 const versions = await versionsAtBase(flow);
                 wanted.add(versions === null ? "new-flow" : versions.has(version) ? "modify" : "new-version");
               }

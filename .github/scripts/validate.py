@@ -13,17 +13,22 @@
     uv run .github/scripts/validate.py --base origin/main            # + published versions kept
     uv run .github/scripts/validate.py --base origin/main --network  # + changed ones vs GitHub
 
+A flow of humanfia's is kept at flows/<flow>/<version>/flow.yaml and called <flow>; anybody
+else's at flows/<owner>/<flow>/<version>/flow.yaml, <owner> being whoever owns its repository on
+GitHub, in lowercase, and called <owner>/<flow>. A directory under flows/ is one or the other.
+
 Offline checks run on every manifest: the schema, the directory names, SemVer, reserved names,
-licenses, and dependencies, down to whether hmz could install each release. With --base, every
-version directory that exists at that revision must be left exactly as it was, unless
---allow-modify is given or, in GitHub Actions, a maintainer labelled the pull request
-`allow-modify`; and only the manifests added or changed since --base are "in scope". With
+who owns each repository, licenses, and dependencies, down to whether hmz could install each
+release. With --base, every version directory that exists at that revision must be left exactly
+as it was, unless --allow-modify is given or, in GitHub Actions, a maintainer labelled the pull
+request `allow-modify`; and only the manifests added or changed since --base are "in scope". With
 --network, the in-scope manifests (all of them without --base) are checked against the GitHub
 API: the repository is public, `ref` resolves to `commit` and holds it, and `subdir` holds the
 flow at that commit. GITHUB_TOKEN or GH_TOKEN is sent when set; it is only used to read.
 
 In GitHub Actions the in-scope manifests are written to $GITHUB_OUTPUT as `manifests`, a JSON
-list of {path, name, version, repo, commit, subdir} objects.
+list of {path, called, version} objects: `called` is the flow's name in this index, `aot` or
+`alice/kernel`.
 """
 
 from __future__ import annotations
@@ -54,10 +59,15 @@ FLOWS = "flows"
 MANIFEST = "flow.yaml"
 SCHEMA = ROOT / "schema" / "flow.schema.json"
 NAME = re.compile(r"[a-z][a-z0-9_]*")
+#: A GitHub user or organization, in lowercase: what a namespace directory is called.
+NAMESPACE = re.compile(r"[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}")
+#: Whose flows are bare, flows/<flow>/. A flowverse of your own sets this to its owner, or to
+#: None to let anybody's flow be bare there.
+OWNER: str | None = "humanfia"
 #: What no value may hold: control characters and line separators. The schema's patterns,
 #: run by Python's `re`, let a trailing newline through.
 BREAK = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
-#: The flows built into humanize. An index flow of one of these names would shadow a builtin.
+#: The flows built into humanize. A bare flow of one of these names would shadow a builtin.
 RESERVED = frozenset(
     {
         "chat",
@@ -76,7 +86,7 @@ NO_COMMIT = "0" * 40
 #: Errors asking GitHub can end in, once retried.
 UNREACHABLE = (OSError, ValueError, http.client.HTTPException)
 
-type Release = tuple[str, str]  # (name, version)
+type Release = tuple[str, str]  # (the flow's name in this index, version)
 
 
 class Report:
@@ -143,56 +153,111 @@ def version_of(text: str) -> semver.Version | None:
     return None if version.build else version
 
 
+def called(path: Path) -> str:
+    """A manifest's flow, by its name in this index: `aot`, or `alice/kernel`."""
+    return "/".join(path.relative_to(ROOT / FLOWS).parts[:-2])
+
+
+def manifests_of(report: Report, flow: Path) -> dict[str, Path]:
+    """Each manifest of one flow by version, once its directory is checked to hold nothing else."""
+    where = rel(flow)
+    found: dict[str, Path] = {}
+    for release in sorted(flow.iterdir()):
+        at = rel(release)
+        if release.is_symlink() or not release.is_dir():
+            report.error(at, f"{where}/ holds version directories and nothing else")
+            continue
+        if version_of(release.name) is None:
+            report.error(
+                at,
+                f"{release.name!r} is not a version: SemVer 2.0.0 such as 1.2.0 or "
+                "2.0.0-rc.1, without build metadata; and a directory under flows/ is a flow "
+                "or a namespace, never both",
+            )
+            continue
+        held = sorted(one.name for one in release.iterdir())
+        for extra in held:
+            if extra != MANIFEST:
+                report.error(
+                    f"{at}/{extra}",
+                    f"a version directory holds its {MANIFEST} and nothing else; the "
+                    "flow itself lives in its own repository",
+                )
+        manifest = release / MANIFEST
+        if manifest.is_symlink() or not manifest.is_file():
+            report.error(at, f"a version directory holds a {MANIFEST} file")
+            continue
+        found[release.name] = manifest
+    return found
+
+
+def is_flow(report: Report, at: Path) -> bool:
+    """Whether something is a directory named as a flow is, said where it is not."""
+    if at.is_symlink() or not at.is_dir():
+        report.error(rel(at), f"{rel(at.parent)}/ holds directories and nothing else")
+        return False
+    if not NAME.fullmatch(at.name):
+        report.error(
+            rel(at),
+            f"{at.name!r} is not a flow name: lowercase letters, digits and underscores, "
+            "starting with a letter",
+        )
+        return False
+    return True
+
+
 def layout(report: Report) -> dict[str, dict[str, Path]]:
-    """Each manifest by flow and version, once flows/ is checked to hold nothing else."""
+    """Each manifest by flow and version, once flows/ is checked to hold nothing else.
+
+    A directory under flows/ holding version directories is a bare flow, flows/<flow>/; one
+    holding flow directories is a namespace, flows/<owner>/<flow>/. Which it is, is read off
+    what it holds.
+    """
     found: dict[str, dict[str, Path]] = {}
     top = ROOT / FLOWS
     if not top.is_dir():
         return found
-    for flow in sorted(top.iterdir()):
-        where = rel(flow)
-        if flow.is_symlink() or not flow.is_dir():
-            report.error(
-                where, "flows/ holds flow directories, flows/<name>/, and nothing else"
-            )
-            continue
-        if not NAME.fullmatch(flow.name):
+    for entry in sorted(top.iterdir()):
+        where = rel(entry)
+        if entry.is_symlink() or not entry.is_dir():
             report.error(
                 where,
-                f"{flow.name!r} is not a flow name: lowercase letters, digits and "
-                "underscores, starting with a letter",
+                "flows/ holds flow directories, flows/<flow>/, and namespaces, "
+                "flows/<owner>/, and nothing else",
             )
             continue
-        if flow.name in RESERVED:
-            report.error(
-                where, f"{flow.name!r} is a flow built into humanize, and is reserved"
-            )
-            continue
-        for release in sorted(flow.iterdir()):
-            at = rel(release)
-            if release.is_symlink() or not release.is_dir():
-                report.error(at, f"{where}/ holds version directories and nothing else")
+        if any(version_of(one.name) for one in entry.iterdir()):
+            if not is_flow(report, entry):
                 continue
-            if version_of(release.name) is None:
+            if entry.name in RESERVED:
                 report.error(
-                    at,
-                    f"{release.name!r} is not a version: SemVer 2.0.0 such as 1.2.0 or "
-                    "2.0.0-rc.1, without build metadata",
+                    where,
+                    f"{entry.name!r} is a flow built into humanize, and is reserved",
                 )
                 continue
-            held = sorted(one.name for one in release.iterdir())
-            for extra in held:
-                if extra != MANIFEST:
-                    report.error(
-                        f"{at}/{extra}",
-                        f"a version directory holds its {MANIFEST} and nothing else; the "
-                        "flow itself lives in its own repository",
-                    )
-            manifest = release / MANIFEST
-            if manifest.is_symlink() or not manifest.is_file():
-                report.error(at, f"a version directory holds a {MANIFEST} file")
+            flows = {entry.name: entry}
+        else:
+            if not NAMESPACE.fullmatch(entry.name):
+                report.error(
+                    where,
+                    f"{entry.name!r} is neither a flow holding version directories nor a "
+                    "namespace: a GitHub user or organization, in lowercase",
+                )
                 continue
-            found.setdefault(flow.name, {})[release.name] = manifest
+            if entry.name == OWNER:
+                report.error(
+                    where,
+                    f"{OWNER}'s flows are not namespaced: they are kept at flows/<flow>/",
+                )
+                continue
+            flows = {
+                f"{entry.name}/{flow.name}": flow
+                for flow in sorted(entry.iterdir())
+                if is_flow(report, flow)
+            }
+        for name, flow in flows.items():
+            if held := manifests_of(report, flow):
+                found[name] = held
     return found
 
 
@@ -217,7 +282,7 @@ def explain(error: jsonschema.ValidationError) -> str:
 
 
 def check_manifest(
-    report: Report, path: Path, flow: str, version: str, schema: Any, licensing: Any
+    report: Report, path: Path, schema: Any, licensing: Any
 ) -> dict[str, Any] | None:
     """The manifest, if it reads, fits the schema, and matches its directories."""
     where = rel(path)
@@ -243,12 +308,29 @@ def check_manifest(
     if errors:
         return None
     ok = True
+    name, version = called(path), path.parent.name
+    namespace, _, flow = name.rpartition("/")
     if manifest["name"] != flow:
-        report.error(where, f"name is {manifest['name']!r}, in flows/{flow}/")
+        report.error(where, f"name is {manifest['name']!r}, in flows/{name}/")
         ok = False
     if manifest["version"] != version:
         report.error(
-            where, f"version is {manifest['version']!r}, in flows/{flow}/{version}/"
+            where, f"version is {manifest['version']!r}, in flows/{name}/{version}/"
+        )
+        ok = False
+    owner = manifest["repo"].split("/")[0].lower()
+    if namespace and owner != namespace:
+        report.error(
+            where,
+            f"repo: {manifest['repo']} is {owner}'s, and flows/{namespace}/ holds "
+            f"{namespace}'s flows; list it at flows/{owner}/{flow}/",
+        )
+        ok = False
+    elif not namespace and OWNER is not None and owner != OWNER:
+        report.error(
+            where,
+            f"repo: {manifest['repo']} is {owner}'s, and only {OWNER}'s flows are bare; "
+            f"list it at flows/{owner}/{flow}/",
         )
         ok = False
     said = manifest["license"]
@@ -279,9 +361,9 @@ def read(
     index = layout(report)
     manifests = {
         path: manifest
-        for flow, releases in index.items()
-        for version, path in releases.items()
-        if (manifest := check_manifest(report, path, flow, version, schema, licensing))
+        for held in index.values()
+        for path in held.values()
+        if (manifest := check_manifest(report, path, schema, licensing))
     }
     return index, manifests
 
@@ -356,20 +438,21 @@ def plan(releases: dict[Release, dict[str, Any]], asked: Release) -> list[Releas
 def check_dependencies(report: Report, manifests: dict[Path, dict[str, Any]]) -> None:
     """Each dependency is a flow here with a version in range, and each release installs.
 
-    Flows may not depend on one another in a cycle, whatever their versions; and each release
-    must be one hmz's installer can install where nothing else is, which is checked with the
-    same walk it takes.
+    A dependency names a flow by its name in this index: `humanize1`, or `alice/kernel`. Flows
+    may not depend on one another in a cycle, whatever their versions; and each release must be
+    one hmz's installer can install where nothing else is, which is checked with the same walk
+    it takes.
     """
-    releases = {(m["name"], m["version"]): m for m in manifests.values()}
+    releases = {(called(path), m["version"]): m for path, m in manifests.items()}
     versions: dict[str, list[semver.Version]] = {}
     for name, version in releases:
         versions.setdefault(name, []).append(semver.Version.parse(version))
     graph: dict[str, set[str]] = {}
     sound = True
     for path, manifest in manifests.items():
-        node = graph.setdefault(manifest["name"], set())
+        node = graph.setdefault(called(path), set())
         for dep, ranged in manifest.get("dependencies", {}).items():
-            if dep == manifest["name"]:
+            if dep == called(path):
                 problem = f"{dep} depends on itself"
             elif dep in RESERVED:
                 problem = f"{dep} is built into humanize, so is never listed"
@@ -404,7 +487,7 @@ def check_dependencies(report: Report, manifests: dict[Path, dict[str, Any]]) ->
         return
     for path, manifest in manifests.items():
         try:
-            plan(releases, (manifest["name"], manifest["version"]))
+            plan(releases, (called(path), manifest["version"]))
         except ValueError as error:
             report.error(rel(path), f"dependencies: hmz could not install it: {error}")
 
@@ -417,14 +500,20 @@ def blob(data: bytes) -> str:
 
 
 def held_at(base: str) -> dict[str, dict[str, str]]:
-    """Each version directory at `base`, with the id of every file in it."""
+    """Each version directory at `base`, with the id of every file in it.
+
+    A version directory is flows/<flow>/<version>/ or flows/<owner>/<flow>/<version>/: no flow
+    or owner is named like a version, so the first part of the path that is one ends it.
+    """
     held: dict[str, dict[str, str]] = {}
     for entry in git("ls-tree", "-r", "-z", base, "--", FLOWS).split("\0"):
         if entry:
             meta, path = entry.split("\t", 1)
             parts = path.split("/")
-            if len(parts) > 3 and version_of(parts[2]) is not None:
-                held.setdefault("/".join(parts[:3]), {})[path] = meta.split()[2]
+            for depth in (3, 4):
+                if len(parts) > depth and version_of(parts[depth - 1]) is not None:
+                    held.setdefault("/".join(parts[:depth]), {})[path] = meta.split()[2]
+                    break
     return held
 
 
@@ -651,14 +740,7 @@ def main() -> int:
                 report.error(rel(path), f"GitHub could not be asked: {error}")
 
     listed = [
-        {
-            "path": rel(path),
-            "name": manifest["name"],
-            "version": manifest["version"],
-            "repo": manifest["repo"],
-            "commit": manifest["commit"],
-            "subdir": manifest.get("subdir", ""),
-        }
+        {"path": rel(path), "called": called(path), "version": manifest["version"]}
         for path, manifest in chosen
     ]
     if output := os.environ.get("GITHUB_OUTPUT"):
