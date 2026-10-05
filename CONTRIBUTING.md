@@ -239,4 +239,6 @@ uvx ruff check .github/scripts && uvx ruff format --check .github/scripts
 `uv run .github/scripts/automerge.py --pr <number>` says what automerge would do with a pull
 request, and why, without doing it.
 
-Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
+Everyone taking part follows the
+[code of conduct](https://github.com/humanfia/.github/blob/main/CODE_OF_CONDUCT.md) every humanfia
+repository shares.
