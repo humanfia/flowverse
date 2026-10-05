@@ -89,7 +89,8 @@ manifest: [CONTRIBUTING.md](CONTRIBUTING.md) is the whole guide. A version of a 
 listed, newer than all of its others, that changes nothing but `version`, `ref` and `commit` is
 merged automatically once every check passes, installing it with hmz among them. Report a
 malicious flow privately, as [SECURITY.md](SECURITY.md) explains. Everyone taking part follows
-the [code of conduct](CODE_OF_CONDUCT.md).
+the [code of conduct](https://github.com/humanfia/.github/blob/main/CODE_OF_CONDUCT.md) every
+humanfia repository shares.
 
 ## License
 
