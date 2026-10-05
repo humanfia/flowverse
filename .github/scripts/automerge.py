@@ -17,15 +17,10 @@ A pull request is merged without review when all of these hold, and waits for on
    flows/<owner>/<flow>/<version>/flow.yaml: nothing modified, deleted or renamed, and
    nothing else.
 2. Each of those flows already has a version on the base branch, and the one added is newer
-   than every one of them and was never there before: a version withdrawn is not published
-   again without review.
+   than every one of them.
 3. Each manifest added is the same as the newest version's on the base branch in every key but
    version, ref and commit.
-4. Each manifest added is a release its repository's owner made after the newest version's:
-   `ref` is the repository's own tag v<version> (or <version>), `commit` is the commit that
-   tag points at, and that commit comes after the newest version's (GitHub compares it as
-   ahead). An older commit, another branch's, a fork's or a version nobody tagged waits.
-5. Every job of the validate workflow passed on the pull request's head commit, installing each
+4. Every job of the validate workflow passed on the pull request's head commit, installing each
    version added with hmz among them.
 
 Everything is read through the GitHub API with gh, at the head commit validate passed on and
@@ -71,12 +66,10 @@ MANY = 300
 #: How many of the other files a pull request changes are named.
 NAMED = 5
 MANIFEST = re.compile(r"flows/((?:[a-z0-9-]+/)?[a-z][a-z0-9_]*)/([^/]+)/flow\.yaml")
-SHA = re.compile(r"[0-9a-f]{40}")
 RULE = (
-    "Only a pull request that adds new versions of flows already listed, each never published "
-    "before, the same as the newest version but for `version`, `ref` and `commit`, and at its "
-    "repository's own tag `v<version>` on a commit after the newest version's, is merged "
-    "without review once validate passes: see [Review and merge]"
+    "Only a pull request that adds new versions of flows already listed, each newer than every "
+    "version listed and the same as the newest but for `version`, `ref` and `commit`, is "
+    "merged without review once every job of validate passes: see [Review and merge]"
     "(https://github.com/{repo}/blob/HEAD/CONTRIBUTING.md#review-and-merge)."
 )
 #: A key a manifest does not have, which no value it could have equals.
@@ -103,11 +96,6 @@ def versions(paths: dict[str, Any], flow: str) -> dict[semver.Version, str]:
     }
 
 
-def tags(version: semver.Version) -> tuple[str, str]:
-    """What a release of a version may be tagged."""
-    return f"v{version}", str(version)
-
-
 def read(text: str | None) -> dict[str, Any] | None:
     try:
         said = yaml.safe_load(text or "")
@@ -126,11 +114,7 @@ def decide(facts: Facts) -> tuple[list[str], list[str]]:
         head_sha, path), `jobs` (each of its jobs' conclusion, by name), `files` (each file changed at
         the run's head against the base branch, by its status), `truncated` (whether there
         were too many to list), `base` (each manifest on the base branch, by path, with its
-        text where it was read), `head` (the text of each manifest added, by path),
-        `withdrawn` (each manifest added that the base branch had before, and has no more) and
-        `upstream` (for each manifest added, by path, what its repository says: `tagged`, the
-        commit its tag `ref` points at, and `compared`, how GitHub compares its `commit` with
-        the newest version's).
+        text where it was read) and `head` (the text of each manifest added, by path).
 
     Returns:
       Nothing in the first list for a pull request to merge, and why not otherwise; and each
@@ -168,9 +152,6 @@ def decide(facts: Facts) -> tuple[list[str], list[str]]:
             continue
         flow, version = place
         needed.add(f"install {flow} {version}")
-        if path in facts["withdrawn"]:
-            why.append(f"`{flow}` {version} was published before, and withdrawn")
-            continue
         published = versions(facts["base"], flow)
         if not published:
             why.append(f"`{flow}` is a new flow")
@@ -192,27 +173,6 @@ def decide(facts: Facts) -> tuple[list[str], list[str]]:
         )
         if changed:
             why.append(f"`{flow}` {version} changes {', '.join(changed)} from {top}")
-            continue
-        ref, commit = new.get("ref"), str(new.get("commit"))
-        said = facts["upstream"].get(path) or {}
-        if ref not in tags(version):
-            why.append(
-                f"`{flow}` {version} is at ref `{ref}`, not at its tag `v{version}`"
-            )
-            continue
-        if said.get("tagged") != commit:
-            at = said.get("tagged")
-            why.append(
-                f"`{flow}` {version}'s tag `{ref}` of {new.get('repo')} "
-                + (f"is at {at[:7]}, not {commit[:7]}" if at else "is not there")
-            )
-            continue
-        if said.get("compared") != "ahead":
-            why.append(
-                f"`{flow}` {version}'s commit {commit[:7]} does not come after "
-                f"{str(old.get('commit'))[:7]}, {top}'s: GitHub compares it as "
-                f"{said.get('compared') or 'unrelated'}"
-            )
             continue
         bumps.append(f"{flow} {version}")
     if others:
@@ -252,44 +212,6 @@ def gh(*args: str) -> Any:
     return json.loads(done.stdout) if done.stdout.strip() else None
 
 
-def found(path: str) -> Any:
-    """`gh api` for what may not be there: None where GitHub says so (404 or 422)."""
-    try:
-        return gh(path)
-    except RuntimeError as error:
-        if re.search(r"\(HTTP 4(04|22)\)", str(error)):
-            return None
-        raise
-
-
-def peeled(repo: str, tag: str) -> str | None:
-    """The commit a repository's own tag points at, or None if it has no such tag."""
-    target = (found(f"repos/{repo}/git/ref/tags/{tag}") or {}).get("object")
-    while target and target["type"] == "tag":
-        target = gh(f"repos/{repo}/git/tags/{target['sha']}")["object"]
-    return target["sha"] if target and target["type"] == "commit" else None
-
-
-def follows(
-    old: dict[str, Any] | None, new: dict[str, Any] | None, version: semver.Version
-) -> dict[str, str | None]:
-    """What the repository of a version added says of it, as `upstream` in :func:`decide`.
-
-    Only the newest version's repository, read on the base branch, is asked, and only of a tag
-    and commits shaped as :func:`decide` takes them.
-    """
-    if old is None or new is None or new.get("repo") != old.get("repo"):
-        return {}
-    source, said = old["repo"], {}
-    if (ref := new.get("ref")) in tags(version):
-        said["tagged"] = peeled(source, ref)
-    before, after = old.get("commit"), new.get("commit")
-    if all(isinstance(one, str) and SHA.fullmatch(one) for one in (before, after)):
-        compared = found(f"repos/{source}/compare/{before}...{after}?per_page=1")
-        said["compared"] = (compared or {}).get("status")
-    return said
-
-
 def every(path: str, key: str | None = None) -> list[Any]:
     """Every item of a listing, across its pages."""
     pages = gh("--paginate", "--slurp", path)
@@ -326,23 +248,15 @@ def gather(repo: str, pull: dict[str, Any], run: dict[str, Any]) -> Facts:
         if one["type"] == "blob" and release(one["path"]) is not None
     }
     added: dict[str, str] = {}
-    withdrawn: list[str] = []
-    upstream: dict[str, dict[str, str | None]] = {}
     for path, status in files.items():
         place = release(path)
         if status != "added" or place is None:
             continue
         added[path] = text(repo, path, sha)
-        # Not on the base branch now, yet in its history: published once, and withdrawn.
-        if path not in listed and gh(
-            f"repos/{repo}/commits?sha={base}&path={urllib.parse.quote(path)}&per_page=1"
-        ):
-            withdrawn.append(path)
         published = versions(listed, place[0])
         if published:
             newest = published[max(published)]
             listed[newest] = listed[newest] or text(repo, newest, base)
-            upstream[path] = follows(read(listed[newest]), read(added[path]), place[1])
     jobs = (
         {
             one["name"]: one["conclusion"]
@@ -374,8 +288,6 @@ def gather(repo: str, pull: dict[str, Any], run: dict[str, Any]) -> Facts:
         "truncated": len(files) >= MANY or tree["truncated"],
         "base": listed,
         "head": added,
-        "withdrawn": withdrawn,
-        "upstream": upstream,
     }
 
 
@@ -501,9 +413,8 @@ def handle(repo: str, number: int, run: dict[str, Any], apply: bool) -> int:
         repo,
         number,
         f"Merged automatically: it adds {adds}, each a new version of a flow already listed, "
-        "never published before, the same as its newest version but for `version`, `ref` "
-        "and `commit`, and at its repository's own tag `v<version>` on a commit after the "
-        f"newest version's; and every job of validate passed on {sha}, installing it with hmz "
+        "newer than every version listed and the same as the newest but for `version`, `ref` "
+        f"and `commit`; and every job of validate passed on {sha}, installing it with hmz "
         "among them.",
     )
     return 0
