@@ -48,14 +48,6 @@ facts:
       commit: 2222222222222222222222222222222222222222
       subdir: aot
       license: Apache-2.0
-  withdrawn: []
-  # What each repository says of the versions the cases below add: the commit the tag `ref`
-  # points at, and how GitHub compares `commit` with the newest version's.
-  upstream:
-    flows/aot/0.1.1/flow.yaml: &ahead {tagged: "2222222222222222222222222222222222222222", compared: ahead}
-    flows/aot/0.1.2/flow.yaml: {tagged: "4444444444444444444444444444444444444444", compared: ahead}
-    flows/alice/kernel/0.2.0-rc.1/flow.yaml: {tagged: "3333333333333333333333333333333333333333",
-                                              compared: ahead}
 
 cases:
   - name: a new version of a flow of humanfia's
@@ -142,27 +134,6 @@ cases:
         ref: v0.1.0
         commit: 5555555555555555555555555555555555555555
         license: MIT
-
-  - name: a withdrawn version published again
-    because: "`aot` 0.1.1 was published before, and withdrawn"
-    withdrawn: [flows/aot/0.1.1/flow.yaml]
-
-  - name: a withdrawn version of a namespaced flow published again, at another commit
-    because: "`alice/kernel` 0.2.0 was published before, and withdrawn"
-    jobs: {<<: *jobs, install alice/kernel 0.2.0: success}
-    files: {flows/alice/kernel/0.2.0/flow.yaml: added}
-    withdrawn: [flows/alice/kernel/0.2.0/flow.yaml]
-    head:
-      flows/alice/kernel/0.2.0/flow.yaml: |
-        name: kernel
-        version: 0.2.0
-        description: Tunes a kernel.
-        repo: Alice/kernel-flow
-        ref: v0.2.0
-        commit: 7777777777777777777777777777777777777777
-        license: MIT
-        dependencies:
-          humanize1: ">=0.1.0,<0.2.0"
 
   - name: a version older than the newest
     because: "`aot` 0.0.10 is not newer than 0.1.0"
@@ -271,7 +242,7 @@ cases:
         subdir: aot
         license: Apache-2.0
 
-  - name: tagged without a v
+  - name: ref and commit anything, here a branch at the newest version's commit
     expect: merge
     head:
       flows/aot/0.1.1/flow.yaml: |
@@ -279,89 +250,10 @@ cases:
         version: 0.1.1
         description: The flow that writes a flow.
         repo: humanfia/aot-flow
-        ref: 0.1.1
-        commit: 2222222222222222222222222222222222222222
-        subdir: aot
-        license: Apache-2.0
-
-  - name: an older commit, rolling the flow back
-    because: "commit 2222222 does not come after 009db34, 0.1.0's: GitHub compares it as behind"
-    upstream: {flows/aot/0.1.1/flow.yaml: {<<: *ahead, compared: behind}}
-
-  - name: the newest version's commit again
-    because: "GitHub compares it as identical"
-    upstream: {flows/aot/0.1.1/flow.yaml: {<<: *ahead, compared: identical}}
-
-  - name: a commit on another line than the newest version's
-    because: "GitHub compares it as diverged"
-    upstream: {flows/aot/0.1.1/flow.yaml: {<<: *ahead, compared: diverged}}
-
-  - name: a commit the repository does not share history with
-    because: "GitHub compares it as unrelated"
-    upstream: {flows/aot/0.1.1/flow.yaml: {tagged: "2222222222222222222222222222222222222222"}}
-
-  - name: an older tag as a new version
-    because: "`aot` 0.1.1 is at ref `v0.1.0`, not at its tag `v0.1.1`"
-    head:
-      flows/aot/0.1.1/flow.yaml: |
-        name: aot
-        version: 0.1.1
-        description: The flow that writes a flow.
-        repo: humanfia/aot-flow
-        ref: v0.1.0
+        ref: main
         commit: 009db348737af610758fa495c8fb3890ff98fab9
         subdir: aot
         license: Apache-2.0
-
-  - name: a newer tag as a far newer version, holding the versions after it
-    because: "`aot` 99.0.0 is at ref `v0.1.1`, not at its tag `v99.0.0`"
-    jobs: {<<: *jobs, install aot 99.0.0: success}
-    files: {flows/aot/99.0.0/flow.yaml: added}
-    head:
-      flows/aot/99.0.0/flow.yaml: |
-        name: aot
-        version: 99.0.0
-        description: The flow that writes a flow.
-        repo: humanfia/aot-flow
-        ref: v0.1.1
-        commit: 2222222222222222222222222222222222222222
-        subdir: aot
-        license: Apache-2.0
-    upstream: {flows/aot/99.0.0/flow.yaml: *ahead}
-
-  - name: a branch
-    because: "is at ref `main`, not at its tag `v0.1.1`"
-    head:
-      flows/aot/0.1.1/flow.yaml: |
-        name: aot
-        version: 0.1.1
-        description: The flow that writes a flow.
-        repo: humanfia/aot-flow
-        ref: main
-        commit: 2222222222222222222222222222222222222222
-        subdir: aot
-        license: Apache-2.0
-
-  - name: a commit by itself, perhaps a fork's
-    because: "is at ref `2222222222222222222222222222222222222222`, not at its tag `v0.1.1`"
-    head:
-      flows/aot/0.1.1/flow.yaml: |
-        name: aot
-        version: 0.1.1
-        description: The flow that writes a flow.
-        repo: humanfia/aot-flow
-        ref: 2222222222222222222222222222222222222222
-        commit: 2222222222222222222222222222222222222222
-        subdir: aot
-        license: Apache-2.0
-
-  - name: a tag the repository does not have
-    because: "`aot` 0.1.1's tag `v0.1.1` of humanfia/aot-flow is not there"
-    upstream: {flows/aot/0.1.1/flow.yaml: {compared: ahead}}
-
-  - name: a tag at another commit
-    because: "`aot` 0.1.1's tag `v0.1.1` of humanfia/aot-flow is at 3c4c415, not 2222222"
-    upstream: {flows/aot/0.1.1/flow.yaml: {<<: *ahead, tagged: "3c4c415e5983bac91ad54dc1a8fa2b1bf7619025"}}
 
   - name: the install job did not run
     because: "validate ran no install aot 0.1.1"

@@ -85,12 +85,11 @@ may be listed by name alone, or to `None` for anybody's.
 ## Contributing
 
 To list your flow, publish it in a repository of your own and open a pull request adding its
-manifest: [CONTRIBUTING.md](CONTRIBUTING.md) is the whole guide. A new version of a flow
-already listed that changes nothing but `version`, `ref` and `commit`, at its repository's own
-tag `v<version>` on a commit after the newest version's, is merged automatically once every
-check passes, installing it with hmz among them. Report a malicious flow
-privately, as [SECURITY.md](SECURITY.md) explains. Everyone taking part follows the
-[code of conduct](CODE_OF_CONDUCT.md).
+manifest: [CONTRIBUTING.md](CONTRIBUTING.md) is the whole guide. A version of a flow already
+listed, newer than all of its others, that changes nothing but `version`, `ref` and `commit` is
+merged automatically once every check passes, installing it with hmz among them. Report a
+malicious flow privately, as [SECURITY.md](SECURITY.md) explains. Everyone taking part follows
+the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
