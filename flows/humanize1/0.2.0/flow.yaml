@@ -1,0 +1,8 @@
+name: humanize1
+version: 0.2.0
+description: "PolyArch/humanize's gen-idea, gen-plan and RLCR loops as hmz flows: plan first, then build under review."
+repo: humanfia/humanize1-flow
+ref: v0.2.0
+commit: 59e1ff74f17bac8d31ccc41330f1115f6fa314a6
+subdir: humanize1
+license: Apache-2.0
