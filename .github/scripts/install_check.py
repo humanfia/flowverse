@@ -38,15 +38,7 @@ def check(called: str, version: str) -> int:
     hmz = Hmz()
     verse = hmz.verses.add(ROOT.as_uri(), VERSE)
     name = f"@{VERSE}/{called}"
-    try:
-        done = hmz.verses.install(name, version)
-    except ValueError as error:
-        if f"'@{VERSE}'" not in str(error):
-            raise
-        # An hmz from before flowverse namespaces, which called them <verse>/<flow>.
-        name = f"{VERSE}/{called}"
-        done = hmz.verses.install(name, version)
-    for one in done:
+    for one in hmz.verses.install(name, version):
         print(f"installed {one.name} {one.version}: {one.repo} at {one.commit}")
     offered = [
         one
