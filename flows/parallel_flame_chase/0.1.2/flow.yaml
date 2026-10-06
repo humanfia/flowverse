@@ -1,8 +1,0 @@
-name: parallel_flame_chase
-version: 0.1.2
-description: Three report-driven lanes of alternating agents, with a Git PR variant.
-repo: humanfia/parallel-flame-chase-flow
-ref: v0.1.2
-commit: 005bdeb05d9c0cec9ec685d96f6611e01a8cc6da
-subdir: parallel_flame_chase
-license: Apache-2.0

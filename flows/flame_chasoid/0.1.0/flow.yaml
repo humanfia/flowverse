@@ -1,0 +1,8 @@
+name: flame_chasoid
+version: 0.1.0
+description: The flame chase and its variants (agent cleanup, fixed interrupt, parallel lanes) as subflows of one flow.
+repo: humanfia/flame-chasoid-flows
+ref: v0.1.0
+commit: 4bd14347b77f3a1299a7eb7b708365cddd02180c
+subdir: flame_chasoid
+license: Apache-2.0
