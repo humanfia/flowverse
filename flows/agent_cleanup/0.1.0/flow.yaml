@@ -1,8 +1,0 @@
-name: agent_cleanup
-version: 0.1.0
-description: A Ralph loop or a flame chase whose workspace a cleaner agent distills between turns.
-repo: humanfia/agent-cleanup-flow
-ref: v0.1.0
-commit: 62f7167a1a2180190eafba374891c00acf36c6c0
-subdir: agent_cleanup
-license: Apache-2.0

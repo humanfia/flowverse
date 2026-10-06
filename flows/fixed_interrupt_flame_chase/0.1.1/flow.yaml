@@ -1,8 +1,0 @@
-name: fixed_interrupt_flame_chase
-version: 0.1.1
-description: Two fresh sessions alternate at accepted-experiment boundaries.
-repo: humanfia/fixed-interrupt-flame-chase-flow
-ref: v0.1.1
-commit: a43abbe31cb6f180dd4fc2ef5aadb06982fb056e
-subdir: fixed_interrupt_flame_chase
-license: Apache-2.0
