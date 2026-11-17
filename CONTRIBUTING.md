@@ -7,9 +7,9 @@ once it is merged every hmz can install it. A later version that changes nothing
 is merges itself once CI passes.
 
 How to write a flow is humanize's documentation:
-[Your first flow](https://docs.humanfia.ai/humanize/weaver/writing-a-flow),
-[Testing a flow](https://docs.humanfia.ai/humanize/weaver/testing-flows) and
-[Flowverses](https://docs.humanfia.ai/humanize/weaver/flowverses). This guide covers what
+[Your first flow](https://humanfia.ai/humanize/weaver/writing-a-flow),
+[Testing a flow](https://humanfia.ai/humanize/weaver/testing-flows) and
+[Flowverses](https://humanfia.ai/humanize/weaver/flowverses). This guide covers what
 happens after.
 
 - [Submitting a flow](#submitting-a-flow)

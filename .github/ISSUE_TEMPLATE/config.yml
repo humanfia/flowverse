@@ -10,5 +10,5 @@ contact_links:
     url: https://github.com/humanfia/flowverse/blob/main/CONTRIBUTING.md
     about: Authors open a pull request adding a manifest; no issue needed.
   - name: Documentation
-    url: https://docs.humanfia.ai/humanize/
+    url: https://humanfia.ai/humanize/
     about: How to write, test and run flows.

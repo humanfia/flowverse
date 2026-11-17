@@ -80,7 +80,7 @@ may be listed by name alone, or to `None` for anybody's.
 > [!WARNING]
 > Installing a flow runs its code on your machine, and its agents work without asking for
 > approval. Review in this index lowers the risk; it does not remove it. Read
-> [Security](https://docs.humanfia.ai/humanize/user/security) first.
+> [Security](https://humanfia.ai/humanize/user/security) first.
 
 ## Contributing
 
