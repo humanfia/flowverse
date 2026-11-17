@@ -4,7 +4,7 @@ Installing a flow runs its code on your machine, with your permissions, and the 
 drives work without asking you to approve anything. Every flow in this index is reviewed before
 it is listed and pinned to the commit that was reviewed, but review lowers the risk rather than
 removing it: read a flow before you run it on work you care about. humanize's
-[Security](https://docs.humanfia.ai/humanize/user/security) guide says what to check.
+[Security](https://humanfia.ai/humanize/user/security) guide says what to check.
 
 ## Reporting
 
