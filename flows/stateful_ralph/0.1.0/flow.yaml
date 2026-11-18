@@ -1,0 +1,8 @@
+name: stateful_ralph
+version: 0.1.0
+description: 'The Ralph loop with memory, as an hmz flow: the task again and again in one session that remembers every round.'
+repo: humanfia/stateful-ralph-flow
+ref: v0.1.0
+commit: afdfaa00a7ad1b5cee313f150690372f58210ff6
+subdir: stateful_ralph
+license: Apache-2.0

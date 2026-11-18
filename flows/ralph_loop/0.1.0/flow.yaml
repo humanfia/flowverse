@@ -1,0 +1,8 @@
+name: ralph_loop
+version: 0.1.0
+description: 'The Ralph loop as an hmz flow: the task again and again, a fresh session every round, until the budget is spent.'
+repo: humanfia/ralph-loop-flow
+ref: v0.1.0
+commit: 7bd23b1b9283a6d290d6034faabde3bf1c86dd13
+subdir: ralph_loop
+license: Apache-2.0

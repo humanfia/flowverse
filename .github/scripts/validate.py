@@ -17,8 +17,8 @@ A flow of humanfia's is kept at flows/<flow>/<version>/flow.yaml and called <flo
 else's at flows/<owner>/<flow>/<version>/flow.yaml, <owner> being whoever owns its repository on
 GitHub, in lowercase, and called <owner>/<flow>. A directory under flows/ is one or the other.
 
-Offline checks run on every manifest: the schema, the directory names, SemVer, reserved names,
-who owns each repository, licenses, and dependencies, down to whether hmz could install each
+Offline checks run on every manifest: the schema, the directory names, SemVer, who owns each
+repository, licenses, and dependencies, down to whether hmz could install each
 release. With --base, every version directory that exists at that revision must be left exactly
 as it was, unless --allow-modify is given or, in GitHub Actions, a maintainer labelled the pull
 request `allow-modify`; and only the manifests added or changed since --base are "in scope". With
@@ -67,18 +67,6 @@ OWNER: str | None = "humanfia"
 #: What no value may hold: control characters and line separators. The schema's patterns,
 #: run by Python's `re`, let a trailing newline through.
 BREAK = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
-#: The flows built into humanize. A bare flow of one of these names would shadow a builtin.
-RESERVED = frozenset(
-    {
-        "chat",
-        "ralph_loop",
-        "goal",
-        "flame_chase",
-        "stateful_ralph",
-        "continue_loop",
-        "rlar",
-    }
-)
 ALLOW_MODIFY = "allow-modify"
 API = "https://api.github.com"
 #: What git says `before` is for a push that created the branch.
@@ -228,12 +216,6 @@ def layout(report: Report) -> dict[str, dict[str, Path]]:
             continue
         if any(version_of(one.name) for one in entry.iterdir()):
             if not is_flow(report, entry):
-                continue
-            if entry.name in RESERVED:
-                report.error(
-                    where,
-                    f"{entry.name!r} is a flow built into humanize, and is reserved",
-                )
                 continue
             flows = {entry.name: entry}
         else:
@@ -454,8 +436,6 @@ def check_dependencies(report: Report, manifests: dict[Path, dict[str, Any]]) ->
         for dep, ranged in manifest.get("dependencies", {}).items():
             if dep == called(path):
                 problem = f"{dep} depends on itself"
-            elif dep in RESERVED:
-                problem = f"{dep} is built into humanize, so is never listed"
             elif dep not in versions:
                 problem = f"no flow is called {dep!r} in this index"
             else:

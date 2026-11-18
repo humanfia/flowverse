@@ -89,9 +89,6 @@ happens after.
   for yours, and `octocat/my_review:strict` for one of the flows inside it. A flowverse that
   somebody adds to hmz themselves has its flows called `@<flowverse>/<flow>` and
   `@<flowverse>/<owner>/<flow>`.
-- These names belong to the flows built into humanize and are never accepted by name alone:
-  `chat`, `ralph_loop`, `goal`, `flame_chase`, `stateful_ralph`, `continue_loop`, `rlar`.
-  `octocat/chat` is fine.
 - The names in your namespace are yours. A name that impersonates another project or claims an
   affiliation it does not have is refused, as is one taken to hold it rather than to publish a
   flow. Maintainers may ask for a name to be changed before merging; a published flow keeps
@@ -156,7 +153,7 @@ dependencies:
 A range is comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`) of full versions, joined by commas,
 all of which must hold; a bare version means `==`. Each dependency must be a flow in this
 index with at least one version in range, and no flow may come to depend on itself, in any of
-its versions. The flows built into humanize are always there and are never listed.
+its versions.
 
 ## What CI checks
 
@@ -166,7 +163,7 @@ sums up the rest:
 | Job | Checks | On |
 | --- | --- | --- |
 | lint | YAML style (yamllint), workflows (actionlint, zizmor), scripts (ruff, and automerge's fixtures) | everything |
-| validate | the schema; names and versions match their directories; SemVer; reserved names; who owns each repository; nothing else in `flows/`; licenses; dependencies; published versions untouched | every manifest |
+| validate | the schema; names and versions match their directories; SemVer; who owns each repository; nothing else in `flows/`; licenses; dependencies; published versions untouched | every manifest |
 | verify | `repo` is public; `ref` resolves to `commit`; `subdir` holds the flow at that commit | the manifests you added or changed |
 | install | hmz, from `humanize`'s main branch, adds the pull request as a flowverse, installs the version with every flow it depends on, loads it and lists the flows it offers | the manifests you added or changed |
 

@@ -1,0 +1,8 @@
+name: continue_loop
+version: 0.1.0
+description: 'The continue loop as an hmz flow: the task once, then "continue" in the same session until the budget is spent.'
+repo: humanfia/continue-loop-flow
+ref: v0.1.0
+commit: 7aa3dbcb2e02aad191c5c7bb281ec76f2aa8f1f2
+subdir: continue_loop
+license: Apache-2.0

@@ -1,0 +1,8 @@
+name: rlar
+version: 0.1.0
+description: 'RLAR as an hmz flow: an actor works in one session until a fresh reviewer, reading the repository each round, says the task is done.'
+repo: humanfia/rlar-flow
+ref: v0.1.0
+commit: 7694ab04461549483ad244577e2217987a19a63b
+subdir: rlar
+license: Apache-2.0
