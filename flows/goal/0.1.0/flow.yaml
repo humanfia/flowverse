@@ -1,0 +1,8 @@
+name: goal
+version: 0.1.0
+description: 'The harness''s own /goal as an hmz flow: the task set once as the agent''s goal, worked until it is met or the budget is spent.'
+repo: humanfia/goal-flow
+ref: v0.1.0
+commit: 3f516e5d38120ddd8d8e21bfe7955774bd568476
+subdir: goal
+license: Apache-2.0

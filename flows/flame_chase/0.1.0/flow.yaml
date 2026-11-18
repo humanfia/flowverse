@@ -1,0 +1,8 @@
+name: flame_chase
+version: 0.1.0
+description: 'The flame chase as an hmz flow: two agents take turns on the same task, each turn a fresh session, until the budget is spent.'
+repo: humanfia/flame-chase-flow
+ref: v0.1.0
+commit: 420e34943d1a78bac43e8646c66059a56799d9b7
+subdir: flame_chase
+license: Apache-2.0

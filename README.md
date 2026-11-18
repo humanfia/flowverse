@@ -56,8 +56,9 @@ hmz calls each flow what its directory here says: `recursive_lean_prover`, `alic
 `humanize1:rlcr` for a flow inside one. The flows of a flowverse you add yourself are
 `@<flowverse>/<flow>` and `@<flowverse>/<owner>/<flow>`.
 
-The loops humanize is built around (`chat`, `ralph_loop`, `goal`, `flame_chase`,
-`stateful_ralph`, `continue_loop`, `rlar`) ship inside humanize itself and are not listed here.
+humanize ships no flow of its own. The loops it is built around (`ralph_loop`, `goal`,
+`flame_chase`, `stateful_ralph`, `continue_loop`, `rlar`) are listed here like any other flow,
+and are installed like any other.
 
 ## Install
 
